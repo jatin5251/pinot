@@ -37,7 +37,7 @@ public class ServiceStartableUtils {
   private static final String CLUSTER_CONFIG_ZK_PATH_TEMPLATE = "/%s/CONFIGS/CLUSTER/%s";
   private static final String PINOT_ALL_CONFIG_KEY_PREFIX = "pinot.all.";
   private static final String PINOT_INSTANCE_CONFIG_KEY_PREFIX_TEMPLATE = "pinot.%s.";
-  private static final int ZK_TIMEOUT_MS = 30_000;
+  private static final int ZK_TIMEOUT_MS = 150_000;
 
   /**
    * Applies the ZK cluster config to the given instance config if it does not already exist.
