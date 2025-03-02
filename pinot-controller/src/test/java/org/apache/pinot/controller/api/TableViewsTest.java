@@ -18,11 +18,11 @@
  */
 package org.apache.pinot.controller.api;
 
-import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.Map;
 import org.apache.helix.InstanceType;
+import org.apache.pinot.common.utils.URIUtils;
 import org.apache.pinot.controller.api.resources.TableViews;
 import org.apache.pinot.controller.helix.ControllerTest;
 import org.apache.pinot.controller.utils.SegmentMetadataMockUtils;
@@ -34,12 +34,16 @@ import org.apache.pinot.spi.utils.InstanceTypeUtils;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
+import org.apache.pinot.util.TestUtils;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
-import static org.testng.Assert.*;
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotNull;
+import static org.testng.Assert.assertNull;
+import static org.testng.Assert.assertTrue;
 
 
 public class TableViewsTest extends ControllerTest {
@@ -53,50 +57,42 @@ public class TableViewsTest extends ControllerTest {
     DEFAULT_INSTANCE.setupSharedStateAndValidate();
 
     // Create the offline table and add one segment
+    DEFAULT_INSTANCE.addDummySchema(OFFLINE_TABLE_NAME);
     TableConfig tableConfig =
         new TableConfigBuilder(TableType.OFFLINE).setTableName(OFFLINE_TABLE_NAME).setNumReplicas(2).build();
     assertEquals(DEFAULT_INSTANCE.getHelixManager().getInstanceType(), InstanceType.CONTROLLER);
     DEFAULT_INSTANCE.getHelixResourceManager().addTable(tableConfig);
     DEFAULT_INSTANCE.getHelixResourceManager()
         .addNewSegment(TableNameBuilder.OFFLINE.tableNameWithType(OFFLINE_TABLE_NAME),
-            SegmentMetadataMockUtils.mockSegmentMetadata(OFFLINE_TABLE_NAME, OFFLINE_SEGMENT_NAME), "downloadUrl");
+            SegmentMetadataMockUtils.mockSegmentMetadata(OFFLINE_TABLE_NAME, OFFLINE_SEGMENT_NAME),
+            getDownloadURL(DEFAULT_INSTANCE.getHelixResourceManager().getDataDir(), OFFLINE_TABLE_NAME,
+                OFFLINE_SEGMENT_NAME));
 
     // Create the hybrid table
+    DEFAULT_INSTANCE.addDummySchema(HYBRID_TABLE_NAME);
     tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(HYBRID_TABLE_NAME)
         .setNumReplicas(DEFAULT_MIN_NUM_REPLICAS).build();
     DEFAULT_INSTANCE.getHelixResourceManager().addTable(tableConfig);
-
-    // add schema for realtime table
-    DEFAULT_INSTANCE.addDummySchema(HYBRID_TABLE_NAME);
-    StreamConfig streamConfig = FakeStreamConfigUtils.getDefaultHighLevelStreamConfigs();
+    StreamConfig streamConfig = FakeStreamConfigUtils.getDefaultLowLevelStreamConfigs(4);
     tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(HYBRID_TABLE_NAME)
         .setNumReplicas(DEFAULT_MIN_NUM_REPLICAS).setStreamConfigs(streamConfig.getStreamConfigsMap()).build();
     DEFAULT_INSTANCE.getHelixResourceManager().addTable(tableConfig);
 
     // Wait for external view get updated
-    long endTime = System.currentTimeMillis() + 10_000L;
-    while (System.currentTimeMillis() < endTime) {
-      Thread.sleep(100L);
-      TableViews.TableView tableView;
+    TestUtils.waitForCondition(aVoid -> {
       try {
-        tableView = getTableView(OFFLINE_TABLE_NAME, TableViews.EXTERNALVIEW, null);
-      } catch (IOException e) {
-        // Table may not be created yet.
-        continue;
+        TableViews.TableView tableView = getTableView(OFFLINE_TABLE_NAME, TableViews.EXTERNALVIEW, null);
+        if (tableView._offline == null || tableView._offline.size() != 1) {
+          return false;
+        }
+        tableView = getTableView(HYBRID_TABLE_NAME, TableViews.EXTERNALVIEW, null);
+        return tableView._offline != null && tableView._realtime != null
+            && tableView._realtime.size() == DEFAULT_NUM_SERVER_INSTANCES;
+      } catch (Exception e) {
+        // Expected before external view is created
+        return false;
       }
-      if ((tableView._offline == null) || (tableView._offline.size() != 1)) {
-        continue;
-      }
-      tableView = getTableView(HYBRID_TABLE_NAME, TableViews.EXTERNALVIEW, null);
-      if (tableView._offline == null) {
-        continue;
-      }
-      if ((tableView._realtime == null) || (tableView._realtime.size() != DEFAULT_NUM_SERVER_INSTANCES)) {
-        continue;
-      }
-      return;
-    }
-    fail("Failed to get external view updated");
+    }, 10_000L, "Failed to get external view updated");
   }
 
   @DataProvider(name = "viewProvider")
@@ -173,6 +169,10 @@ public class TableViewsTest extends ControllerTest {
     return JsonUtils.stringToObject(
         sendGetRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableView(tableName, view, tableType)),
         TableViews.TableView.class);
+  }
+
+  private String getDownloadURL(String controllerDataDir, String rawTableName, String segmentId) {
+    return URIUtils.getUri(controllerDataDir, rawTableName, URIUtils.encode(segmentId)).toString();
   }
 
   @AfterClass

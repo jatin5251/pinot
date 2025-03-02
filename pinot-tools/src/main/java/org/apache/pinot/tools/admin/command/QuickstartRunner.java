@@ -24,10 +24,16 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import org.apache.commons.io.FileUtils;
+import org.apache.helix.HelixManager;
+import org.apache.helix.HelixManagerFactory;
+import org.apache.helix.InstanceType;
+import org.apache.helix.model.HelixConfigScope;
+import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.config.tenant.TenantRole;
 import org.apache.pinot.spi.env.PinotConfiguration;
@@ -47,16 +53,12 @@ public class QuickstartRunner {
   private static final int ZK_PORT = 2123;
   private static final String ZK_ADDRESS = "localhost:" + ZK_PORT;
 
-  private static final int DEFAULT_CONTROLLER_PORT = 9000;
+  public static final int DEFAULT_CONTROLLER_PORT = 9000;
   private static final int DEFAULT_BROKER_PORT = 8000;
   private static final int DEFAULT_SERVER_ADMIN_API_PORT = 7500;
   private static final int DEFAULT_SERVER_NETTY_PORT = 7050;
   private static final int DEFAULT_SERVER_GRPC_PORT = 7100;
   private static final int DEFAULT_MINION_PORT = 6000;
-
-  private static final int DEFAULT_BROKER_MULTISTAGE_RUNNER_PORT = 8421;
-  private static final int DEFAULT_SERVER_MULTISTAGE_RUNNER_PORT = 8442;
-  private static final int DEFAULT_SERVER_MULTISTAGE_SERVER_PORT = 8842;
 
   private static final String DEFAULT_ZK_DIR = "PinotZkDir";
   private static final String DEFAULT_CONTROLLER_DIR = "PinotControllerDir";
@@ -72,6 +74,7 @@ public class QuickstartRunner {
   private final boolean _enableTenantIsolation;
   private final AuthProvider _authProvider;
   private final Map<String, Object> _configOverrides;
+  private final Map<String, String> _clusterConfigOverrides;
   private final boolean _deleteExistingData;
 
   // If this field is non-null, an embedded Zookeeper instance will not be launched
@@ -85,12 +88,13 @@ public class QuickstartRunner {
       int numServers, int numMinions, File tempDir, Map<String, Object> configOverrides)
       throws Exception {
     this(tableRequests, numControllers, numBrokers, numServers, numMinions, tempDir, true, null, configOverrides, null,
-        true);
+        true, Map.of());
   }
 
   public QuickstartRunner(List<QuickstartTableRequest> tableRequests, int numControllers, int numBrokers,
       int numServers, int numMinions, File tempDir, boolean enableIsolation, AuthProvider authProvider,
-      Map<String, Object> configOverrides, String zkExternalAddress, boolean deleteExistingData)
+      Map<String, Object> configOverrides, String zkExternalAddress, boolean deleteExistingData,
+      Map<String, String> clusterConfigOverrides)
       throws Exception {
     _tableRequests = tableRequests;
     _numControllers = numControllers;
@@ -100,7 +104,13 @@ public class QuickstartRunner {
     _tempDir = tempDir;
     _enableTenantIsolation = enableIsolation;
     _authProvider = authProvider;
-    _configOverrides = configOverrides;
+    _configOverrides = new HashMap<>(configOverrides);
+    _clusterConfigOverrides = clusterConfigOverrides;
+    if (numMinions > 0) {
+      // configure the controller to schedule tasks when minion is enabled
+      _configOverrides.put("controller.task.scheduler.enabled", true);
+      _configOverrides.put("controller.task.skipLateCronSchedule", true);
+    }
     _zkExternalAddress = zkExternalAddress;
     _deleteExistingData = deleteExistingData;
     if (deleteExistingData) {
@@ -125,10 +135,21 @@ public class QuickstartRunner {
           .setTenantIsolation(_enableTenantIsolation)
           .setDataDir(new File(_tempDir, DEFAULT_CONTROLLER_DIR + i).getAbsolutePath())
           .setConfigOverrides(_configOverrides);
+
       if (!controllerStarter.execute()) {
         throw new RuntimeException("Failed to start Controller");
       }
       _controllerPorts.add(DEFAULT_CONTROLLER_PORT + i);
+    }
+
+    HelixManager helixManager =
+        HelixManagerFactory.getZKHelixManager(CLUSTER_NAME, "localhost_" + _controllerPorts.get(0),
+            InstanceType.CONTROLLER, _zkExternalAddress != null ? _zkExternalAddress : ZK_ADDRESS);
+    helixManager.connect();
+    HelixConfigScope scope =
+        new HelixConfigScopeBuilder(HelixConfigScope.ConfigScopeProperty.CLUSTER).forCluster(CLUSTER_NAME).build();
+    for (Map.Entry<String, String> entry : _clusterConfigOverrides.entrySet()) {
+      helixManager.getConfigAccessor().set(scope, entry.getKey(), entry.getValue());
     }
   }
 
@@ -137,7 +158,6 @@ public class QuickstartRunner {
     for (int i = 0; i < _numBrokers; i++) {
       StartBrokerCommand brokerStarter = new StartBrokerCommand();
       brokerStarter.setPort(DEFAULT_BROKER_PORT + i)
-          .setBrokerMultiStageRunnerPort(DEFAULT_BROKER_MULTISTAGE_RUNNER_PORT + i)
           .setZkAddress(_zkExternalAddress != null ? _zkExternalAddress : ZK_ADDRESS).setClusterName(CLUSTER_NAME)
           .setConfigOverrides(_configOverrides);
       if (!brokerStarter.execute()) {
@@ -153,8 +173,6 @@ public class QuickstartRunner {
       StartServerCommand serverStarter = new StartServerCommand();
       serverStarter.setPort(DEFAULT_SERVER_NETTY_PORT + i).setAdminPort(DEFAULT_SERVER_ADMIN_API_PORT + i)
           .setGrpcPort(DEFAULT_SERVER_GRPC_PORT + i)
-          .setMultiStageServerPort(DEFAULT_SERVER_MULTISTAGE_SERVER_PORT + i)
-          .setMultiStageRunnerPort(DEFAULT_SERVER_MULTISTAGE_RUNNER_PORT + i)
           .setZkAddress(_zkExternalAddress != null ? _zkExternalAddress : ZK_ADDRESS).setClusterName(CLUSTER_NAME)
           .setDataDir(new File(_tempDir, DEFAULT_SERVER_DATA_DIR + i).getAbsolutePath())
           .setSegmentDir(new File(_tempDir, DEFAULT_SERVER_SEGMENT_DIR + i).getAbsolutePath())
@@ -230,7 +248,7 @@ public class QuickstartRunner {
       throws Exception {
     for (QuickstartTableRequest request : _tableRequests) {
       if (!new BootstrapTableTool("http", "localhost", _controllerPorts.get(0),
-          request.getBootstrapTableDir(), _authProvider).execute()) {
+          request.getBootstrapTableDir(), _authProvider, request.getValidationTypesToSkip()).execute()) {
         throw new RuntimeException("Failed to bootstrap table with request - " + request);
       }
     }

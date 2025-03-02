@@ -47,6 +47,8 @@ public class BatchConfigProperties {
   public static final String SEGMENT_NAME_GENERATOR_TYPE = "segmentNameGenerator.type";
   public static final String SEGMENT_NAME_GENERATOR_PROP_PREFIX = "segmentNameGenerator.configs";
   public static final String SEGMENT_NAME = "segment.name";
+  public static final String SEGMENT_PARTITION_ID = "segment.partitionId";
+  public static final String SEGMENT_UPLOAD_TIME_MS = "segment.uploadTimeMs";
   public static final String SEGMENT_NAME_PREFIX = "segment.name.prefix";
   public static final String SEGMENT_NAME_POSTFIX = "segment.name.postfix";
   public static final String EXCLUDE_SEQUENCE_ID = "exclude.sequence.id";
@@ -62,6 +64,10 @@ public class BatchConfigProperties {
   public static final String FAIL_ON_EMPTY_SEGMENT = "fail.on.empty.segment";
   public static final String AUTH_TOKEN = "authToken";
   public static final String APPEND_UUID_TO_SEGMENT_NAME = "append.uuid.to.segment.name";
+  public static final String EXCLUDE_TIME_IN_SEGMENT_NAME = "exclude.time.in.segment.name";
+  public static final String BATCH_SEGMENT_UPLOAD = "batchSegmentUpload";
+  public static final String TASK_NAME_PREFIX_KEY = "taskNamePrefix";
+  public static final String TASK_NAME_SUFFIX_KEY = "taskNameSuffix";
 
   public static final String OUTPUT_SEGMENT_DIR_URI = "output.segment.dir.uri";
 
@@ -73,6 +79,7 @@ public class BatchConfigProperties {
     public static final String SIMPLE = "simple";
     public static final String NORMALIZED_DATE = "normalizedDate";
     public static final String FIXED = "fixed";
+    public static final String UPLOADED_REALTIME = "uploadedRealtime";
     public static final String INPUT_FILE = "inputFile";
   }
 

@@ -18,79 +18,108 @@
  */
 package org.apache.pinot.plugin.stream.pulsar;
 
+import java.io.Closeable;
 import java.io.IOException;
-import java.util.List;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.Optional;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.pinot.spi.stream.StreamConfig;
+import org.apache.pulsar.client.admin.PulsarAdmin;
+import org.apache.pulsar.client.admin.PulsarAdminBuilder;
 import org.apache.pulsar.client.api.Authentication;
 import org.apache.pulsar.client.api.AuthenticationFactory;
 import org.apache.pulsar.client.api.ClientBuilder;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Reader;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.pulsar.client.impl.auth.oauth2.AuthenticationFactoryOAuth2;
+
+import static com.google.common.base.Preconditions.checkArgument;
 
 
 /**
  * Manages the Pulsar client connection, given the partition id and {@link PulsarConfig}
  */
-public class PulsarPartitionLevelConnectionHandler {
-  private static final Logger LOGGER = LoggerFactory.getLogger(PulsarPartitionLevelConnectionHandler.class);
-
+public class PulsarPartitionLevelConnectionHandler implements Closeable {
   protected final PulsarConfig _config;
   protected final String _clientId;
-  protected final int _partition;
-  protected final String _topic;
-  protected PulsarClient _pulsarClient = null;
-  protected Reader<byte[]> _reader = null;
+  protected final PulsarClient _pulsarClient;
 
   /**
    * Creates a new instance of {@link PulsarClient} and {@link Reader}
    */
-  public PulsarPartitionLevelConnectionHandler(String clientId, StreamConfig streamConfig, int partition) {
+  protected PulsarPartitionLevelConnectionHandler(String clientId, StreamConfig streamConfig) {
     _config = new PulsarConfig(streamConfig, clientId);
     _clientId = clientId;
-    _partition = partition;
-    _topic = _config.getPulsarTopicName();
+    _pulsarClient = createPulsarClient();
+  }
 
+  private PulsarClient createPulsarClient() {
+    ClientBuilder clientBuilder = PulsarClient.builder().serviceUrl(_config.getBootstrapServers());
     try {
-      ClientBuilder pulsarClientBuilder = PulsarClient.builder().serviceUrl(_config.getBootstrapServers());
-      if (_config.getTlsTrustCertsFilePath() != null) {
-        pulsarClientBuilder.tlsTrustCertsFilePath(_config.getTlsTrustCertsFilePath());
-      }
-
-      if (_config.getAuthenticationToken() != null) {
-        Authentication authentication = AuthenticationFactory.token(_config.getAuthenticationToken());
-        pulsarClientBuilder.authentication(authentication);
-      }
-
-      _pulsarClient = pulsarClientBuilder.build();
-
-      _reader = _pulsarClient.newReader().topic(getPartitionedTopicName(partition))
-          .startMessageId(_config.getInitialMessageId()).startMessageIdInclusive().create();
-
-      LOGGER.info("Created consumer with id {} for topic {}", _reader, _config.getPulsarTopicName());
+      Optional.ofNullable(_config.getTlsTrustCertsFilePath())
+          .filter(StringUtils::isNotBlank)
+          .ifPresent(clientBuilder::tlsTrustCertsFilePath);
+      Optional.ofNullable(authenticationConfig()).ifPresent(clientBuilder::authentication);
+      return clientBuilder.build();
     } catch (Exception e) {
-      LOGGER.error("Could not create pulsar consumer", e);
+      throw new RuntimeException("Caught exception while creating Pulsar client", e);
+    }
+  }
+
+  protected PulsarAdmin createPulsarAdmin() {
+    checkArgument(StringUtils.isNotBlank(_config.getServiceHttpUrl()),
+        "Service HTTP URL must be provided to perform admin operations");
+
+    PulsarAdminBuilder adminBuilder = PulsarAdmin.builder().serviceHttpUrl(_config.getServiceHttpUrl());
+    try {
+      Optional.ofNullable(_config.getTlsTrustCertsFilePath())
+          .filter(StringUtils::isNotBlank)
+          .ifPresent(adminBuilder::tlsTrustCertsFilePath);
+      Optional.ofNullable(authenticationConfig()).ifPresent(adminBuilder::authentication);
+      return adminBuilder.build();
+    } catch (Exception e) {
+      throw new RuntimeException("Caught exception while creating Pulsar admin", e);
     }
   }
 
   /**
-   * A pulsar partitioned topic with N partitions is comprised of N topics with topicName as prefix and portitionId
-   * as suffix.
-   * The method fetches the names of N partitioned topic and returns the topic name of {@param partition}
+   * Creates and returns an {@link Authentication} object based on the configuration.
+   *
+   * @return an Authentication object
    */
-  protected String getPartitionedTopicName(int partition)
-      throws Exception {
-    List<String> partitionTopicList = _pulsarClient.getPartitionsForTopic(_topic).get();
-    return partitionTopicList.get(partition);
+  private Authentication authenticationConfig()
+      throws MalformedURLException {
+    String authenticationToken = _config.getAuthenticationToken();
+    if (StringUtils.isNotBlank(authenticationToken)) {
+      return AuthenticationFactory.token(authenticationToken);
+    } else {
+      return oAuth2AuthenticationConfig();
+    }
   }
 
+  /**
+   * Creates and returns an OAuth2 {@link Authentication} object.
+   *
+   * @return an OAuth2 Authentication object
+   */
+  private Authentication oAuth2AuthenticationConfig()
+      throws MalformedURLException {
+    String issuerUrl = _config.getIssuerUrl();
+    String credentialsFilePath = _config.getCredentialsFilePath();
+    String audience = _config.getAudience();
+
+    if (StringUtils.isNotBlank(issuerUrl) && StringUtils.isNotBlank(credentialsFilePath) && StringUtils.isNotBlank(
+        audience)) {
+      return AuthenticationFactoryOAuth2.clientCredentials(new URL(issuerUrl), new URL(credentialsFilePath),
+          audience);
+    }
+    return null;
+  }
+
+  @Override
   public void close()
       throws IOException {
-    if (_reader != null) {
-      _reader.close();
-    }
-
     if (_pulsarClient != null) {
       _pulsarClient.close();
     }

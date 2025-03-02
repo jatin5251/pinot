@@ -31,9 +31,11 @@ import java.net.URL;
 import java.util.List;
 import java.util.Map;
 import org.apache.commons.io.FileUtils;
+import org.apache.hc.core5.http.HttpException;
 import org.apache.pinot.common.auth.AuthProviderUtils;
 import org.apache.pinot.common.minion.MinionClient;
-import org.apache.pinot.common.utils.TlsUtils;
+import org.apache.pinot.common.utils.tls.TlsUtils;
+import org.apache.pinot.controller.api.resources.PinotTaskRestletResource;
 import org.apache.pinot.core.common.MinionConstants;
 import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.config.table.TableConfig;
@@ -61,9 +63,10 @@ public class BootstrapTableTool {
   private final AuthProvider _authProvider;
   private final String _tableDir;
   private final MinionClient _minionClient;
+  private final String _validationTypesToSkip;
 
   public BootstrapTableTool(String controllerProtocol, String controllerHost, int controllerPort, String tableDir,
-      AuthProvider authProvider) {
+      AuthProvider authProvider, String validationTypesToSkip) {
     Preconditions.checkNotNull(controllerProtocol);
     Preconditions.checkNotNull(controllerHost);
     Preconditions.checkNotNull(tableDir);
@@ -74,6 +77,13 @@ public class BootstrapTableTool {
     _minionClient =
         new MinionClient(String.format("%s://%s:%s", controllerProtocol, controllerHost, controllerPort), authProvider);
     _authProvider = authProvider;
+    _validationTypesToSkip = validationTypesToSkip;
+  }
+
+  public BootstrapTableTool(String controllerProtocol, String controllerHost, int controllerPort, String tableDir,
+      AuthProvider authProvider) {
+    this(controllerProtocol, controllerHost, controllerPort, tableDir,
+        authProvider, null);
   }
 
   public boolean execute()
@@ -136,6 +146,7 @@ public class BootstrapTableTool {
     return new AddTableCommand().setSchemaFile(schemaFile.getAbsolutePath())
         .setOfflineTableConfigFile(offlineTableConfigFile.getAbsolutePath())
         .setRealtimeTableConfigFile(realtimeTableConfigFile.getAbsolutePath())
+        .setValidationTypesToSkip(_validationTypesToSkip)
         .setControllerProtocol(_controllerProtocol).setControllerHost(_controllerHost)
         .setControllerPort(String.valueOf(_controllerPort)).setExecute(true).setAuthProvider(_authProvider).execute();
   }
@@ -195,7 +206,7 @@ public class BootstrapTableTool {
 
   private boolean setupOfflineData(File setupTableTmpDir, TableConfig tableConfig, String tableName,
       File ingestionJobSpecFile)
-      throws IOException {
+      throws IOException, HttpException {
     if (tableConfig.getTaskConfig() != null && tableConfig.getTaskConfig()
         .isTaskTypeEnabled(MinionConstants.SegmentGenerationAndPushTask.TASK_TYPE)) {
       final Map<String, String> scheduledTasks =
@@ -298,6 +309,11 @@ public class BootstrapTableTool {
       try {
         boolean allCompleted = true;
         for (String taskType : scheduledTasks.keySet()) {
+          // ignore the error message entries
+          if (taskType.equals(PinotTaskRestletResource.GENERATION_ERRORS_KEY)
+              || taskType.equals(PinotTaskRestletResource.SCHEDULING_ERRORS_KEY)) {
+            continue;
+          }
           String taskName = scheduledTasks.get(taskType);
           String taskState = _minionClient.getTaskState(taskName);
           if (!COMPLETED.equalsIgnoreCase(taskState)) {

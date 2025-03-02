@@ -18,11 +18,13 @@
  */
 package org.apache.pinot.query.type;
 
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
 import org.apache.calcite.rel.type.RelDataType;
-import org.apache.calcite.rel.type.RelDataTypeSystem;
 import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.pinot.spi.data.ComplexFieldSpec;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
 
@@ -31,55 +33,79 @@ import org.apache.pinot.spi.data.Schema;
  * Extends Java-base TypeFactory from Calcite.
  *
  * <p>{@link JavaTypeFactoryImpl} is used here because we are not overriding much of the TypeFactory methods
- * required by Calcite. We will start extending {@link SqlTypeFactoryImpl} or even {@link RelDataTypeFactory}
- * when necessary for Pinot to override such mechanism.
+ * required by Calcite. We will start extending {@link org.apache.calcite.sql.type.SqlTypeFactoryImpl} or even
+ * {@link org.apache.calcite.rel.type.RelDataTypeFactory} when necessary for Pinot to override such mechanism.
  *
  * <p>Noted that {@link JavaTypeFactoryImpl} is subject to change. Please pay extra attention to this class when
  * upgrading Calcite versions.
  */
 public class TypeFactory extends JavaTypeFactoryImpl {
 
-  public TypeFactory(RelDataTypeSystem typeSystem) {
-    super(typeSystem);
+  public static final TypeFactory INSTANCE = new TypeFactory();
+
+  public TypeFactory() {
+    super(TypeSystem.INSTANCE);
+  }
+
+  @Override
+  public Charset getDefaultCharset() {
+    return StandardCharsets.UTF_8;
   }
 
   public RelDataType createRelDataTypeFromSchema(Schema schema) {
     Builder builder = new Builder(this);
-    for (Map.Entry<String, FieldSpec> e : schema.getFieldSpecMap().entrySet()) {
-      builder.add(e.getKey(), toRelDataType(e.getValue()));
+    boolean enableNullHandling = schema.isEnableColumnBasedNullHandling();
+    for (Map.Entry<String, FieldSpec> entry : schema.getFieldSpecMap().entrySet()) {
+      builder.add(entry.getKey(), toRelDataType(entry.getValue(), enableNullHandling));
     }
     return builder.build();
   }
 
-  private RelDataType toRelDataType(FieldSpec fieldSpec) {
+  private RelDataType toRelDataType(FieldSpec fieldSpec, boolean enableNullHandling) {
+    SqlTypeName sqlTypeName = getSqlTypeName(fieldSpec);
+    RelDataType type;
+    if (sqlTypeName == SqlTypeName.MAP) {
+      ComplexFieldSpec.MapFieldSpec mapFieldSpec = ComplexFieldSpec.toMapFieldSpec((ComplexFieldSpec) fieldSpec);
+      type = createMapType(createSqlType(getSqlTypeName(mapFieldSpec.getKeyFieldSpec())),
+          createSqlType(getSqlTypeName(mapFieldSpec.getValueFieldSpec())));
+    } else {
+      type = createSqlType(sqlTypeName);
+      if (!fieldSpec.isSingleValueField()) {
+        type = createArrayType(type, -1);
+      }
+    }
+    return enableNullHandling && fieldSpec.isNullable() ? createTypeWithNullability(type, true) : type;
+  }
+
+  private static SqlTypeName getSqlTypeName(FieldSpec fieldSpec) {
     switch (fieldSpec.getDataType()) {
       case INT:
-        return createSqlType(SqlTypeName.INTEGER);
+        return SqlTypeName.INTEGER;
       case LONG:
-        return createSqlType(SqlTypeName.BIGINT);
+        return SqlTypeName.BIGINT;
       case FLOAT:
-        return createSqlType(SqlTypeName.FLOAT);
+        return SqlTypeName.REAL;
       case DOUBLE:
-        return createSqlType(SqlTypeName.DOUBLE);
+        return SqlTypeName.DOUBLE;
       case BOOLEAN:
-        return createSqlType(SqlTypeName.BOOLEAN);
+        return SqlTypeName.BOOLEAN;
       case TIMESTAMP:
-        return createSqlType(SqlTypeName.TIMESTAMP);
+        return SqlTypeName.TIMESTAMP;
       case STRING:
-        return createSqlType(SqlTypeName.VARCHAR);
-      case BYTES:
-        return createSqlType(SqlTypeName.VARBINARY);
-      case BIG_DECIMAL:
-        return createSqlType(SqlTypeName.DECIMAL);
       case JSON:
-        // TODO: support JSON, JSON should be supported using a special RelDataType as it is not a simple String,
-        // nor can it be easily parsed as a STRUCT.
+        return SqlTypeName.VARCHAR;
+      case BYTES:
+        return SqlTypeName.VARBINARY;
+      case BIG_DECIMAL:
+        return SqlTypeName.DECIMAL;
+      case MAP:
+        return SqlTypeName.MAP;
       case LIST:
         // TODO: support LIST, MV column should go fall into this category.
       case STRUCT:
-      case MAP:
       default:
-        throw new UnsupportedOperationException("unsupported!");
+        String message = String.format("Unsupported type: %s ", fieldSpec.getDataType());
+        throw new UnsupportedOperationException(message);
     }
   }
 }

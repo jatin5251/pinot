@@ -23,7 +23,7 @@ import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.util.HashMap;
 import java.util.Map;
-import org.apache.commons.configuration.ConfigurationException;
+import org.apache.commons.configuration2.ex.ConfigurationException;
 import org.apache.pinot.controller.ControllerConf;
 import org.apache.pinot.spi.services.ServiceRole;
 import org.apache.pinot.spi.utils.NetUtils;
@@ -38,15 +38,12 @@ import picocli.CommandLine;
  * Class to implement StartController command.
  *
  */
-@CommandLine.Command(name = "StartController")
+@CommandLine.Command(name = "StartController", mixinStandardHelpOptions = true)
 public class StartControllerCommand extends AbstractBaseAdminCommand implements Command {
   private static final Logger LOGGER = LoggerFactory.getLogger(StartControllerCommand.class);
 
   @CommandLine.Option(names = {"-controllerMode"}, description = "Pinot controller mode.")
   private ControllerConf.ControllerMode _controllerMode = ControllerConf.ControllerMode.DUAL;
-
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, description = "Print this message.")
-  private boolean _help = false;
 
   @CommandLine.Option(names = {"-controllerHost"}, required = false, description = "host name for controller.")
   private String _controllerHost;
@@ -73,12 +70,8 @@ public class StartControllerCommand extends AbstractBaseAdminCommand implements 
   // This can be set via the set method, or via config file input.
   private boolean _tenantIsolation = true;
 
+  @CommandLine.Option(names = {"-configOverride"}, required = false, split = ",")
   private Map<String, Object> _configOverrides = new HashMap<>();
-
-  @Override
-  public boolean getHelp() {
-    return _help;
-  }
 
   public ControllerConf.ControllerMode getControllerMode() {
     return _controllerMode;
@@ -179,7 +172,7 @@ public class StartControllerCommand extends AbstractBaseAdminCommand implements 
   public boolean execute()
       throws Exception {
     try {
-      LOGGER.info("Executing command: " + toString());
+      LOGGER.info("Executing command: {}", toString());
       Map<String, Object> controllerConf = getControllerConf();
       StartServiceManagerCommand startServiceManagerCommand =
           new StartServiceManagerCommand().setZkAddress(_zkAddress).setClusterName(_clusterName).setPort(-1)

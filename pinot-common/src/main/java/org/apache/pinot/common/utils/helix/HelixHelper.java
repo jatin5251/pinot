@@ -18,7 +18,6 @@
  */
 package org.apache.pinot.common.utils.helix;
 
-import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -26,16 +25,14 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.Callable;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
-import org.apache.commons.collections.CollectionUtils;
-import org.apache.helix.AccessOption;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixManager;
-import org.apache.helix.PropertyKey;
 import org.apache.helix.PropertyKey.Builder;
 import org.apache.helix.model.ExternalView;
 import org.apache.helix.model.HelixConfigScope;
@@ -45,7 +42,6 @@ import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.helix.zookeeper.datamodel.serializer.ZNRecordSerializer;
-import org.apache.helix.zookeeper.zkclient.exception.ZkBadVersionException;
 import org.apache.pinot.common.helix.ExtraInstanceConfig;
 import org.apache.pinot.common.metadata.ZKMetadataProvider;
 import org.apache.pinot.common.utils.config.TagNameUtils;
@@ -64,14 +60,13 @@ public class HelixHelper {
   private HelixHelper() {
   }
 
-  private static final int NUM_PARTITIONS_THRESHOLD_TO_ENABLE_COMPRESSION = 1000;
-  private static final String ENABLE_COMPRESSIONS_KEY = "enableCompression";
-
   private static final RetryPolicy DEFAULT_RETRY_POLICY = RetryPolicies.exponentialBackoffRetryPolicy(5, 1000L, 2.0f);
   private static final RetryPolicy DEFAULT_TABLE_IDEALSTATES_UPDATE_RETRY_POLICY =
       RetryPolicies.randomDelayRetryPolicy(20, 100L, 200L);
+
   private static final Logger LOGGER = LoggerFactory.getLogger(HelixHelper.class);
   private static final ZNRecordSerializer ZN_RECORD_SERIALIZER = new ZNRecordSerializer();
+  private static final IdealStateGroupCommit IDEAL_STATE_GROUP_COMMIT = new IdealStateGroupCommit();
 
   private static final String ONLINE = "ONLINE";
   private static final String OFFLINE = "OFFLINE";
@@ -83,95 +78,20 @@ public class HelixHelper {
         (ZNRecord) ZN_RECORD_SERIALIZER.deserialize(ZN_RECORD_SERIALIZER.serialize(idealState.getRecord())));
   }
 
-  /**
-   * Updates the ideal state, retrying if necessary in case of concurrent updates to the ideal state.
-   *
-   * @param helixManager The HelixManager used to interact with the Helix cluster
-   * @param resourceName The resource for which to update the ideal state
-   * @param updater A function that returns an updated ideal state given an input ideal state
-   * @return updated ideal state if successful, null if not
-   */
-  public static IdealState updateIdealState(final HelixManager helixManager, final String resourceName,
-      final Function<IdealState, IdealState> updater, RetryPolicy policy, final boolean noChangeOk) {
-    try {
-      IdealStateWrapper idealStateWrapper = new IdealStateWrapper();
-      policy.attempt(new Callable<Boolean>() {
-        @Override
-        public Boolean call() {
-          HelixDataAccessor dataAccessor = helixManager.getHelixDataAccessor();
-          PropertyKey idealStateKey = dataAccessor.keyBuilder().idealStates(resourceName);
-          IdealState idealState = dataAccessor.getProperty(idealStateKey);
-
-          // Make a copy of the the idealState above to pass it to the updater
-          // NOTE: new IdealState(idealState.getRecord()) does not work because it's shallow copy for map fields and
-          // list fields
-          IdealState idealStateCopy = cloneIdealState(idealState);
-
-          IdealState updatedIdealState;
-          try {
-            updatedIdealState = updater.apply(idealStateCopy);
-          } catch (PermanentUpdaterException e) {
-            LOGGER.error("Caught permanent exception while updating ideal state for resource: {}", resourceName, e);
-            throw e;
-          } catch (Exception e) {
-            LOGGER.error("Caught exception while updating ideal state for resource: {}", resourceName, e);
-            return false;
-          }
-
-          // If there are changes to apply, apply them
-          if (updatedIdealState != null && !idealState.equals(updatedIdealState)) {
-            ZNRecord updatedZNRecord = updatedIdealState.getRecord();
-
-            // Update number of partitions
-            int numPartitions = updatedZNRecord.getMapFields().size();
-            updatedIdealState.setNumPartitions(numPartitions);
-
-            // If the ideal state is large enough, enable compression
-            boolean enableCompression = numPartitions > NUM_PARTITIONS_THRESHOLD_TO_ENABLE_COMPRESSION;
-            if (enableCompression) {
-              updatedZNRecord.setBooleanField(ENABLE_COMPRESSIONS_KEY, true);
-            } else {
-              updatedZNRecord.getSimpleFields().remove(ENABLE_COMPRESSIONS_KEY);
-            }
-
-            // Check version and set ideal state
-            try {
-              if (dataAccessor.getBaseDataAccessor()
-                  .set(idealStateKey.getPath(), updatedZNRecord, idealState.getRecord().getVersion(),
-                      AccessOption.PERSISTENT)) {
-                idealStateWrapper._idealState = updatedIdealState;
-                return true;
-              } else {
-                LOGGER.warn("Failed to update ideal state for resource: {}", resourceName);
-                return false;
-              }
-            } catch (ZkBadVersionException e) {
-              LOGGER.warn("Version changed while updating ideal state for resource: {}", resourceName);
-              return false;
-            } catch (Exception e) {
-              LOGGER.warn("Caught exception while updating ideal state for resource: {} (compressed={})", resourceName,
-                  enableCompression, e);
-              return false;
-            }
-          } else {
-            if (noChangeOk) {
-              LOGGER.info("Idempotent or null ideal state update for resource {}, skipping update.", resourceName);
-            } else {
-              LOGGER.warn("Idempotent or null ideal state update for resource {}, skipping update.", resourceName);
-            }
-            idealStateWrapper._idealState = idealState;
-            return true;
-          }
-        }
-      });
-      return idealStateWrapper._idealState;
-    } catch (Exception e) {
-      throw new RuntimeException("Caught exception while updating ideal state for resource: " + resourceName, e);
-    }
+  public static IdealState updateIdealState(HelixManager helixManager, String resourceName,
+      Function<IdealState, IdealState> updater) {
+    return IDEAL_STATE_GROUP_COMMIT.commit(helixManager, resourceName, updater,
+        DEFAULT_TABLE_IDEALSTATES_UPDATE_RETRY_POLICY, false);
   }
 
-  private static class IdealStateWrapper {
-    IdealState _idealState;
+  public static IdealState updateIdealState(HelixManager helixManager, String resourceName,
+      Function<IdealState, IdealState> updater, RetryPolicy retryPolicy) {
+    return IDEAL_STATE_GROUP_COMMIT.commit(helixManager, resourceName, updater, retryPolicy, false);
+  }
+
+  public static IdealState updateIdealState(HelixManager helixManager, String resourceName,
+      Function<IdealState, IdealState> updater, RetryPolicy retryPolicy, boolean noChangeOk) {
+    return IDEAL_STATE_GROUP_COMMIT.commit(helixManager, resourceName, updater, retryPolicy, noChangeOk);
   }
 
   /**
@@ -186,16 +106,6 @@ public class HelixHelper {
     public PermanentUpdaterException(Throwable cause) {
       super(cause);
     }
-  }
-
-  public static IdealState updateIdealState(HelixManager helixManager, String resourceName,
-      Function<IdealState, IdealState> updater) {
-    return updateIdealState(helixManager, resourceName, updater, DEFAULT_TABLE_IDEALSTATES_UPDATE_RETRY_POLICY, false);
-  }
-
-  public static IdealState updateIdealState(final HelixManager helixManager, final String resourceName,
-      final Function<IdealState, IdealState> updater, RetryPolicy policy) {
-    return updateIdealState(helixManager, resourceName, updater, policy, false);
   }
 
   /**
@@ -485,6 +395,13 @@ public class HelixHelper {
   }
 
   /**
+   *  Returns the instances in the cluster without any tag.
+   */
+  public static List<String> getInstancesWithoutTag(HelixManager helixManager, String defaultTag) {
+    return getInstancesWithoutTag(getInstanceConfigs(helixManager), defaultTag);
+  }
+
+  /**
    * Returns the instances in the cluster with the given tag.
    *
    * TODO: refactor code to use this method over {@link #getInstancesWithTag(HelixManager, String)} if applicable to
@@ -495,6 +412,20 @@ public class HelixHelper {
     return instancesWithTag.stream().map(InstanceConfig::getInstanceName).collect(Collectors.toList());
   }
 
+  /**
+   * Retrieves the list of instance names for instances that do not have a specific tag associated with them.
+   * This method filters through the provided list of {@link InstanceConfig} objects and identifies those
+   * that are associated with the provided {@code defaultTag}, which indicates the absence of a specific tag.
+   *
+   * @param instanceConfigs the list of {@link InstanceConfig} objects to be checked for instances without tags.
+   * @param defaultTag the default tag that represents instances without an associated tag.
+   * @return a list of instance names for instances that do not have a specific tag.
+   */
+  public static List<String> getInstancesWithoutTag(List<InstanceConfig> instanceConfigs, String defaultTag) {
+    List<InstanceConfig> instancesWithoutTag = getInstancesConfigsWithoutTag(instanceConfigs, defaultTag);
+    return instancesWithoutTag.stream().map(InstanceConfig::getInstanceName).collect(Collectors.toList());
+  }
+
   public static List<InstanceConfig> getInstancesConfigsWithTag(List<InstanceConfig> instanceConfigs, String tag) {
     List<InstanceConfig> instancesWithTag = new ArrayList<>();
     for (InstanceConfig instanceConfig : instanceConfigs) {
@@ -503,6 +434,30 @@ public class HelixHelper {
       }
     }
     return instancesWithTag;
+  }
+
+
+  /**
+   * Retrieves a list of {@link InstanceConfig} objects that either do not have any tags
+   * or are associated with the provided tag, which represents the absence of a specific tag.
+   * This method iterates through the provided list of {@link InstanceConfig} objects, checks
+   * whether their tag list is empty or if they contain the specified tag, and collects those
+   * instances that match the criteria.
+   *
+   * @param instanceConfigs the list of {@link InstanceConfig} objects to be checked.
+   * @param defaultTag the tag used to identify instances that are either untagged or have the specified tag.
+   * @return a list of {@link InstanceConfig} objects that are untagged or have the specified tag.
+   */
+  public static List<InstanceConfig> getInstancesConfigsWithoutTag(
+      List<InstanceConfig> instanceConfigs, String defaultTag) {
+    List<InstanceConfig> instancesWithoutTag = new ArrayList<>();
+    for (InstanceConfig instanceConfig : instanceConfigs) {
+      // instanceConfig.getTags() never returns null
+      if (instanceConfig.getTags().isEmpty() || instanceConfig.containsTag(defaultTag)) {
+        instancesWithoutTag.add(instanceConfig);
+      }
+    }
+    return instancesWithoutTag;
   }
 
   /**

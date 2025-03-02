@@ -21,6 +21,7 @@ package org.apache.pinot.segment.local.realtime.impl.forward;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import org.apache.pinot.segment.local.io.reader.impl.FixedByteSingleValueMultiColReader;
 import org.apache.pinot.segment.local.io.writer.impl.FixedByteSingleValueMultiColWriter;
 import org.apache.pinot.segment.spi.index.mutable.MutableForwardIndex;
@@ -89,7 +90,6 @@ import org.slf4j.LoggerFactory;
  * </code>
  *
  */
-// TODO: Fix thread-safety issue for ArrayList
 // TODO: Optimize it
 public class FixedByteMVMutableForwardIndex implements MutableForwardIndex {
   private static final Logger LOGGER = LoggerFactory.getLogger(FixedByteMVMutableForwardIndex.class);
@@ -104,10 +104,14 @@ public class FixedByteMVMutableForwardIndex implements MutableForwardIndex {
   private static final int INCREMENT_PERCENTAGE = 100;
   //Increments the Initial size by 100% of initial capacity every time we runs out of capacity
 
+  // Conservative figure to not breach 2GB size limit for immutable index
+  private final static int DEFAULT_THRESHOLD_FOR_NUM_OF_VALUES_PER_COLUMN = 450_000_000;
+
+  // For single writer multiple readers setup, use ArrayList for writer and CopyOnWriteArrayList for reader
   private final List<FixedByteSingleValueMultiColWriter> _headerWriters = new ArrayList<>();
-  private final List<FixedByteSingleValueMultiColReader> _headerReaders = new ArrayList<>();
+  private final List<FixedByteSingleValueMultiColReader> _headerReaders = new CopyOnWriteArrayList<>();
   private final List<FixedByteSingleValueMultiColWriter> _dataWriters = new ArrayList<>();
-  private final List<FixedByteSingleValueMultiColReader> _dataReaders = new ArrayList<>();
+  private final List<FixedByteSingleValueMultiColReader> _dataReaders = new CopyOnWriteArrayList<>();
   private final int _headerSize;
   private final int _incrementalCapacity;
   private final int _columnSizeInBytes;
@@ -123,6 +127,7 @@ public class FixedByteMVMutableForwardIndex implements MutableForwardIndex {
   private int _currentCapacity = 0;
   private int _prevRowStartIndex = 0;  // Offset in the data-buffer for the last row added.
   private int _prevRowLength = 0;  // Number of values in the column for the last row added.
+  private int _numValues = 0;
 
   public FixedByteMVMutableForwardIndex(int maxNumberOfMultiValuesPerRow, int avgMultiValueCount, int rowCountPerChunk,
       int columnSizeInBytes, PinotDataBufferMemoryManager memoryManager, String context, boolean isDictionaryEncoded,
@@ -163,7 +168,7 @@ public class FixedByteMVMutableForwardIndex implements MutableForwardIndex {
    */
   private void addDataBuffer(int rowCapacity) {
     try {
-      long size = rowCapacity * _columnSizeInBytes;
+      long size = (long) rowCapacity * (long) _columnSizeInBytes;
       LOGGER.info("Allocating data buffer of size {} for column {}", size, _context);
       // NOTE: PinotDataBuffer is tracked in PinotDataBufferMemoryManager. No need to track and close inside the class.
       PinotDataBuffer dataBuffer = _memoryManager.allocate(size, _context);
@@ -199,6 +204,7 @@ public class FixedByteMVMutableForwardIndex implements MutableForwardIndex {
 
   private int updateHeader(int row, int numValues) {
     assert (numValues <= _maxNumberOfMultiValuesPerRow);
+    _numValues += numValues;
     int newStartIndex = _prevRowStartIndex + _prevRowLength;
     if (newStartIndex + numValues > _currentCapacity) {
       addDataBuffer(_incrementalCapacity);
@@ -210,6 +216,12 @@ public class FixedByteMVMutableForwardIndex implements MutableForwardIndex {
     _prevRowStartIndex = newStartIndex;
     _prevRowLength = numValues;
     return newStartIndex;
+  }
+
+  public int getMaxChunkCapacity() {
+    // The incremental capacity will be >= the initial capacity and (the way the code is currently written) will be
+    // the largest the buffer could ever get.
+    return _incrementalCapacity;
   }
 
   @Override
@@ -405,6 +417,11 @@ public class FixedByteMVMutableForwardIndex implements MutableForwardIndex {
     for (int i = 0; i < values.length; i++) {
       _currentDataWriter.setDouble(newStartIndex + i, 0, values[i]);
     }
+  }
+
+  @Override
+  public boolean canAddMore() {
+    return _numValues < DEFAULT_THRESHOLD_FOR_NUM_OF_VALUES_PER_COLUMN;
   }
 
   @Override

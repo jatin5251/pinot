@@ -23,16 +23,21 @@ import com.google.common.collect.BiMap;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
-import org.apache.commons.httpclient.HttpConnectionManager;
+import org.apache.hc.client5.http.io.HttpClientConnectionManager;
 import org.apache.pinot.common.exception.InvalidConfigException;
 import org.apache.pinot.common.restlet.resources.TableMetadataInfo;
+import org.apache.pinot.common.restlet.resources.ValidDocIdsMetadataInfo;
+import org.apache.pinot.controller.api.resources.TableStaleSegmentResponse;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
+import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.utils.JsonUtils;
+import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 
 
 /**
@@ -44,14 +49,82 @@ import org.apache.pinot.spi.utils.JsonUtils;
  */
 public class TableMetadataReader {
   private final Executor _executor;
-  private final HttpConnectionManager _connectionManager;
+  private final HttpClientConnectionManager _connectionManager;
   private final PinotHelixResourceManager _pinotHelixResourceManager;
 
-  public TableMetadataReader(Executor executor, HttpConnectionManager connectionManager,
+  public TableMetadataReader(Executor executor, HttpClientConnectionManager connectionManager,
       PinotHelixResourceManager helixResourceManager) {
     _executor = executor;
     _connectionManager = connectionManager;
     _pinotHelixResourceManager = helixResourceManager;
+  }
+
+  /**
+   * Check if segments need a reload on any servers
+   * @return pair of: a) number of failed responses, b) reload responses returned
+   */
+  public TableReloadJsonResponse getServerCheckSegmentsReloadMetadata(String tableNameWithType,
+      int timeoutMs)
+      throws InvalidConfigException, IOException {
+    ServerSegmentMetadataReader.TableReloadResponse segmentsMetadataPair =
+        getReloadCheckResponses(tableNameWithType, timeoutMs);
+    List<String> segmentsMetadata = segmentsMetadataPair.getServerReloadResponses();
+    Map<String, JsonNode> response = new HashMap<>();
+    for (String segmentMetadata : segmentsMetadata) {
+      JsonNode responseJson = JsonUtils.stringToJsonNode(segmentMetadata);
+      response.put(responseJson.get("instanceId").asText(), responseJson);
+    }
+    return new TableReloadJsonResponse(segmentsMetadataPair.getNumFailedResponses(), response);
+  }
+
+  public ServerSegmentMetadataReader.TableReloadResponse getReloadCheckResponses(String tableNameWithType,
+      int timeoutMs) throws InvalidConfigException {
+    TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableNameWithType);
+    List<String> serverInstances = _pinotHelixResourceManager.getServerInstancesForTable(tableNameWithType, tableType);
+    Set<String> serverInstanceSet = new HashSet<>(serverInstances);
+    BiMap<String, String> endpoints = _pinotHelixResourceManager.getDataInstanceAdminEndpoints(serverInstanceSet);
+    ServerSegmentMetadataReader serverSegmentMetadataReader =
+        new ServerSegmentMetadataReader(_executor, _connectionManager);
+    return serverSegmentMetadataReader.getCheckReloadSegmentsFromServer(tableNameWithType, serverInstanceSet, endpoints,
+        timeoutMs);
+  }
+
+  /**
+   * This api takes in list of segments for which we need the metadata.
+   */
+  public JsonNode getSegmentsMetadata(String tableNameWithType, List<String> columns, Set<String> segmentsToInclude,
+      int timeoutMs)
+      throws InvalidConfigException, IOException {
+    return getSegmentsMetadataInternal(tableNameWithType, columns, segmentsToInclude, timeoutMs);
+  }
+
+  private JsonNode getSegmentsMetadataInternal(String tableNameWithType, List<String> columns,
+      Set<String> segmentsToInclude, int timeoutMs)
+      throws InvalidConfigException, IOException {
+    final Map<String, List<String>> serverToSegmentsMap =
+        _pinotHelixResourceManager.getServerToSegmentsMap(tableNameWithType);
+    BiMap<String, String> endpoints =
+        _pinotHelixResourceManager.getDataInstanceAdminEndpoints(serverToSegmentsMap.keySet());
+    ServerSegmentMetadataReader serverSegmentMetadataReader =
+        new ServerSegmentMetadataReader(_executor, _connectionManager);
+
+    // Filter segments that we need
+    for (Map.Entry<String, List<String>> serverToSegment : serverToSegmentsMap.entrySet()) {
+      List<String> segments = serverToSegment.getValue();
+      if (segmentsToInclude != null && !segmentsToInclude.isEmpty()) {
+        segments.retainAll(segmentsToInclude);
+      }
+    }
+
+    List<String> segmentsMetadata =
+        serverSegmentMetadataReader.getSegmentMetadataFromServer(tableNameWithType, serverToSegmentsMap, endpoints,
+            columns, timeoutMs);
+    Map<String, JsonNode> response = new HashMap<>();
+    for (String segmentMetadata : segmentsMetadata) {
+      JsonNode responseJson = JsonUtils.stringToJsonNode(segmentMetadata);
+      response.put(responseJson.get("segmentName").asText(), responseJson);
+    }
+    return JsonUtils.objectToJsonNode(response);
   }
 
   /**
@@ -61,22 +134,7 @@ public class TableMetadataReader {
    */
   public JsonNode getSegmentsMetadata(String tableNameWithType, List<String> columns, int timeoutMs)
       throws InvalidConfigException, IOException {
-    final Map<String, List<String>> serverToSegments =
-        _pinotHelixResourceManager.getServerToSegmentsMap(tableNameWithType);
-    BiMap<String, String> endpoints =
-        _pinotHelixResourceManager.getDataInstanceAdminEndpoints(serverToSegments.keySet());
-    ServerSegmentMetadataReader serverSegmentMetadataReader =
-        new ServerSegmentMetadataReader(_executor, _connectionManager);
-
-    List<String> segmentsMetadata = serverSegmentMetadataReader
-        .getSegmentMetadataFromServer(tableNameWithType, serverToSegments, endpoints, columns, timeoutMs);
-
-    Map<String, JsonNode> response = new HashMap<>();
-    for (String segmentMetadata : segmentsMetadata) {
-      JsonNode responseJson = JsonUtils.stringToJsonNode(segmentMetadata);
-      response.put(responseJson.get("segmentName").asText(), responseJson);
-    }
-    return JsonUtils.objectToJsonNode(response);
+    return getSegmentsMetadataInternal(tableNameWithType, columns, null, timeoutMs);
   }
 
   /**
@@ -87,16 +145,16 @@ public class TableMetadataReader {
       throws InvalidConfigException, IOException {
     Set<String> servers = _pinotHelixResourceManager.getServers(tableNameWithType, segmentName);
 
-    Map<String, List<String>> serverToSegments = servers.stream()
-        .collect(Collectors.toMap(s -> s, s -> Collections.singletonList(segmentName)));
+    Map<String, List<String>> serverToSegments =
+        servers.stream().collect(Collectors.toMap(s -> s, s -> Collections.singletonList(segmentName)));
 
-    BiMap<String, String> endpoints =
-        _pinotHelixResourceManager.getDataInstanceAdminEndpoints(servers);
+    BiMap<String, String> endpoints = _pinotHelixResourceManager.getDataInstanceAdminEndpoints(servers);
     ServerSegmentMetadataReader serverSegmentMetadataReader =
         new ServerSegmentMetadataReader(_executor, _connectionManager);
 
-    List<String> segmentsMetadata = serverSegmentMetadataReader
-        .getSegmentMetadataFromServer(tableNameWithType, serverToSegments, endpoints, columns, timeoutMs);
+    List<String> segmentsMetadata =
+        serverSegmentMetadataReader.getSegmentMetadataFromServer(tableNameWithType, serverToSegments, endpoints,
+            columns, timeoutMs);
 
     for (String segmentMetadata : segmentsMetadata) {
       JsonNode responseJson = JsonUtils.stringToJsonNode(segmentMetadata);
@@ -116,7 +174,7 @@ public class TableMetadataReader {
    */
   public JsonNode getAggregateTableMetadata(String tableNameWithType, List<String> columns, int numReplica,
       int timeoutMs)
-      throws InvalidConfigException, IOException {
+      throws InvalidConfigException {
     final Map<String, List<String>> serverToSegments =
         _pinotHelixResourceManager.getServerToSegmentsMap(tableNameWithType);
     BiMap<String, String> endpoints =
@@ -124,8 +182,60 @@ public class TableMetadataReader {
     ServerSegmentMetadataReader serverSegmentMetadataReader =
         new ServerSegmentMetadataReader(_executor, _connectionManager);
 
-    TableMetadataInfo aggregateTableMetadataInfo = serverSegmentMetadataReader
-        .getAggregatedTableMetadataFromServer(tableNameWithType, endpoints, columns, numReplica, timeoutMs);
+    TableMetadataInfo aggregateTableMetadataInfo =
+        serverSegmentMetadataReader.getAggregatedTableMetadataFromServer(tableNameWithType, endpoints, columns,
+            numReplica, timeoutMs);
     return JsonUtils.objectToJsonNode(aggregateTableMetadataInfo);
+  }
+
+  /**
+   * This method retrieves the aggregated valid doc id metadata for a given table.
+   * @return a list of ValidDocIdsMetadataInfo
+   */
+  public JsonNode getAggregateValidDocIdsMetadata(String tableNameWithType, List<String> segmentNames,
+      String validDocIdsType, int timeoutMs, int numSegmentsBatchPerServerRequest)
+      throws InvalidConfigException {
+    final Map<String, List<String>> serverToSegments =
+        _pinotHelixResourceManager.getServerToSegmentsMap(tableNameWithType);
+    BiMap<String, String> endpoints =
+        _pinotHelixResourceManager.getDataInstanceAdminEndpoints(serverToSegments.keySet());
+    ServerSegmentMetadataReader serverSegmentMetadataReader =
+        new ServerSegmentMetadataReader(_executor, _connectionManager);
+
+    List<ValidDocIdsMetadataInfo> aggregateTableMetadataInfo =
+        serverSegmentMetadataReader.getValidDocIdsMetadataFromServer(tableNameWithType, serverToSegments, endpoints,
+            segmentNames, timeoutMs, validDocIdsType, numSegmentsBatchPerServerRequest);
+    return JsonUtils.objectToJsonNode(aggregateTableMetadataInfo);
+  }
+
+  public Map<String, TableStaleSegmentResponse> getStaleSegments(String tableNameWithType,
+      int timeoutMs)
+      throws InvalidConfigException, IOException {
+    TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableNameWithType);
+    List<String> serverInstances = _pinotHelixResourceManager.getServerInstancesForTable(tableNameWithType, tableType);
+    Set<String> serverInstanceSet = new HashSet<>(serverInstances);
+    BiMap<String, String> endpoints = _pinotHelixResourceManager.getDataInstanceAdminEndpoints(serverInstanceSet);
+    ServerSegmentMetadataReader serverSegmentMetadataReader =
+        new ServerSegmentMetadataReader(_executor, _connectionManager);
+    return serverSegmentMetadataReader.getStaleSegmentsFromServer(tableNameWithType, serverInstanceSet, endpoints,
+        timeoutMs);
+  }
+
+  public class TableReloadJsonResponse {
+    private int _numFailedResponses;
+    private Map<String, JsonNode> _serverReloadJsonResponses;
+
+    TableReloadJsonResponse(int numFailedResponses, Map<String, JsonNode> serverReloadJsonResponses) {
+      _numFailedResponses = numFailedResponses;
+      _serverReloadJsonResponses = serverReloadJsonResponses;
+    }
+
+    public int getNumFailedResponses() {
+      return _numFailedResponses;
+    }
+
+    public Map<String, JsonNode> getServerReloadJsonResponses() {
+      return _serverReloadJsonResponses;
+    }
   }
 }

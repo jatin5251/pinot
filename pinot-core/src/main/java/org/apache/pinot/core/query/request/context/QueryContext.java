@@ -35,11 +35,14 @@ import org.apache.pinot.common.request.context.FilterContext;
 import org.apache.pinot.common.request.context.FunctionContext;
 import org.apache.pinot.common.request.context.OrderByExpressionContext;
 import org.apache.pinot.common.request.context.RequestContextUtils;
+import org.apache.pinot.common.utils.config.QueryOptionsUtils;
 import org.apache.pinot.core.plan.maker.InstancePlanMakerImplV2;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunctionFactory;
 import org.apache.pinot.core.util.MemoizedClassAssociation;
-import org.apache.pinot.core.util.QueryOptionsUtils;
+import org.apache.pinot.segment.spi.datasource.DataSource;
+import org.apache.pinot.spi.config.table.FieldConfig;
+import org.apache.pinot.spi.utils.CommonConstants.Server;
 
 
 /**
@@ -73,6 +76,7 @@ public class QueryContext {
   private final String _tableName;
   private final QueryContext _subquery;
   private final List<ExpressionContext> _selectExpressions;
+  private final boolean _distinct;
   private final List<String> _aliasList;
   private final FilterContext _filter;
   private final List<ExpressionContext> _groupByExpressions;
@@ -82,16 +86,15 @@ public class QueryContext {
   private final int _offset;
   private final Map<String, String> _queryOptions;
   private final Map<ExpressionContext, ExpressionContext> _expressionOverrideHints;
-  private final boolean _explain;
+  private final ExplainMode _explain;
 
   private final Function<Class<?>, Map<?, ?>> _sharedValues = MemoizedClassAssociation.of(ConcurrentHashMap::new);
 
   // Pre-calculate the aggregation functions and columns for the query so that it can be shared across all the segments
   private AggregationFunction[] _aggregationFunctions;
-  private Map<FunctionContext, Integer> _aggregationFunctionIndexMap;
-  private boolean _hasFilteredAggregations;
   private List<Pair<AggregationFunction, FilterContext>> _filteredAggregationFunctions;
   private Map<Pair<FunctionContext, FilterContext>, Integer> _filteredAggregationsIndexMap;
+  private boolean _hasFilteredAggregations;
   private Set<String> _columns;
 
   // Other properties to be shared across all the segments
@@ -106,32 +109,43 @@ public class QueryContext {
   // Whether to skip reordering scan filters for the query
   private boolean _skipScanFilterReorder;
   // Maximum number of threads used to execute the query
-  private int _maxExecutionThreads = InstancePlanMakerImplV2.DEFAULT_MAX_EXECUTION_THREADS;
+  private int _maxExecutionThreads = Server.DEFAULT_QUERY_EXECUTOR_MAX_EXECUTION_THREADS;
   // The following properties apply to group-by queries
   // Maximum initial capacity of the group-by result holder
-  private int _maxInitialResultHolderCapacity = InstancePlanMakerImplV2.DEFAULT_MAX_INITIAL_RESULT_HOLDER_CAPACITY;
+  private int _maxInitialResultHolderCapacity = Server.DEFAULT_QUERY_EXECUTOR_MAX_INITIAL_RESULT_HOLDER_CAPACITY;
+  // Initial capacity of the indexed table
+  private int _minInitialIndexedTableCapacity = Server.DEFAULT_QUERY_EXECUTOR_MIN_INITIAL_INDEXED_TABLE_CAPACITY;
   // Limit of number of groups stored in each segment
-  private int _numGroupsLimit = InstancePlanMakerImplV2.DEFAULT_NUM_GROUPS_LIMIT;
+  private int _numGroupsLimit = Server.DEFAULT_QUERY_EXECUTOR_NUM_GROUPS_LIMIT;
   // Minimum number of groups to keep per segment when trimming groups for SQL GROUP BY
-  private int _minSegmentGroupTrimSize = InstancePlanMakerImplV2.DEFAULT_MIN_SEGMENT_GROUP_TRIM_SIZE;
+  private int _minSegmentGroupTrimSize = Server.DEFAULT_QUERY_EXECUTOR_MIN_SEGMENT_GROUP_TRIM_SIZE;
   // Minimum number of groups to keep across segments when trimming groups for SQL GROUP BY
-  private int _minServerGroupTrimSize = InstancePlanMakerImplV2.DEFAULT_MIN_SERVER_GROUP_TRIM_SIZE;
+  private int _minServerGroupTrimSize = Server.DEFAULT_QUERY_EXECUTOR_MIN_SERVER_GROUP_TRIM_SIZE;
   // Trim threshold to use for server combine for SQL GROUP BY
-  private int _groupTrimThreshold = InstancePlanMakerImplV2.DEFAULT_GROUPBY_TRIM_THRESHOLD;
+  private int _groupTrimThreshold = Server.DEFAULT_QUERY_EXECUTOR_GROUPBY_TRIM_THRESHOLD;
+  // Number of threads to use for final reduce
+  private int _numThreadsExtractFinalResult = InstancePlanMakerImplV2.DEFAULT_NUM_THREADS_EXTRACT_FINAL_RESULT;
+  // Parallel chunk size for final reduce
+  private int _chunkSizeExtractFinalResult = InstancePlanMakerImplV2.DEFAULT_CHUNK_SIZE_EXTRACT_FINAL_RESULT;
   // Whether null handling is enabled
   private boolean _nullHandlingEnabled;
   // Whether server returns the final result
   private boolean _serverReturnFinalResult;
+  // Whether server returns the final result with unpartitioned group key
+  private boolean _serverReturnFinalResultKeyUnpartitioned;
+  // Collection of index types to skip per column
+  private Map<String, Set<FieldConfig.IndexType>> _skipIndexes;
 
   private QueryContext(@Nullable String tableName, @Nullable QueryContext subquery,
-      List<ExpressionContext> selectExpressions, List<String> aliasList, @Nullable FilterContext filter,
-      @Nullable List<ExpressionContext> groupByExpressions, @Nullable FilterContext havingFilter,
-      @Nullable List<OrderByExpressionContext> orderByExpressions, int limit, int offset,
-      Map<String, String> queryOptions, @Nullable Map<ExpressionContext, ExpressionContext> expressionOverrideHints,
-      boolean explain) {
+      List<ExpressionContext> selectExpressions, boolean distinct, List<String> aliasList,
+      @Nullable FilterContext filter, @Nullable List<ExpressionContext> groupByExpressions,
+      @Nullable FilterContext havingFilter, @Nullable List<OrderByExpressionContext> orderByExpressions, int limit,
+      int offset, Map<String, String> queryOptions,
+      @Nullable Map<ExpressionContext, ExpressionContext> expressionOverrideHints, ExplainMode explain) {
     _tableName = tableName;
     _subquery = subquery;
     _selectExpressions = selectExpressions;
+    _distinct = distinct;
     _aliasList = Collections.unmodifiableList(aliasList);
     _filter = filter;
     _groupByExpressions = groupByExpressions;
@@ -168,6 +182,13 @@ public class QueryContext {
   }
 
   /**
+   * Returns whether the query is a DISTINCT query.
+   */
+  public boolean isDistinct() {
+    return _distinct;
+  }
+
+  /**
    * Returns an unmodifiable list from the expression to its alias.
    */
   public List<String> getAliasList() {
@@ -183,7 +204,8 @@ public class QueryContext {
   }
 
   /**
-   * Returns a list of expressions in the GROUP-BY clause, or {@code null} if there is no GROUP-BY clause.
+   * Returns a list of expressions in the GROUP-BY clause (aggregation keys), or {@code null} if there is no GROUP-BY
+   * clause.
    */
   @Nullable
   public List<ExpressionContext> getGroupByExpressions() {
@@ -236,8 +258,18 @@ public class QueryContext {
 
   /**
    * Returns {@code true} if the query is an EXPLAIN query, {@code false} otherwise.
+   * <p>
+   * This is just an alias on top of {@link #getExplain() != ExplainMode.NONE}
+   *
    */
   public boolean isExplain() {
+    return _explain != ExplainMode.NONE;
+  }
+
+  /**
+   * Returns the explain mode of the query.
+   */
+  public ExplainMode getExplain() {
     return _explain;
   }
 
@@ -258,28 +290,19 @@ public class QueryContext {
   }
 
   /**
-   * Returns the filtered aggregation expressions for the query.
-   */
-  public boolean isHasFilteredAggregations() {
-    return _hasFilteredAggregations;
-  }
-
-  /**
-   * Returns a map from the AGGREGATION FunctionContext to the index of the corresponding AggregationFunction in the
-   * aggregation functions array.
-   */
-  @Nullable
-  public Map<FunctionContext, Integer> getAggregationFunctionIndexMap() {
-    return _aggregationFunctionIndexMap;
-  }
-
-  /**
    * Returns a map from the filtered aggregation (pair of AGGREGATION FunctionContext and FILTER FilterContext) to the
    * index of corresponding AggregationFunction in the aggregation functions array.
    */
   @Nullable
   public Map<Pair<FunctionContext, FilterContext>, Integer> getFilteredAggregationsIndexMap() {
     return _filteredAggregationsIndexMap;
+  }
+
+  /**
+   * Returns the filtered aggregation expressions for the query.
+   */
+  public boolean hasFilteredAggregations() {
+    return _hasFilteredAggregations;
   }
 
   /**
@@ -345,6 +368,14 @@ public class QueryContext {
     _maxInitialResultHolderCapacity = maxInitialResultHolderCapacity;
   }
 
+  public int getMinInitialIndexedTableCapacity() {
+    return _minInitialIndexedTableCapacity;
+  }
+
+  public void setMinInitialIndexedTableCapacity(int minInitialIndexedTableCapacity) {
+    _minInitialIndexedTableCapacity = minInitialIndexedTableCapacity;
+  }
+
   public int getNumGroupsLimit() {
     return _numGroupsLimit;
   }
@@ -377,6 +408,22 @@ public class QueryContext {
     _groupTrimThreshold = groupTrimThreshold;
   }
 
+  public int getNumThreadsExtractFinalResult() {
+    return _numThreadsExtractFinalResult;
+  }
+
+  public void setNumThreadsExtractFinalResult(int numThreadsExtractFinalResult) {
+    _numThreadsExtractFinalResult = numThreadsExtractFinalResult;
+  }
+
+  public int getChunkSizeExtractFinalResult() {
+    return _chunkSizeExtractFinalResult;
+  }
+
+  public void setChunkSizeExtractFinalResult(int chunkSizeExtractFinalResult) {
+    _chunkSizeExtractFinalResult = chunkSizeExtractFinalResult;
+  }
+
   public boolean isNullHandlingEnabled() {
     return _nullHandlingEnabled;
   }
@@ -391,6 +438,14 @@ public class QueryContext {
 
   public void setServerReturnFinalResult(boolean serverReturnFinalResult) {
     _serverReturnFinalResult = serverReturnFinalResult;
+  }
+
+  public boolean isServerReturnFinalResultKeyUnpartitioned() {
+    return _serverReturnFinalResultKeyUnpartitioned;
+  }
+
+  public void setServerReturnFinalResultKeyUnpartitioned(boolean serverReturnFinalResultKeyUnpartitioned) {
+    _serverReturnFinalResultKeyUnpartitioned = serverReturnFinalResultKeyUnpartitioned;
   }
 
   /**
@@ -413,16 +468,32 @@ public class QueryContext {
   @Override
   public String toString() {
     return "QueryContext{" + "_tableName='" + _tableName + '\'' + ", _subquery=" + _subquery + ", _selectExpressions="
-        + _selectExpressions + ", _aliasList=" + _aliasList + ", _filter=" + _filter + ", _groupByExpressions="
-        + _groupByExpressions + ", _havingFilter=" + _havingFilter + ", _orderByExpressions=" + _orderByExpressions
-        + ", _limit=" + _limit + ", _offset=" + _offset + ", _queryOptions=" + _queryOptions
+        + _selectExpressions + ", _distinct=" + _distinct + ", _aliasList=" + _aliasList + ", _filter=" + _filter
+        + ", _groupByExpressions=" + _groupByExpressions + ", _havingFilter=" + _havingFilter + ", _orderByExpressions="
+        + _orderByExpressions + ", _limit=" + _limit + ", _offset=" + _offset + ", _queryOptions=" + _queryOptions
         + ", _expressionOverrideHints=" + _expressionOverrideHints + ", _explain=" + _explain + '}';
+  }
+
+  public void setSkipIndexes(Map<String, Set<FieldConfig.IndexType>> skipIndexes) {
+    _skipIndexes = skipIndexes;
+  }
+
+  public boolean isIndexUseAllowed(String columnName, FieldConfig.IndexType indexType) {
+    if (_skipIndexes == null) {
+      return true;
+    }
+    return !_skipIndexes.getOrDefault(columnName, Collections.EMPTY_SET).contains(indexType);
+  }
+
+  public boolean isIndexUseAllowed(DataSource dataSource, FieldConfig.IndexType indexType) {
+    return isIndexUseAllowed(dataSource.getColumnName(), indexType);
   }
 
   public static class Builder {
     private String _tableName;
     private QueryContext _subquery;
     private List<ExpressionContext> _selectExpressions;
+    private boolean _distinct;
     private List<String> _aliasList;
     private FilterContext _filter;
     private List<ExpressionContext> _groupByExpressions;
@@ -431,9 +502,8 @@ public class QueryContext {
     private int _limit;
     private int _offset;
     private Map<String, String> _queryOptions;
-    private Map<String, String> _debugOptions;
     private Map<ExpressionContext, ExpressionContext> _expressionOverrideHints;
-    private boolean _explain;
+    private ExplainMode _explain = ExplainMode.NONE;
 
     public Builder setTableName(String tableName) {
       _tableName = tableName;
@@ -447,6 +517,11 @@ public class QueryContext {
 
     public Builder setSelectExpressions(List<ExpressionContext> selectExpressions) {
       _selectExpressions = selectExpressions;
+      return this;
+    }
+
+    public Builder setDistinct(boolean distinct) {
+      _distinct = distinct;
       return this;
     }
 
@@ -495,7 +570,16 @@ public class QueryContext {
       return this;
     }
 
+    /**
+     * @deprecated Use {@link #setExplain(ExplainMode)} instead.
+     */
+    @Deprecated
     public Builder setExplain(boolean explain) {
+      _explain = explain ? ExplainMode.DESCRIPTION : ExplainMode.NONE;
+      return this;
+    }
+
+    public Builder setExplain(ExplainMode explain) {
       _explain = explain;
       return this;
     }
@@ -507,10 +591,13 @@ public class QueryContext {
         _queryOptions = Collections.emptyMap();
       }
       QueryContext queryContext =
-          new QueryContext(_tableName, _subquery, _selectExpressions, _aliasList, _filter, _groupByExpressions,
-              _havingFilter, _orderByExpressions, _limit, _offset, _queryOptions, _expressionOverrideHints, _explain);
+          new QueryContext(_tableName, _subquery, _selectExpressions, _distinct, _aliasList,
+              _filter, _groupByExpressions, _havingFilter, _orderByExpressions, _limit, _offset, _queryOptions,
+              _expressionOverrideHints, _explain);
       queryContext.setNullHandlingEnabled(QueryOptionsUtils.isNullHandlingEnabled(_queryOptions));
       queryContext.setServerReturnFinalResult(QueryOptionsUtils.isServerReturnFinalResult(_queryOptions));
+      queryContext.setServerReturnFinalResultKeyUnpartitioned(
+          QueryOptionsUtils.isServerReturnFinalResultKeyUnpartitioned(_queryOptions));
 
       // Pre-calculate the aggregation functions and columns for the query
       generateAggregationFunctions(queryContext);
@@ -536,15 +623,11 @@ public class QueryContext {
         FunctionContext aggregation = pair.getLeft();
         FilterContext filter = pair.getRight();
         if (filter != null) {
-          // Filtered aggregation
-          if (_groupByExpressions != null) {
-            throw new IllegalStateException("GROUP BY with FILTER clauses is not supported");
-          }
           queryContext._hasFilteredAggregations = true;
         }
         int functionIndex = filteredAggregationFunctions.size();
         AggregationFunction aggregationFunction =
-            AggregationFunctionFactory.getAggregationFunction(aggregation, queryContext);
+            AggregationFunctionFactory.getAggregationFunction(aggregation, queryContext._nullHandlingEnabled);
         filteredAggregationFunctions.add(Pair.of(aggregationFunction, filter));
         filteredAggregationsIndexMap.put(Pair.of(aggregation, filter), functionIndex);
       }
@@ -565,7 +648,7 @@ public class QueryContext {
           FilterContext filter = pair.getRight();
           int functionIndex = filteredAggregationFunctions.size();
           AggregationFunction aggregationFunction =
-              AggregationFunctionFactory.getAggregationFunction(aggregation, queryContext);
+              AggregationFunctionFactory.getAggregationFunction(aggregation, queryContext._nullHandlingEnabled);
           filteredAggregationFunctions.add(Pair.of(aggregationFunction, filter));
           filteredAggregationsIndexMap.put(Pair.of(aggregation, filter), functionIndex);
         }
@@ -577,12 +660,7 @@ public class QueryContext {
         for (int i = 0; i < numAggregations; i++) {
           aggregationFunctions[i] = filteredAggregationFunctions.get(i).getLeft();
         }
-        Map<FunctionContext, Integer> aggregationFunctionIndexMap = new HashMap<>();
-        for (Map.Entry<Pair<FunctionContext, FilterContext>, Integer> entry : filteredAggregationsIndexMap.entrySet()) {
-          aggregationFunctionIndexMap.put(entry.getKey().getLeft(), entry.getValue());
-        }
         queryContext._aggregationFunctions = aggregationFunctions;
-        queryContext._aggregationFunctionIndexMap = aggregationFunctionIndexMap;
         queryContext._filteredAggregationFunctions = filteredAggregationFunctions;
         queryContext._filteredAggregationsIndexMap = filteredAggregationsIndexMap;
       }

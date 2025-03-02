@@ -34,7 +34,7 @@ import picocli.CommandLine;
 
 
 @SuppressWarnings("FieldCanBeLocal")
-@CommandLine.Command
+@CommandLine.Command(mixinStandardHelpOptions = true)
 public class PerfBenchmarkRunner extends AbstractBaseCommand implements Command {
   private static final Logger LOGGER = LoggerFactory.getLogger(PerfBenchmarkRunner.class);
 
@@ -80,14 +80,17 @@ public class PerfBenchmarkRunner extends AbstractBaseCommand implements Command 
       description = "Comma separated bloom filter columns to be created (non-batch load).")
   private String _bloomFilterColumns;
 
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, usageHelp = true,
-      description = "Print this message.")
-  private boolean _help = false;
+  @CommandLine.Option(names = {"-user"}, required = false, description = "Username for basic auth.")
+  private String _user;
 
-  @Override
-  public boolean getHelp() {
-    return _help;
-  }
+  @CommandLine.Option(names = {"-password"}, required = false, description = "Password for basic auth.")
+  private String _password;
+
+  @CommandLine.Option(names = {"-authToken"}, required = false, description = "Http auth token.")
+  private String _authToken;
+
+  @CommandLine.Option(names = {"-authTokenUrl"}, required = false, description = "Http auth token url.")
+  private String _authTokenUrl;
 
   @Override
   public String getName() {
@@ -115,6 +118,10 @@ public class PerfBenchmarkRunner extends AbstractBaseCommand implements Command 
       throws Exception {
     PerfBenchmarkDriverConf perfBenchmarkDriverConf = new PerfBenchmarkDriverConf();
     perfBenchmarkDriverConf.setStartServer(false);
+    perfBenchmarkDriverConf.setUser(_user);
+    perfBenchmarkDriverConf.setPassword(_password);
+    perfBenchmarkDriverConf.setAuthToken(_authToken);
+    perfBenchmarkDriverConf.setAuthTokenUrl(_authTokenUrl);
     PerfBenchmarkDriver driver =
         new PerfBenchmarkDriver(perfBenchmarkDriverConf, _tempDir, _loadMode, _segmentFormatVersion, false);
     driver.run();
@@ -127,6 +134,10 @@ public class PerfBenchmarkRunner extends AbstractBaseCommand implements Command 
     perfBenchmarkDriverConf.setStartController(false);
     perfBenchmarkDriverConf.setStartBroker(false);
     perfBenchmarkDriverConf.setServerInstanceDataDir(_dataDir);
+    perfBenchmarkDriverConf.setUser(_user);
+    perfBenchmarkDriverConf.setPassword(_password);
+    perfBenchmarkDriverConf.setAuthToken(_authToken);
+    perfBenchmarkDriverConf.setAuthTokenUrl(_authTokenUrl);
     final PerfBenchmarkDriver driver =
         new PerfBenchmarkDriver(perfBenchmarkDriverConf, _tempDir, _loadMode, _segmentFormatVersion, false);
     driver.run();

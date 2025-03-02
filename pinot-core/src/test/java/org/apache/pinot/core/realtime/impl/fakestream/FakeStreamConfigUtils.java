@@ -25,7 +25,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.common.utils.TarGzCompressionUtils;
+import org.apache.pinot.common.utils.TarCompressionUtils;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.data.Schema;
@@ -102,7 +102,7 @@ public class FakeStreamConfigUtils {
       FileUtils.deleteDirectory(outputDir);
     }
     File avroTarFile = getResourceFile(AVRO_TAR_FILE);
-    return TarGzCompressionUtils.untar(avroTarFile, outputDir);
+    return TarCompressionUtils.untar(avroTarFile, outputDir);
   }
 
   /**
@@ -140,12 +140,8 @@ public class FakeStreamConfigUtils {
    */
   public static StreamConfig getDefaultLowLevelStreamConfigs(int numPartitions) {
     Map<String, String> streamConfigMap = getDefaultStreamConfigs();
-    streamConfigMap
-        .put(StreamConfigProperties.constructStreamProperty(STREAM_TYPE, StreamConfigProperties.STREAM_CONSUMER_TYPES),
-            StreamConfig.ConsumerType.LOWLEVEL.toString());
     streamConfigMap.put(StreamConfigProperties.constructStreamProperty(STREAM_TYPE, NUM_PARTITIONS_KEY),
         String.valueOf(numPartitions));
-
     return new StreamConfig(TABLE_NAME_WITH_TYPE, streamConfigMap);
   }
 
@@ -154,18 +150,6 @@ public class FakeStreamConfigUtils {
    */
   public static StreamConfig getDefaultLowLevelStreamConfigs() {
     return getDefaultLowLevelStreamConfigs(DEFAULT_NUM_PARTITIONS);
-  }
-
-  /**
-   * Generate fake stream configs for high level stream
-   */
-  public static StreamConfig getDefaultHighLevelStreamConfigs() {
-    Map<String, String> streamConfigMap = getDefaultStreamConfigs();
-    streamConfigMap
-        .put(StreamConfigProperties.constructStreamProperty(STREAM_TYPE, StreamConfigProperties.STREAM_CONSUMER_TYPES),
-            StreamConfig.ConsumerType.HIGHLEVEL.toString());
-
-    return new StreamConfig(TABLE_NAME_WITH_TYPE, streamConfigMap);
   }
 
   private static Map<String, String> getDefaultStreamConfigs() {

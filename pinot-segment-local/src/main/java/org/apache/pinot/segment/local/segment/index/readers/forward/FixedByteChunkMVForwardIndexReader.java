@@ -19,20 +19,21 @@
 package org.apache.pinot.segment.local.segment.index.readers.forward;
 
 import java.nio.ByteBuffer;
+import java.util.List;
 import javax.annotation.Nullable;
-import org.apache.pinot.segment.local.io.writer.impl.VarByteChunkSVForwardIndexWriter;
+import org.apache.pinot.segment.local.io.writer.impl.VarByteChunkForwardIndexWriter;
+import org.apache.pinot.segment.local.utils.ArraySerDeUtils;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 
 
 /**
- * Chunk-based multi-value raw (non-dictionary-encoded) forward index reader for values of
- * fixed length data type (INT, LONG, FLOAT, DOUBLE).
- * <p>For data layout, please refer to the documentation for {@link VarByteChunkSVForwardIndexWriter}
+ * Chunk-based multi-value raw (non-dictionary-encoded) forward index reader for values of fixed length data type (INT,
+ * LONG, FLOAT, DOUBLE).
+ * <p>For data layout, please refer to the documentation for {@link VarByteChunkForwardIndexWriter}
  */
 public final class FixedByteChunkMVForwardIndexReader extends BaseChunkForwardIndexReader {
-
-  private static final int ROW_OFFSET_SIZE = VarByteChunkSVForwardIndexWriter.CHUNK_HEADER_ENTRY_ROW_OFFSET_SIZE;
+  private static final int ROW_OFFSET_SIZE = VarByteChunkForwardIndexWriter.CHUNK_HEADER_ENTRY_ROW_OFFSET_SIZE;
 
   private final int _maxChunkSize;
 
@@ -53,92 +54,47 @@ public final class FixedByteChunkMVForwardIndexReader extends BaseChunkForwardIn
 
   @Override
   public int getIntMV(int docId, int[] valueBuffer, ChunkReaderContext context) {
-    ByteBuffer byteBuffer = slice(docId, context);
-    int numValues = byteBuffer.getInt();
-    for (int i = 0; i < numValues; i++) {
-      valueBuffer[i] = byteBuffer.getInt();
-    }
-    return numValues;
+    return ArraySerDeUtils.deserializeIntArrayWithLength(slice(docId, context), valueBuffer);
   }
 
   @Override
   public int[] getIntMV(int docId, ChunkReaderContext context) {
-    ByteBuffer byteBuffer = slice(docId, context);
-    int numValues = byteBuffer.getInt();
-    int[] valueBuffer = new int[numValues];
-    for (int i = 0; i < numValues; i++) {
-      valueBuffer[i] = byteBuffer.getInt();
-    }
-    return valueBuffer;
+    return ArraySerDeUtils.deserializeIntArrayWithLength(slice(docId, context));
   }
 
   @Override
   public int getLongMV(int docId, long[] valueBuffer, ChunkReaderContext context) {
-    ByteBuffer byteBuffer = slice(docId, context);
-    int numValues = byteBuffer.getInt();
-    for (int i = 0; i < numValues; i++) {
-      valueBuffer[i] = byteBuffer.getLong();
-    }
-    return numValues;
+    return ArraySerDeUtils.deserializeLongArrayWithLength(slice(docId, context), valueBuffer);
   }
 
   @Override
   public long[] getLongMV(int docId, ChunkReaderContext context) {
-    ByteBuffer byteBuffer = slice(docId, context);
-    int numValues = byteBuffer.getInt();
-    long[] valueBuffer = new long[numValues];
-    for (int i = 0; i < numValues; i++) {
-      valueBuffer[i] = byteBuffer.getLong();
-    }
-    return valueBuffer;
+    return ArraySerDeUtils.deserializeLongArrayWithLength(slice(docId, context));
   }
 
   @Override
   public int getFloatMV(int docId, float[] valueBuffer, ChunkReaderContext context) {
-    ByteBuffer byteBuffer = slice(docId, context);
-    int numValues = byteBuffer.getInt();
-    for (int i = 0; i < numValues; i++) {
-      valueBuffer[i] = byteBuffer.getFloat();
-    }
-    return numValues;
+    return ArraySerDeUtils.deserializeFloatArrayWithLength(slice(docId, context), valueBuffer);
   }
 
   @Override
   public float[] getFloatMV(int docId, ChunkReaderContext context) {
-    ByteBuffer byteBuffer = slice(docId, context);
-    int numValues = byteBuffer.getInt();
-    float[] valueBuffer = new float[numValues];
-    for (int i = 0; i < numValues; i++) {
-      valueBuffer[i] = byteBuffer.getFloat();
-    }
-    return valueBuffer;
+    return ArraySerDeUtils.deserializeFloatArrayWithLength(slice(docId, context));
   }
 
   @Override
   public int getDoubleMV(int docId, double[] valueBuffer, ChunkReaderContext context) {
-    ByteBuffer byteBuffer = slice(docId, context);
-    int numValues = byteBuffer.getInt();
-    for (int i = 0; i < numValues; i++) {
-      valueBuffer[i] = byteBuffer.getDouble();
-    }
-    return numValues;
+    return ArraySerDeUtils.deserializeDoubleArrayWithLength(slice(docId, context), valueBuffer);
   }
 
   @Override
   public double[] getDoubleMV(int docId, ChunkReaderContext context) {
-    ByteBuffer byteBuffer = slice(docId, context);
-    int numValues = byteBuffer.getInt();
-    double[] valueBuffer = new double[numValues];
-    for (int i = 0; i < numValues; i++) {
-      valueBuffer[i] = byteBuffer.getDouble();
-    }
-    return valueBuffer;
+    return ArraySerDeUtils.deserializeDoubleArrayWithLength(slice(docId, context));
   }
 
   @Override
   public int getNumValuesMV(int docId, ChunkReaderContext context) {
-    ByteBuffer byteBuffer = slice(docId, context);
-    return byteBuffer.getInt();
+    return slice(docId, context).getInt();
   }
 
   private ByteBuffer slice(int docId, ChunkReaderContext context) {
@@ -206,8 +162,7 @@ public final class FixedByteChunkMVForwardIndexReader extends BaseChunkForwardIn
         // Last row in the last chunk
         return _dataBuffer.size();
       } else {
-        int valueEndOffsetInChunk = _dataBuffer
-            .getInt(chunkStartOffset + (long) (chunkRowId + 1) * ROW_OFFSET_SIZE);
+        int valueEndOffsetInChunk = _dataBuffer.getInt(chunkStartOffset + (long) (chunkRowId + 1) * ROW_OFFSET_SIZE);
         if (valueEndOffsetInChunk == 0) {
           // Last row in the last chunk (chunk is incomplete, which stores 0 as the offset for the absent rows)
           return _dataBuffer.size();
@@ -220,9 +175,37 @@ public final class FixedByteChunkMVForwardIndexReader extends BaseChunkForwardIn
         // Last row in the chunk
         return getChunkPosition(chunkId + 1);
       } else {
-        return chunkStartOffset + _dataBuffer
-            .getInt(chunkStartOffset + (long) (chunkRowId + 1) * ROW_OFFSET_SIZE);
+        return chunkStartOffset + _dataBuffer.getInt(chunkStartOffset + (long) (chunkRowId + 1) * ROW_OFFSET_SIZE);
       }
     }
+  }
+
+  @Override
+  public boolean isBufferByteRangeInfoSupported() {
+    return true;
+  }
+
+  @Override
+  public void recordDocIdByteRanges(int docId, ChunkReaderContext context, List<ByteRange> ranges) {
+    if (_isCompressed) {
+      recordDocIdRanges(docId, context, ranges);
+    } else {
+      recordDocIdRangesUncompressed(docId, ROW_OFFSET_SIZE, ranges);
+    }
+  }
+
+  @Override
+  public boolean isFixedOffsetMappingType() {
+    return false;
+  }
+
+  @Override
+  public long getRawDataStartOffset() {
+    throw new UnsupportedOperationException("Forward index is not fixed length type");
+  }
+
+  @Override
+  public int getDocLength() {
+    throw new UnsupportedOperationException("Forward index is not fixed length type");
   }
 }

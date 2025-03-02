@@ -30,7 +30,7 @@ import java.util.stream.Collectors;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.common.utils.FileUploadDownloadClient;
 import org.apache.pinot.common.utils.SqlResultComparator;
-import org.apache.pinot.common.utils.TarGzCompressionUtils;
+import org.apache.pinot.common.utils.TarCompressionUtils;
 import org.apache.pinot.controller.api.resources.TableViews;
 import org.apache.pinot.controller.helix.ControllerTest;
 import org.apache.pinot.segment.local.segment.creator.impl.SegmentIndexCreationDriverImpl;
@@ -65,7 +65,7 @@ import org.slf4j.LoggerFactory;
 public class SegmentOp extends BaseOp {
   private static final Logger LOGGER = LoggerFactory.getLogger(SegmentOp.class);
   private static final FileFormat DEFAULT_FILE_FORMAT = FileFormat.CSV;
-  private static final int DEFAULT_MAX_SLEEP_TIME_MS = 60000;
+  private static final int DEFAULT_MAX_SLEEP_TIME_MS = 120000;
   private static final int DEFAULT_SLEEP_INTERVAL_MS = 1000;
 
   public enum Op {
@@ -84,6 +84,7 @@ public class SegmentOp extends BaseOp {
   public SegmentOp() {
     super(OpType.SEGMENT_OP);
   }
+
 
   public Op getOp() {
     return _op;
@@ -207,8 +208,8 @@ public class SegmentOp extends BaseOp {
     driver.build();
     File indexDir = new File(outputDir, _segmentName);
     LOGGER.info("Successfully created segment: {} at directory: {}", _segmentName, indexDir);
-    File segmentTarFile = new File(outputDir, _segmentName + TarGzCompressionUtils.TAR_GZ_FILE_EXTENSION);
-    TarGzCompressionUtils.createTarGzFile(indexDir, segmentTarFile);
+    File segmentTarFile = new File(outputDir, _segmentName + TarCompressionUtils.TAR_GZ_FILE_EXTENSION);
+    TarCompressionUtils.createCompressedTarFile(indexDir, segmentTarFile);
     LOGGER.info("Tarring segment from: {} to: {}", indexDir, segmentTarFile);
 
     return segmentTarFile;
@@ -232,8 +233,8 @@ public class SegmentOp extends BaseOp {
    * Verify given table and segment name in the controller are in the state matching the parameter.
    * @param state of the segment to be verified in the controller.
    * @return true if segment is in the state provided in the parameter, else false.
-   * @throws IOException
-   * @throws InterruptedException
+   * @throws IOException when unable to get the external view for the table.
+   * @throws InterruptedException when thread sleep is interrupted.
    */
   private boolean verifySegmentInState(String state)
       throws IOException, InterruptedException {
@@ -307,8 +308,8 @@ public class SegmentOp extends BaseOp {
   /**
    * Verify given table name and segment name deleted from the controller.
    * @return true if no segment found, else false.
-   * @throws IOException
-   * @throws InterruptedException
+   * @throws IOException when unable to get the external view for the table.
+   * @throws InterruptedException when thread sleep is interrupted.
    */
   private boolean verifySegmentDeleted()
       throws IOException, InterruptedException {

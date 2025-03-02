@@ -40,8 +40,12 @@ import javax.ws.rs.WebApplicationException;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
-import org.apache.pinot.common.utils.LoggerFileServer;
 import org.apache.pinot.common.utils.LoggerUtils;
+import org.apache.pinot.common.utils.log.DummyLogFileServer;
+import org.apache.pinot.common.utils.log.LogFileServer;
+import org.apache.pinot.core.auth.Actions;
+import org.apache.pinot.core.auth.Authorize;
+import org.apache.pinot.core.auth.TargetType;
 
 import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
 
@@ -51,23 +55,26 @@ import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_K
  */
 @Api(tags = "Logger", authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
 @SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
-    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
+    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY,
+    description = "The format of the key is  ```\"Basic <token>\" or \"Bearer <token>\"```")))
 @Path("/")
 public class PinotBrokerLogger {
 
   @Inject
-  private LoggerFileServer _loggerFileServer;
+  private LogFileServer _logFileServer;
 
   @GET
   @Path("/loggers")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.GET_LOGGER)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "Get all the loggers", notes = "Return all the logger names")
   public List<String> getLoggers() {
-    return LoggerUtils.getAllLoggers();
+    return LoggerUtils.getAllConfiguredLoggers();
   }
 
   @GET
   @Path("/loggers/{loggerName}")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.GET_LOGGER)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "Get logger configs", notes = "Return logger info")
   public Map<String, String> getLogger(
@@ -81,6 +88,7 @@ public class PinotBrokerLogger {
 
   @PUT
   @Path("/loggers/{loggerName}")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.UPDATE_LOGGER)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "Set logger level", notes = "Set logger level for a given logger")
   public Map<String, String> setLoggerLevel(@ApiParam(value = "Logger name") @PathParam("loggerName") String loggerName,
@@ -90,14 +98,15 @@ public class PinotBrokerLogger {
 
   @GET
   @Path("/loggers/files")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.GET_LOG_FILE)
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "Get all local log files")
   public Set<String> getLocalLogFiles() {
     try {
-      if (_loggerFileServer == null) {
+      if (_logFileServer == null || _logFileServer instanceof DummyLogFileServer) {
         throw new WebApplicationException("Root log directory doesn't exist", Response.Status.INTERNAL_SERVER_ERROR);
       }
-      return _loggerFileServer.getAllPaths();
+      return _logFileServer.getAllLogFilePaths();
     } catch (IOException e) {
       throw new WebApplicationException(e, Response.Status.INTERNAL_SERVER_ERROR);
     }
@@ -105,14 +114,15 @@ public class PinotBrokerLogger {
 
   @GET
   @Path("/loggers/download")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.GET_LOG_FILE)
   @Produces(MediaType.APPLICATION_OCTET_STREAM)
   @ApiOperation(value = "Download a log file")
   public Response downloadLogFile(
       @ApiParam(value = "Log file path", required = true) @QueryParam("filePath") String filePath) {
-    if (_loggerFileServer == null) {
+    if (_logFileServer == null || _logFileServer instanceof DummyLogFileServer) {
       throw new WebApplicationException("Root log directory is not configured",
           Response.Status.INTERNAL_SERVER_ERROR);
     }
-    return _loggerFileServer.downloadLogFile(filePath);
+    return _logFileServer.downloadLogFile(filePath);
   }
 }

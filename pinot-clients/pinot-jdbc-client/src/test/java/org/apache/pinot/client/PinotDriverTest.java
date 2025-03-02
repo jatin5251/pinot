@@ -21,15 +21,17 @@ package org.apache.pinot.client;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.HashSet;
 import java.util.Set;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
-
 public class PinotDriverTest {
   static final String DB_URL = "jdbc:pinot://localhost:8000?controller=localhost:9000";
+  static final String BAD_URL = "jdbc:someOtherDB://localhost:8000?controller=localhost:9000";
+  static final String GOOD_URL_NO_CONNECTION = "jdbc:pinot://localhost:1111?controller=localhost:2222";
 
   @Test(enabled = false)
   public void testDriver()
@@ -58,5 +60,17 @@ public class PinotDriverTest {
     statement.close();
     ;
     conn.close();
+  }
+
+  @Test(expectedExceptions = SQLException.class,
+      expectedExceptionsMessageRegExp = "No suitable driver found for jdbc:someOtherDB:.*")
+  public void testDriverBadURL() throws Exception {
+    DriverManager.getConnection(BAD_URL);
+  }
+
+  @Test(expectedExceptions = SQLException.class,
+      expectedExceptionsMessageRegExp = "Failed to connect to url : jdbc:pinot:.*")
+  public void testDriverGoodURLNoConnection() throws Exception {
+    DriverManager.getConnection(GOOD_URL_NO_CONNECTION);
   }
 }

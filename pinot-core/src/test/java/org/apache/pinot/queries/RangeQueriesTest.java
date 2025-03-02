@@ -24,6 +24,7 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.core.common.Operator;
 import org.apache.pinot.core.operator.query.FastFilteredCountOperator;
@@ -41,6 +42,7 @@ import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.readers.GenericRow;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -51,7 +53,6 @@ import static org.testng.Assert.assertTrue;
 
 
 public class RangeQueriesTest extends BaseQueriesTest {
-
   private static final File INDEX_DIR = new File(FileUtils.getTempDirectory(), "RangeQueriesTest");
   private static final String RAW_TABLE_NAME = "testTable";
   private static final String SEGMENT_NAME = "testSegment";
@@ -64,20 +65,17 @@ public class RangeQueriesTest extends BaseQueriesTest {
   private static final String RAW_FLOAT_COL = "rawFloatCol";
   private static final String RAW_DOUBLE_COL = "rawDoubleCol";
 
-  private static final Schema SCHEMA = new Schema.SchemaBuilder()
-      .addSingleValueDimension(DICTIONARIZED_INT_COL, FieldSpec.DataType.INT)
-      .addSingleValueDimension(RAW_INT_COL, FieldSpec.DataType.INT)
-      .addSingleValueDimension(RAW_LONG_COL, FieldSpec.DataType.LONG)
-      .addSingleValueDimension(RAW_FLOAT_COL, FieldSpec.DataType.FLOAT)
-      .addSingleValueDimension(RAW_DOUBLE_COL, FieldSpec.DataType.DOUBLE)
-      .build();
+  private static final Schema SCHEMA =
+      new Schema.SchemaBuilder().addSingleValueDimension(DICTIONARIZED_INT_COL, FieldSpec.DataType.INT)
+          .addSingleValueDimension(RAW_INT_COL, FieldSpec.DataType.INT)
+          .addSingleValueDimension(RAW_LONG_COL, FieldSpec.DataType.LONG)
+          .addSingleValueDimension(RAW_FLOAT_COL, FieldSpec.DataType.FLOAT)
+          .addSingleValueDimension(RAW_DOUBLE_COL, FieldSpec.DataType.DOUBLE).build();
 
-  private static final TableConfig TABLE_CONFIG =
-      new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME)
-          .setNoDictionaryColumns(Arrays.asList(RAW_INT_COL, RAW_LONG_COL, RAW_FLOAT_COL, RAW_DOUBLE_COL))
-          .setRangeIndexColumns(Arrays.asList(DICTIONARIZED_INT_COL, RAW_INT_COL, RAW_LONG_COL, RAW_FLOAT_COL,
-              RAW_DOUBLE_COL))
-          .build();
+  private static final TableConfig TABLE_CONFIG = new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME)
+      .setNoDictionaryColumns(Arrays.asList(RAW_INT_COL, RAW_LONG_COL, RAW_FLOAT_COL, RAW_DOUBLE_COL))
+      .setRangeIndexColumns(
+          Arrays.asList(DICTIONARIZED_INT_COL, RAW_INT_COL, RAW_LONG_COL, RAW_FLOAT_COL, RAW_DOUBLE_COL)).build();
 
   private IndexSegment _indexSegment;
   private List<IndexSegment> _indexSegments;
@@ -97,6 +95,9 @@ public class RangeQueriesTest extends BaseQueriesTest {
     return _indexSegments;
   }
 
+  private Set<String> _noDictionaryColumns;
+  private Set<String> _rangeIndexColumns;
+
   @BeforeClass
   public void setUp()
       throws Exception {
@@ -112,7 +113,6 @@ public class RangeQueriesTest extends BaseQueriesTest {
       record.putValue(RAW_DOUBLE_COL, (double) intValue);
       records.add(record);
     }
-
     SegmentGeneratorConfig segmentGeneratorConfig = new SegmentGeneratorConfig(TABLE_CONFIG, SCHEMA);
     segmentGeneratorConfig.setTableName(RAW_TABLE_NAME);
     segmentGeneratorConfig.setSegmentName(SEGMENT_NAME);
@@ -122,9 +122,10 @@ public class RangeQueriesTest extends BaseQueriesTest {
     driver.init(segmentGeneratorConfig, new GenericRowRecordReader(records));
     driver.build();
 
-    IndexLoadingConfig indexLoadingConfig = new IndexLoadingConfig();
-    indexLoadingConfig.setRangeIndexColumns(
-        new HashSet<>(Arrays.asList(DICTIONARIZED_INT_COL, RAW_INT_COL, RAW_LONG_COL, RAW_FLOAT_COL, RAW_DOUBLE_COL)));
+    _noDictionaryColumns = new HashSet<>(Arrays.asList(RAW_INT_COL, RAW_LONG_COL, RAW_FLOAT_COL, RAW_DOUBLE_COL));
+    _rangeIndexColumns =
+        new HashSet<>(Arrays.asList(DICTIONARIZED_INT_COL, RAW_INT_COL, RAW_LONG_COL, RAW_FLOAT_COL, RAW_DOUBLE_COL));
+    IndexLoadingConfig indexLoadingConfig = new IndexLoadingConfig(TABLE_CONFIG, SCHEMA);
 
     ImmutableSegment immutableSegment =
         ImmutableSegmentLoader.load(new File(INDEX_DIR, SEGMENT_NAME), indexLoadingConfig);
@@ -132,8 +133,19 @@ public class RangeQueriesTest extends BaseQueriesTest {
     _indexSegments = Arrays.asList(immutableSegment, immutableSegment);
   }
 
+  private IndexLoadingConfig createIndexLoadingConfig() {
+    return new IndexLoadingConfig(createTableConfig(), SCHEMA);
+  }
+
+  private TableConfig createTableConfig() {
+    return new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME)
+        .setNoDictionaryColumns(new ArrayList<>(_noDictionaryColumns))
+        .setRangeIndexColumns(new ArrayList<>(_rangeIndexColumns)).build();
+  }
+
   @DataProvider
   public static Object[][] selectionTestCases() {
+    //@formatter:off
     return new Object[][]{
         {buildSelectionQuery(DICTIONARIZED_INT_COL, 250, 500, true), 250, 500, true},
         {buildSelectionQuery(RAW_INT_COL, 250, 500, true), 250, 500, true},
@@ -145,21 +157,60 @@ public class RangeQueriesTest extends BaseQueriesTest {
         {buildSelectionQuery(RAW_LONG_COL, 250, 500, false), 250, 500, false},
         {buildSelectionQuery(RAW_FLOAT_COL, 250, 500, false), 250, 500, false},
         {buildSelectionQuery(RAW_DOUBLE_COL, 250, 500, false), 250, 500, false},
+        {buildSelectionQuery(DICTIONARIZED_INT_COL, 300), 300, 300, true},
+        {buildSelectionQuery(RAW_INT_COL, 300), 300, 300, true},
+        {buildSelectionQuery(RAW_LONG_COL, 300), 300, 300, true},
+        {buildSelectionQuery(RAW_FLOAT_COL, 300), 300, 300, true},
+        {buildSelectionQuery(RAW_DOUBLE_COL, 300), 300, 300, true},
+        {buildSelectionQuery(DICTIONARIZED_INT_COL, 301), 301, 301, true},
+        {buildSelectionQuery(RAW_INT_COL, 301), 301, 301, true},
+        {buildSelectionQuery(RAW_LONG_COL, 301), 301, 301, true},
+        {buildSelectionQuery(RAW_FLOAT_COL, 301), 301, 301, true},
+        {buildSelectionQuery(RAW_DOUBLE_COL, 301), 301, 301, true},
+
+        // Boundary value
+        {buildSelectionQuery(DICTIONARIZED_INT_COL, 0, 500, true), 0, 500, true},
+        {buildSelectionQuery(RAW_INT_COL, 0, 500, true), 0, 500, true},
+        {buildSelectionQuery(RAW_LONG_COL, 0, 500, true), 0, 500, true},
+        {buildSelectionQuery(RAW_FLOAT_COL, 0, 500, true), 0, 500, true},
+        {buildSelectionQuery(RAW_DOUBLE_COL, 0, 500, true), 0, 500, true},
+        {buildSelectionQuery(DICTIONARIZED_INT_COL, 99500, 99900, false), 99500, 99900, false},
+        {buildSelectionQuery(RAW_INT_COL, 99500, 99900, false), 99500, 99900, false},
+        {buildSelectionQuery(RAW_LONG_COL, 99500, 99900, false), 99500, 99900, false},
+        {buildSelectionQuery(RAW_FLOAT_COL, 99500, 99900, false), 99500, 99900, false},
+        {buildSelectionQuery(RAW_DOUBLE_COL, 99500, 99900, false), 99500, 99900, false},
+        {buildSelectionQuery(DICTIONARIZED_INT_COL, 0), 0, 0, true},
+        {buildSelectionQuery(RAW_INT_COL, 0), 0, 0, true},
+        {buildSelectionQuery(RAW_LONG_COL, 0), 0, 0, true},
+        {buildSelectionQuery(RAW_FLOAT_COL, 0), 0, 0, true},
+        {buildSelectionQuery(RAW_DOUBLE_COL, 0), 0, 0, true},
+        {buildSelectionQuery(DICTIONARIZED_INT_COL, 99900), 99900, 99900, true},
+        {buildSelectionQuery(RAW_INT_COL, 99900), 99900, 99900, true},
+        {buildSelectionQuery(RAW_LONG_COL, 99900), 99900, 99900, true},
+        {buildSelectionQuery(RAW_FLOAT_COL, 99900), 99900, 99900, true},
+        {buildSelectionQuery(RAW_DOUBLE_COL, 99900), 99900, 99900, true}
     };
+    //@formatter:on
   }
 
   private static String buildSelectionQuery(String filterCol, Number min, Number max, boolean inclusive) {
     if (inclusive) {
-      return "select " + RAW_INT_COL + " from " + RAW_TABLE_NAME + " where " + filterCol + " between "
-          + buildFilter(filterCol, min, max);
+      return "select " + RAW_INT_COL + " from " + RAW_TABLE_NAME + " where " + filterCol + " between " + buildFilter(
+          filterCol, min, max);
     } else {
-      return "select " + RAW_INT_COL + " from " + RAW_TABLE_NAME + " where " + filterCol + " > "
-          + formatValue(filterCol, min) + " and " + filterCol + " < " + formatValue(filterCol, max);
+      return "select " + RAW_INT_COL + " from " + RAW_TABLE_NAME + " where " + filterCol + " > " + formatValue(
+          filterCol, min) + " and " + filterCol + " < " + formatValue(filterCol, max);
     }
+  }
+
+  private static String buildSelectionQuery(String filterCol, Number value) {
+    return "select " + RAW_INT_COL + " from " + RAW_TABLE_NAME + " where " + filterCol + " = " + formatValue(filterCol,
+        value);
   }
 
   @DataProvider
   public static Object[][] countTestCases() {
+    //@formatter:off
     return new Object[][]{
         {buildCountQuery(DICTIONARIZED_INT_COL, 250, 500, true), 3},
         {buildCountQuery(RAW_INT_COL, 250, 500, true), 3},
@@ -171,17 +222,54 @@ public class RangeQueriesTest extends BaseQueriesTest {
         {buildCountQuery(RAW_LONG_COL, 250, 500, false), 2},
         {buildCountQuery(RAW_FLOAT_COL, 250, 500, false), 2},
         {buildCountQuery(RAW_DOUBLE_COL, 250, 500, false), 2},
+        {buildCountQuery(DICTIONARIZED_INT_COL, 300), 1},
+        {buildCountQuery(RAW_INT_COL, 300), 1},
+        {buildCountQuery(RAW_LONG_COL, 300), 1},
+        {buildCountQuery(RAW_FLOAT_COL, 300), 1},
+        {buildCountQuery(RAW_DOUBLE_COL, 300), 1},
+        {buildCountQuery(DICTIONARIZED_INT_COL, 301), 0},
+        {buildCountQuery(RAW_INT_COL, 301), 0},
+        {buildCountQuery(RAW_LONG_COL, 301), 0},
+        {buildCountQuery(RAW_FLOAT_COL, 301), 0},
+        {buildCountQuery(RAW_DOUBLE_COL, 301), 0},
+
+        // Boundary value
+        {buildCountQuery(DICTIONARIZED_INT_COL, 0, 500, true), 6},
+        {buildCountQuery(RAW_INT_COL, 0, 500, true), 6},
+        {buildCountQuery(RAW_LONG_COL, 0, 500, true), 6},
+        {buildCountQuery(RAW_FLOAT_COL, 0, 500, true), 6},
+        {buildCountQuery(RAW_DOUBLE_COL, 0, 500, true), 6},
+        {buildCountQuery(DICTIONARIZED_INT_COL, 99500, 99900, false), 3},
+        {buildCountQuery(RAW_INT_COL, 99500, 99900, false), 3},
+        {buildCountQuery(RAW_LONG_COL, 99500, 99900, false), 3},
+        {buildCountQuery(RAW_FLOAT_COL, 99500, 99900, false), 3},
+        {buildCountQuery(RAW_DOUBLE_COL, 99500, 99900, false), 3},
+        {buildCountQuery(DICTIONARIZED_INT_COL, 0), 1},
+        {buildCountQuery(RAW_INT_COL, 0), 1},
+        {buildCountQuery(RAW_LONG_COL, 0), 1},
+        {buildCountQuery(RAW_FLOAT_COL, 0), 1},
+        {buildCountQuery(RAW_DOUBLE_COL, 0), 1},
+        {buildCountQuery(DICTIONARIZED_INT_COL, 99900), 1},
+        {buildCountQuery(RAW_INT_COL, 99900), 1},
+        {buildCountQuery(RAW_LONG_COL, 99900), 1},
+        {buildCountQuery(RAW_FLOAT_COL, 99900), 1},
+        {buildCountQuery(RAW_DOUBLE_COL, 99900), 1}
     };
+    //@formatter:on
   }
 
   private static String buildCountQuery(String filterCol, Number min, Number max, boolean inclusive) {
     if (inclusive) {
-      return "select count(*) from " + RAW_TABLE_NAME + " where " + filterCol + " between "
-          + buildFilter(filterCol, min, max);
+      return "select count(*) from " + RAW_TABLE_NAME + " where " + filterCol + " between " + buildFilter(filterCol,
+          min, max);
     } else {
-      return "select count(*) from " + RAW_TABLE_NAME + " where " + filterCol + " > "
-          + formatValue(filterCol, min) + " and " + filterCol + " < " + formatValue(filterCol, max);
+      return "select count(*) from " + RAW_TABLE_NAME + " where " + filterCol + " > " + formatValue(filterCol, min)
+          + " and " + filterCol + " < " + formatValue(filterCol, max);
     }
+  }
+
+  private static String buildCountQuery(String filterCol, Number value) {
+    return "select count(*) from " + RAW_TABLE_NAME + " where " + filterCol + " = " + formatValue(filterCol, value);
   }
 
   private static String buildFilter(String filterCol, Number min, Number max) {
@@ -227,8 +315,9 @@ public class RangeQueriesTest extends BaseQueriesTest {
   public void testSelectionOverRangeFilterAfterReload(String query, int min, int max, boolean inclusive)
       throws Exception {
     // Enable dictionary on RAW_INT_COL and reload the segment.
-    IndexLoadingConfig indexLoadingConfig = new IndexLoadingConfig(null, TABLE_CONFIG);
-    indexLoadingConfig.getNoDictionaryColumns().remove(RAW_INT_COL);
+    _noDictionaryColumns.remove(RAW_INT_COL);
+    IndexLoadingConfig indexLoadingConfig = createIndexLoadingConfig();
+
     File indexDir = new File(INDEX_DIR, SEGMENT_NAME);
     ImmutableSegment immutableSegment = reloadSegment(indexDir, indexLoadingConfig, SCHEMA);
     _indexSegment = immutableSegment;
@@ -242,9 +331,9 @@ public class RangeQueriesTest extends BaseQueriesTest {
       assertTrue(inclusive ? value <= max : value < max);
     }
 
+    _noDictionaryColumns.remove(RAW_DOUBLE_COL);
     // Enable dictionary on RAW_DOUBLE_COL and reload the segment.
-    indexLoadingConfig = new IndexLoadingConfig(null, TABLE_CONFIG);
-    indexLoadingConfig.getNoDictionaryColumns().remove(RAW_DOUBLE_COL);
+    indexLoadingConfig = createIndexLoadingConfig();
     indexDir = new File(INDEX_DIR, SEGMENT_NAME);
     immutableSegment = reloadSegment(indexDir, indexLoadingConfig, SCHEMA);
     _indexSegment = immutableSegment;
@@ -273,13 +362,13 @@ public class RangeQueriesTest extends BaseQueriesTest {
   public void testCountOverRangeFilterAfterReload(String query, int expectedCount)
       throws Exception {
     // Enable dictionary on RAW_LONG_COL and reload the segment.
-    IndexLoadingConfig indexLoadingConfig = new IndexLoadingConfig(null, TABLE_CONFIG);
-    indexLoadingConfig.getNoDictionaryColumns().remove(RAW_LONG_COL);
+    _noDictionaryColumns.remove(RAW_LONG_COL);
+
+    IndexLoadingConfig indexLoadingConfig = createIndexLoadingConfig();
     File indexDir = new File(INDEX_DIR, SEGMENT_NAME);
     ImmutableSegment immutableSegment = reloadSegment(indexDir, indexLoadingConfig, SCHEMA);
     _indexSegment = immutableSegment;
     _indexSegments = Arrays.asList(immutableSegment, immutableSegment);
-
 
     Operator<?> operator = getOperator(query);
     assertTrue(operator instanceof FastFilteredCountOperator);
@@ -289,8 +378,8 @@ public class RangeQueriesTest extends BaseQueriesTest {
     assertEquals(((Number) aggregationResult.get(0)).intValue(), expectedCount, query);
 
     // Enable dictionary on RAW_FLOAT_COL and reload the segment.
-    indexLoadingConfig = new IndexLoadingConfig(null, TABLE_CONFIG);
-    indexLoadingConfig.getNoDictionaryColumns().remove(RAW_FLOAT_COL);
+    _noDictionaryColumns.remove(RAW_FLOAT_COL);
+    indexLoadingConfig = createIndexLoadingConfig();
     immutableSegment = reloadSegment(indexDir, indexLoadingConfig, SCHEMA);
     _indexSegment = immutableSegment;
     _indexSegments = Arrays.asList(immutableSegment, immutableSegment);
@@ -301,5 +390,11 @@ public class RangeQueriesTest extends BaseQueriesTest {
     assertNotNull(aggregationResult);
     assertEquals(aggregationResult.size(), 1);
     assertEquals(((Number) aggregationResult.get(0)).intValue(), expectedCount, query);
+  }
+
+  @AfterClass
+  public void tearDown() {
+    _indexSegment.destroy();
+    FileUtils.deleteQuietly(INDEX_DIR);
   }
 }

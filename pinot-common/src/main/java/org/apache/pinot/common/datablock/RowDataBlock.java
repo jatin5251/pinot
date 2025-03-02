@@ -18,22 +18,19 @@
  */
 package org.apache.pinot.common.datablock;
 
-import java.io.IOException;
-import java.nio.ByteBuffer;
+import javax.annotation.Nonnull;
 import org.apache.pinot.common.utils.DataSchema;
+import org.apache.pinot.segment.spi.memory.DataBuffer;
 
 
 /**
  * Wrapper for row-wise data table. It stores data in row-major format.
  */
 public class RowDataBlock extends BaseDataBlock {
-  private static final int VERSION = 1;
+  private static final int VERSION = 2;
   protected int[] _columnOffsets;
   protected int _rowSizeInBytes;
-
-  public RowDataBlock() {
-    super();
-  }
+  private int _fixDataSize;
 
   public RowDataBlock(int numRows, DataSchema dataSchema, String[] stringDictionary,
       byte[] fixedSizeDataBytes, byte[] variableSizeDataBytes) {
@@ -41,9 +38,9 @@ public class RowDataBlock extends BaseDataBlock {
     computeBlockObjectConstants();
   }
 
-  public RowDataBlock(ByteBuffer byteBuffer)
-      throws IOException {
-    super(byteBuffer);
+  public RowDataBlock(int numRows, DataSchema dataSchema, String[] stringDictionary,
+      DataBuffer fixedSizeDataBytes, DataBuffer variableSizeDataBytes) {
+    super(numRows, dataSchema, stringDictionary, fixedSizeDataBytes, variableSizeDataBytes);
     computeBlockObjectConstants();
   }
 
@@ -56,8 +53,8 @@ public class RowDataBlock extends BaseDataBlock {
   }
 
   @Override
-  protected int getDataBlockVersionType() {
-    return VERSION + (Type.ROW.ordinal() << DataBlockUtils.VERSION_TYPE_SHIFT);
+  protected int getFixDataSize() {
+    return _fixDataSize;
   }
 
   @Override
@@ -65,29 +62,20 @@ public class RowDataBlock extends BaseDataBlock {
     return rowId * _rowSizeInBytes + _columnOffsets[colId];
   }
 
-  @Override
-  protected int positionOffsetInVariableBufferAndGetLength(int rowId, int colId) {
-    int offset = getOffsetInFixedBuffer(rowId, colId);
-    _variableSizeData.position(_fixedSizeData.getInt(offset));
-    return _fixedSizeData.getInt(offset + 4);
-  }
-
-  @Override
-  public RowDataBlock toMetadataOnlyDataTable() {
-    RowDataBlock metadataOnlyDataTable = new RowDataBlock();
-    metadataOnlyDataTable._metadata.putAll(_metadata);
-    metadataOnlyDataTable._errCodeToExceptionMap.putAll(_errCodeToExceptionMap);
-    return metadataOnlyDataTable;
-  }
-
-  @Override
-  public RowDataBlock toDataOnlyDataTable() {
-    return new RowDataBlock(_numRows, _dataSchema, _stringDictionary, _fixedSizeDataBytes, _variableSizeDataBytes);
-  }
-
   public int getRowSizeInBytes() {
     return _rowSizeInBytes;
   }
 
-  // TODO: add whole-row access methods.
+  @Override
+  public Type getDataBlockType() {
+    return Type.ROW;
+  }
+
+  @Nonnull // the method is override just to override its nullability annotation
+  @Override
+  public DataSchema getDataSchema() {
+    return super.getDataSchema();
+  }
+
+// TODO: add whole-row access methods.
 }

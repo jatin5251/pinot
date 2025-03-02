@@ -19,32 +19,34 @@
 package org.apache.pinot.client;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableList;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.annotation.Nullable;
 import org.I0Itec.zkclient.IZkDataListener;
 import org.I0Itec.zkclient.ZkClient;
 import org.I0Itec.zkclient.serialize.BytesPushThroughSerializer;
+import org.apache.pinot.client.utils.BrokerSelectorUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /**
  * Maintains a mapping between table name and list of brokers
  */
 public class DynamicBrokerSelector implements BrokerSelector, IZkDataListener {
-  private static final Random RANDOM = new Random();
+  private static final Logger LOGGER = LoggerFactory.getLogger(DynamicBrokerSelector.class);
 
-  private final AtomicReference<Map<String, List<String>>> _tableToBrokerListMapRef = new AtomicReference<>();
-  private final AtomicReference<List<String>> _allBrokerListRef = new AtomicReference<>();
-  private final ZkClient _zkClient;
-  private final ExternalViewReader _evReader;
-  private final List<String> _brokerList;
+  protected final AtomicReference<Map<String, List<String>>> _tableToBrokerListMapRef = new AtomicReference<>();
+  protected final AtomicReference<List<String>> _allBrokerListRef = new AtomicReference<>();
+  protected final ZkClient _zkClient;
+  protected final ExternalViewReader _evReader;
   //The preferTlsPort will be mapped to client config in the future, when we support full TLS
   public DynamicBrokerSelector(String zkServers, boolean preferTlsPort) {
     _zkClient = getZkClient(zkServers);
@@ -52,7 +54,6 @@ public class DynamicBrokerSelector implements BrokerSelector, IZkDataListener {
     _zkClient.waitUntilConnected(60, TimeUnit.SECONDS);
     _zkClient.subscribeDataChanges(ExternalViewReader.BROKER_EXTERNAL_VIEW_PATH, this);
     _evReader = getEvReader(_zkClient, preferTlsPort);
-    _brokerList = ImmutableList.of(zkServers);
     refresh();
   }
   public DynamicBrokerSelector(String zkServers) {
@@ -82,39 +83,32 @@ public class DynamicBrokerSelector implements BrokerSelector, IZkDataListener {
       brokerSet.addAll(brokerList);
     }
     _allBrokerListRef.set(new ArrayList<>(brokerSet));
+    LOGGER.info("Refreshed table to broker list map: {}", _tableToBrokerListMapRef.get());
   }
 
   @Nullable
   @Override
-  public String selectBroker(String table) {
-    if (table != null) {
-      String tableName =
-          table.replace(ExternalViewReader.OFFLINE_SUFFIX, "").replace(ExternalViewReader.REALTIME_SUFFIX, "");
-      List<String> list = _tableToBrokerListMapRef.get().get(tableName);
-      if (list != null && !list.isEmpty()) {
-        return list.get(RANDOM.nextInt(list.size()));
-      }
-      // In case tableName is formatted as <db>.<table>
-      int idx = tableName.indexOf('.');
-      if (idx > 0) {
-        tableName = tableName.substring(idx + 1);
-      }
-      list = _tableToBrokerListMapRef.get().get(tableName);
-      if (list != null && !list.isEmpty()) {
-        return list.get(RANDOM.nextInt(list.size()));
+  public String selectBroker(String... tableNames) {
+    if (!(tableNames == null || tableNames.length == 0 || tableNames[0] == null)) {
+      // getting list of brokers hosting all the tables.
+      String randomBroker = BrokerSelectorUtils.getRandomBroker(Arrays.asList(tableNames),
+          _tableToBrokerListMapRef.get());
+      if (randomBroker != null) {
+        return randomBroker;
       }
     }
+
     // Return a broker randomly if table is null or no broker is found for the specified table.
     List<String> list = _allBrokerListRef.get();
     if (list != null && !list.isEmpty()) {
-      return list.get(RANDOM.nextInt(list.size()));
+      return list.get(ThreadLocalRandom.current().nextInt(list.size()));
     }
     return null;
   }
 
   @Override
   public List<String> getBrokers() {
-    return _brokerList;
+    return _allBrokerListRef.get();
   }
 
   @Override

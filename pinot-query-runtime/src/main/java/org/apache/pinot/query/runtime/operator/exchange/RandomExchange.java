@@ -19,13 +19,13 @@
 package org.apache.pinot.query.runtime.operator.exchange;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.Iterators;
-import java.util.Iterator;
+import java.io.IOException;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Function;
 import java.util.function.IntFunction;
-import org.apache.pinot.query.mailbox.MailboxIdentifier;
-import org.apache.pinot.query.mailbox.MailboxService;
+import org.apache.pinot.query.mailbox.SendingMailbox;
 import org.apache.pinot.query.runtime.blocks.BlockSplitter;
 import org.apache.pinot.query.runtime.blocks.TransferableBlock;
 
@@ -39,21 +39,26 @@ class RandomExchange extends BlockExchange {
 
   private final IntFunction<Integer> _rand;
 
-  RandomExchange(MailboxService<TransferableBlock> mailbox, List<MailboxIdentifier> destinations,
-      BlockSplitter splitter) {
-    this(mailbox, destinations, RANDOM::nextInt, splitter);
+  RandomExchange(List<SendingMailbox> sendingMailboxes, BlockSplitter splitter,
+      Function<List<SendingMailbox>, Integer> statsIndexChooser) {
+    this(sendingMailboxes, RANDOM::nextInt, splitter, statsIndexChooser);
   }
 
-  @VisibleForTesting
-  RandomExchange(MailboxService<TransferableBlock> mailbox, List<MailboxIdentifier> destinations,
-      IntFunction<Integer> rand, BlockSplitter splitter) {
-    super(mailbox, destinations, splitter);
+  RandomExchange(List<SendingMailbox> sendingMailboxes, IntFunction<Integer> rand, BlockSplitter splitter,
+      Function<List<SendingMailbox>, Integer> statsIndexChooser) {
+    super(sendingMailboxes, splitter, statsIndexChooser);
     _rand = rand;
   }
 
+  @VisibleForTesting
+  RandomExchange(List<SendingMailbox> sendingMailboxes, IntFunction<Integer> rand, BlockSplitter splitter) {
+    this(sendingMailboxes, rand, splitter, RANDOM_INDEX_CHOOSER);
+  }
+
   @Override
-  protected Iterator<RoutedBlock> route(List<MailboxIdentifier> destinations, TransferableBlock block) {
+  protected void route(List<SendingMailbox> destinations, TransferableBlock block)
+      throws IOException, TimeoutException {
     int destinationIdx = _rand.apply(destinations.size());
-    return Iterators.singletonIterator(new RoutedBlock(destinations.get(destinationIdx), block));
+    sendBlock(destinations.get(destinationIdx), block);
   }
 }

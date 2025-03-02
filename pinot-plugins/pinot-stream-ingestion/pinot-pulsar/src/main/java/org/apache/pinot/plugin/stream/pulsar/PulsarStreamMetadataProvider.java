@@ -19,9 +19,11 @@
 package org.apache.pinot.plugin.stream.pulsar;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Sets;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -31,12 +33,13 @@ import org.apache.pinot.spi.stream.PartitionGroupMetadata;
 import org.apache.pinot.spi.stream.StreamConfig;
 import org.apache.pinot.spi.stream.StreamMetadataProvider;
 import org.apache.pinot.spi.stream.StreamPartitionMsgOffset;
+import org.apache.pinot.spi.stream.TransientConsumerException;
+import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.MessageId;
 import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.SubscriptionMode;
-import org.apache.pulsar.client.util.ConsumerName;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,23 +52,37 @@ public class PulsarStreamMetadataProvider extends PulsarPartitionLevelConnection
   private static final Logger LOGGER = LoggerFactory.getLogger(PulsarStreamMetadataProvider.class);
 
   private final int _partition;
+  private final String _topic;
 
   public PulsarStreamMetadataProvider(String clientId, StreamConfig streamConfig) {
     this(clientId, streamConfig, 0);
   }
 
   public PulsarStreamMetadataProvider(String clientId, StreamConfig streamConfig, int partition) {
-    super(clientId, streamConfig, partition);
+    super(clientId, streamConfig);
+    _topic = _config.getPulsarTopicName();
     _partition = partition;
   }
 
   @Override
   public int fetchPartitionCount(long timeoutMillis) {
     try {
-      return _pulsarClient.getPartitionsForTopic(_config.getPulsarTopicName()).get().size();
+      return _pulsarClient.getPartitionsForTopic(_topic).get(timeoutMillis, TimeUnit.MILLISECONDS).size();
+    } catch (TimeoutException e) {
+      throw new TransientConsumerException(e);
     } catch (Exception e) {
-      throw new RuntimeException("Cannot fetch partitions for topic: " + _config.getPulsarTopicName(), e);
+      throw new RuntimeException("Failed to fetch partitions for topic: " + _topic, e);
     }
+  }
+
+  @Override
+  public Set<Integer> fetchPartitionIds(long timeoutMillis) {
+    int partitionCount = fetchPartitionCount(timeoutMillis);
+    Set<Integer> partitionIds = Sets.newHashSetWithExpectedSize(partitionCount);
+    for (int i = 0; i < partitionCount; i++) {
+      partitionIds.add(i);
+    }
+    return partitionIds;
   }
 
   /**
@@ -82,24 +99,22 @@ public class PulsarStreamMetadataProvider extends PulsarPartitionLevelConnection
   public StreamPartitionMsgOffset fetchStreamPartitionOffset(OffsetCriteria offsetCriteria, long timeoutMillis) {
     Preconditions.checkNotNull(offsetCriteria);
     String subscription = "Pinot_" + UUID.randomUUID();
-    MessageId offset = null;
-    try (Consumer consumer =
-        _pulsarClient.newConsumer().topic(_topic)
-            .subscriptionInitialPosition(PulsarUtils.offsetCriteriaToSubscription(offsetCriteria))
-            .subscriptionMode(SubscriptionMode.NonDurable)  // automatically deletes subscription on consumer close
-            .subscriptionName(subscription).subscribe()) {
-
+    MessageId offset;
+    try (Consumer consumer = _pulsarClient.newConsumer().topic(_topic)
+        .subscriptionInitialPosition(PulsarUtils.offsetCriteriaToSubscription(offsetCriteria))
+        .subscriptionMode(SubscriptionMode.NonDurable)  // automatically deletes subscription on consumer close
+        .subscriptionName(subscription).subscribe()) {
       if (offsetCriteria.isLargest()) {
         offset = consumer.getLastMessageId();
       } else if (offsetCriteria.isSmallest()) {
-        offset = consumer.receive().getMessageId();
+        offset = consumer.receive((int) timeoutMillis, TimeUnit.MILLISECONDS).getMessageId();
       } else {
         throw new IllegalArgumentException("Unknown initial offset value " + offsetCriteria);
       }
       return new MessageIdStreamOffset(offset);
     } catch (PulsarClientException e) {
-      LOGGER.error("Cannot fetch offsets for partition " + _partition + " and topic " + _topic + " and offsetCriteria "
-          + offsetCriteria, e);
+      LOGGER.error("Cannot fetch offsets for partition {} and topic {} and offsetCriteria {}", _partition, _topic,
+          offsetCriteria, e);
       return null;
     }
   }
@@ -119,8 +134,7 @@ public class PulsarStreamMetadataProvider extends PulsarPartitionLevelConnection
               partitionGroupConsumptionStatus.getStartOffset()));
     }
 
-    PulsarConfig pulsarConfig = new PulsarConfig(streamConfig, clientId);
-    String subscription = ConsumerName.generateRandomName();
+    String subscription = UUID.randomUUID().toString();
     try {
       List<String> partitionedTopicNameList = _pulsarClient.getPartitionsForTopic(_topic).get();
 
@@ -129,9 +143,8 @@ public class PulsarStreamMetadataProvider extends PulsarPartitionLevelConnection
 
         for (int p = newPartitionStartIndex; p < partitionedTopicNameList.size(); p++) {
           try (Consumer consumer = _pulsarClient.newConsumer().topic(partitionedTopicNameList.get(p))
-              .subscriptionInitialPosition(pulsarConfig.getInitialSubscriberPosition())
-              .subscriptionMode(SubscriptionMode.NonDurable)
-              .subscriptionName(subscription).subscribe()) {
+              .subscriptionInitialPosition(_config.getInitialSubscriberPosition())
+              .subscriptionMode(SubscriptionMode.NonDurable).subscriptionName(subscription).subscribe()) {
 
             Message message = consumer.receive(timeoutMillis, TimeUnit.MILLISECONDS);
             if (message != null) {
@@ -148,13 +161,13 @@ public class PulsarStreamMetadataProvider extends PulsarPartitionLevelConnection
                   new PartitionGroupMetadata(p, new MessageIdStreamOffset(lastMessageId)));
             }
           } catch (PulsarClientException pce) {
-            LOGGER.warn("Error encountered while calculating partition group metadata for topic " + _topic
-                + " partition " + partitionedTopicNameList.get(p), pce);
+            LOGGER.warn("Error encountered while calculating partition group metadata for topic {} partition {}",
+                _config.getPulsarTopicName(), partitionedTopicNameList.get(p), pce);
           }
         }
       }
     } catch (Exception e) {
-      LOGGER.warn("Error encountered when trying to fetch partition list for pulsar topic " + _topic, e);
+      LOGGER.warn("Error encountered when trying to fetch partition list for pulsar topic {}", _topic, e);
     }
     return newPartitionGroupMetadataList;
   }
@@ -163,5 +176,42 @@ public class PulsarStreamMetadataProvider extends PulsarPartitionLevelConnection
   public void close()
       throws IOException {
     super.close();
+  }
+
+  @Override
+  public List<TopicMetadata> getTopics() {
+    try (PulsarAdmin pulsarAdmin = createPulsarAdmin()) {
+      // List to store all topics
+      List<TopicMetadata> allTopics = new ArrayList<>();
+
+      for (String tenant : pulsarAdmin.tenants().getTenants()) {
+        for (String namespace : pulsarAdmin.namespaces().getNamespaces(tenant)) {
+          // Fetch all topics for the namespace
+          List<String> topicNames = pulsarAdmin.topics().getList(namespace);
+
+          // Map topics to PulsarTopicMetadata and add to the list
+          topicNames.stream()
+              .map(topicName -> new PulsarTopicMetadata().setName(topicName))
+              .forEach(allTopics::add);
+        }
+      }
+
+      return allTopics;
+    } catch (Exception e) {
+      throw new RuntimeException("Failed to list Pulsar topics across all tenants and namespaces", e);
+    }
+  }
+
+  public static class PulsarTopicMetadata implements TopicMetadata {
+    private String _name;
+
+    public String getName() {
+      return _name;
+    }
+
+    public PulsarTopicMetadata setName(String name) {
+      _name = name;
+      return this;
+    }
   }
 }

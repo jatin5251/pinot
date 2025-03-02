@@ -23,7 +23,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.Sets;
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import org.apache.pinot.controller.helix.ControllerTest;
 import org.apache.pinot.core.realtime.impl.fakestream.FakeStreamConfigUtils;
 import org.apache.pinot.spi.config.TableConfigs;
@@ -36,8 +38,10 @@ import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.MetricFieldSpec;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.stream.StreamConfig;
+import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
+import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
@@ -67,8 +71,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
     } else {
       StreamConfig streamConfig = FakeStreamConfigUtils.getDefaultLowLevelStreamConfigs();
       return new TableConfigBuilder(TableType.REALTIME).setTableName(tableName).setTimeColumnName("timeColumn")
-          .setRetentionTimeUnit("DAYS").setLLC(true).setRetentionTimeValue("5")
-          .setStreamConfigs(streamConfig.getStreamConfigsMap());
+          .setRetentionTimeUnit("DAYS").setRetentionTimeValue("5").setStreamConfigs(streamConfig.getStreamConfigsMap());
     }
   }
 
@@ -243,6 +246,52 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
       // expected
     }
 
+    // table name check fails when database context is not passed in header but one of the configs has database prefix
+    Schema dummySchema = createDummySchema(tableName);
+    TableConfig offlineTableConfig1 = createOfflineTableConfig("db1." + tableName);
+    TableConfig realtimeTableConfig1 = createRealtimeTableConfig(tableName);
+    tableConfigs = new TableConfigs(tableName, dummySchema, offlineTableConfig1, realtimeTableConfig1);
+    try {
+      sendPostRequest(validateConfigUrl, tableConfigs.toPrettyJsonString());
+      fail("Creation of an TableConfigs without database context in header but provided in one of the configs should "
+          + "fail");
+    } catch (Exception e) {
+      // expected
+    }
+    // fails with schema as well
+    offlineTableConfig1.setTableName(TableNameBuilder.OFFLINE.tableNameWithType(tableName));
+    dummySchema.setSchemaName("db1." + tableName);
+    try {
+      sendPostRequest(validateConfigUrl, tableConfigs.toPrettyJsonString());
+      fail("Creation of an TableConfigs without database context in header but provided in one of the configs should "
+          + "fail");
+    } catch (Exception e) {
+      // expected
+    }
+
+    // fails even though both configs and schema have the database prefix in the table names but
+    // database context is not passed in header
+    tableConfigs.setTableName("db1." + tableName);
+    try {
+      sendPostRequest(validateConfigUrl, tableConfigs.toPrettyJsonString());
+      fail("Creation of an TableConfigs without database context in header but provided in all of the configs should "
+          + "fail");
+    } catch (Exception e) {
+      // expected
+    }
+
+    // successfully created with all 3 configs when database context is passed in header and configs may or may not
+    // have the database prefix in the table names
+    Map<String, String> headers = new HashMap<>();
+    tableConfigs.setTableName(tableName);
+    headers.put(CommonConstants.DATABASE, "db1");
+    // only schema has the database prefix
+    dummySchema.setSchemaName("db1." + tableName);
+    sendPostRequest(validateConfigUrl, tableConfigs.toPrettyJsonString(), headers);
+    // one of the table config has database prefix
+    offlineTableConfig1.setTableName(TableNameBuilder.OFFLINE.tableNameWithType(tableName));
+    sendPostRequest(validateConfigUrl, tableConfigs.toPrettyJsonString(), headers);
+
     // successfully created with all 3 configs
     String tableName1 = "testValidate1";
     tableConfigs = new TableConfigs(tableName1, createDummySchema(tableName1), createOfflineTableConfig(tableName1),
@@ -300,7 +349,7 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
     TableConfig replicaTestOfflineTableConfig = createOfflineTableConfig(tableName);
     TableConfig replicaTestRealtimeTableConfig = createRealtimeTableConfig(tableName);
     replicaTestOfflineTableConfig.getValidationConfig().setReplication("1");
-    replicaTestRealtimeTableConfig.getValidationConfig().setReplicasPerPartition("1");
+    replicaTestRealtimeTableConfig.getValidationConfig().setReplication("1");
     tableConfigs = new TableConfigs(tableName, createDummySchema(tableName), replicaTestOfflineTableConfig,
         replicaTestRealtimeTableConfig);
     sendPostRequest(_createTableConfigsUrl, tableConfigs.toPrettyJsonString());
@@ -486,6 +535,46 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
   }
 
   @Test
+  public void testForceUpdateTableSchemaAndConfigs()
+      throws IOException {
+    String tableName = "testUpdate1";
+    TableConfig offlineTableConfig = createOfflineTableConfig(tableName);
+    Schema schema = createDummySchema(tableName);
+    TableConfigs tableConfigs = new TableConfigs(tableName, schema, offlineTableConfig, null);
+
+    sendPostRequest(_createTableConfigsUrl, tableConfigs.toPrettyJsonString());
+    String response = sendGetRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsGet(tableName));
+    TableConfigs tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
+    Assert.assertNotNull(tableConfigs.getOffline());
+
+    // Remove field from schema and try to update schema without the 'forceTableSchemaUpdate' option
+    schema.removeField("dimA");
+    tableConfigs =
+        new TableConfigs(tableName, schema, tableConfigsResponse.getOffline(), tableConfigsResponse.getRealtime());
+
+    String tableConfigUpdateUrl = DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsUpdate(tableName);
+    try {
+      sendPutRequest(tableConfigUpdateUrl, tableConfigs.toPrettyJsonString());
+    } catch (IOException e) {
+      Assert.assertTrue(e.getMessage().contains("is not backward-compatible with the existing schema"));
+    }
+
+    // Skip validate table configs – Exception is still thrown
+    String newTableConfigUpdateUrl = tableConfigUpdateUrl + "?validationTypesToSkip=ALL";
+    try {
+      sendPutRequest(newTableConfigUpdateUrl, tableConfigs.toPrettyJsonString());
+    } catch (IOException e) {
+      Assert.assertTrue(e.getMessage().contains("is not backward-compatible with the existing schema"));
+    }
+
+    // Skip table config validation as well as force update the table schema – no exceptions are thrown
+    newTableConfigUpdateUrl = tableConfigUpdateUrl + "?validationTypesToSkip=ALL&forceTableSchemaUpdate=true";
+    response = sendPutRequest(newTableConfigUpdateUrl, tableConfigs.toPrettyJsonString());
+    Assert.assertTrue(response.contains("TableConfigs updated for testUpdate1"));
+    sendDeleteRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableConfigsDelete(tableName));
+  }
+
+  @Test
   public void testDeleteConfig()
       throws Exception {
     // create with 1 config
@@ -561,14 +650,10 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
   @Test
   public void testGetConfigCompatibility()
       throws IOException {
-    // Should not fail if schema name does not match raw table name in the case they are created separately
-    String schemaName = "schema1";
-    Schema schema = createDummySchema(schemaName);
-    sendPostRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forSchemaCreate(), schema.toPrettyJsonString());
     String tableName = "table1";
+    DEFAULT_INSTANCE.addDummySchema(tableName);
     TableConfig offlineTableConfig = createOfflineTableConfig(tableName);
     SegmentsValidationAndRetentionConfig validationConfig = new SegmentsValidationAndRetentionConfig();
-    validationConfig.setSchemaName(schemaName);
     validationConfig.setReplication("1");
     offlineTableConfig.setValidationConfig(validationConfig);
     sendPostRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableCreate(),
@@ -578,11 +663,11 @@ public class TableConfigsRestletResourceTest extends ControllerTest {
     TableConfigs tableConfigsResponse = JsonUtils.stringToObject(response, TableConfigs.class);
     Assert.assertEquals(tableConfigsResponse.getTableName(), tableName);
     Assert.assertEquals(tableConfigsResponse.getOffline().getTableName(), offlineTableConfig.getTableName());
-    Assert.assertEquals(tableConfigsResponse.getSchema().getSchemaName(), schema.getSchemaName());
+    Assert.assertEquals(tableConfigsResponse.getSchema().getSchemaName(), tableName);
 
     // Delete
     sendDeleteRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forTableDelete(tableName));
-    sendDeleteRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forSchemaDelete(schemaName));
+    sendDeleteRequest(DEFAULT_INSTANCE.getControllerRequestURLBuilder().forSchemaDelete(tableName));
   }
 
   @AfterClass

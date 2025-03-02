@@ -20,8 +20,10 @@ package org.apache.pinot.segment.local.segment.index.readers.forward;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Random;
 import org.apache.commons.io.FileUtils;
+import org.apache.pinot.segment.local.PinotBuffersAfterMethodCheckRule;
 import org.apache.pinot.segment.local.io.util.PinotDataBitSetV2;
 import org.apache.pinot.segment.local.io.writer.impl.FixedBitSVForwardIndexWriter;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
@@ -33,7 +35,7 @@ import org.testng.annotations.Test;
 import static org.testng.Assert.assertEquals;
 
 
-public class FixedBitSVForwardIndexReaderV2Test {
+public class FixedBitSVForwardIndexReaderV2Test implements PinotBuffersAfterMethodCheckRule {
   private static final File INDEX_DIR = new File(FileUtils.getTempDirectory(), "FixedBitIntReaderTest");
   private static final int NUM_VALUES = 99_999;
   private static final int NUM_DOC_IDS = PinotDataBitSetV2.MAX_DOC_PER_CALL;
@@ -105,6 +107,24 @@ public class FixedBitSVForwardIndexReaderV2Test {
         reader.readDictIds(_lastSequentialDocIds, NUM_DOC_IDS, dictIdBuffer, null);
         for (int i = 0; i < NUM_DOC_IDS; i++) {
           Assert.assertEquals(dictIdBuffer[i], values[_lastSequentialDocIds[i]]);
+        }
+      }
+
+      // Byte range test
+      try (PinotDataBuffer dataBuffer = PinotDataBuffer.mapReadOnlyBigEndianFile(indexFile);
+          FixedBitSVForwardIndexReader reader = new FixedBitSVForwardIndexReader(dataBuffer, NUM_VALUES,
+              numBits)) {
+        Assert.assertTrue(reader.isFixedOffsetMappingType());
+        Assert.assertEquals(reader.getRawDataStartOffset(), 0);
+        Assert.assertEquals(reader.getDocLength(), numBits);
+        Assert.assertTrue(reader.isDocLengthInBits());
+
+        try {
+          reader.recordDocIdByteRanges(0, null, new ArrayList<>());
+          Assert.fail("Should have failed to record byte ranges");
+        } catch (UnsupportedOperationException e) {
+          // expected
+          Assert.assertEquals(e.getMessage(), "Forward index is fixed length type");
         }
       }
     }

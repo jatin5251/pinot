@@ -21,6 +21,7 @@ package org.apache.pinot.segment.local.segment.index.creator;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
@@ -29,11 +30,15 @@ import java.util.function.ToIntFunction;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.apache.commons.io.FileUtils;
+import org.apache.pinot.segment.local.PinotBuffersAfterMethodCheckRule;
+import org.apache.pinot.segment.local.io.writer.impl.VarByteChunkForwardIndexWriterV4;
 import org.apache.pinot.segment.local.segment.creator.impl.fwd.MultiValueFixedByteRawIndexCreator;
-import org.apache.pinot.segment.local.segment.index.readers.forward.ChunkReaderContext;
 import org.apache.pinot.segment.local.segment.index.readers.forward.FixedByteChunkMVForwardIndexReader;
+import org.apache.pinot.segment.local.segment.index.readers.forward.VarByteChunkForwardIndexReaderV4;
 import org.apache.pinot.segment.spi.V1Constants.Indexes;
 import org.apache.pinot.segment.spi.compression.ChunkCompressionType;
+import org.apache.pinot.segment.spi.index.reader.ForwardIndexReader;
+import org.apache.pinot.segment.spi.index.reader.ForwardIndexReaderContext;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.testng.Assert;
@@ -43,22 +48,24 @@ import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 
-public class MultiValueFixedByteRawIndexCreatorTest {
+public class MultiValueFixedByteRawIndexCreatorTest implements PinotBuffersAfterMethodCheckRule {
 
-  private static final String OUTPUT_DIR =
-      System.getProperty("java.io.tmpdir") + File.separator + "mvFixedRawTest";
+  protected static String _outputDir;
 
-  private static final Random RANDOM = new Random();
+  protected static final Random RANDOM = new Random();
 
   @DataProvider(name = "compressionTypes")
   public Object[][] compressionTypes() {
-    return Arrays.stream(ChunkCompressionType.values()).map(ct -> new Object[]{ct}).toArray(Object[][]::new);
+    return Arrays.stream(ChunkCompressionType.values())
+        .flatMap(ct -> IntStream.of(2, 4).boxed()
+            .map(writerVersion -> new Object[]{ct, writerVersion})).toArray(Object[][]::new);
   }
 
   @BeforeClass
   public void setup()
       throws Exception {
-    FileUtils.forceMkdir(new File(OUTPUT_DIR));
+    _outputDir = System.getProperty("java.io.tmpdir") + File.separator + "mvFixedRawTest";
+    FileUtils.forceMkdir(new File(_outputDir));
   }
 
   /**
@@ -66,110 +73,134 @@ public class MultiValueFixedByteRawIndexCreatorTest {
    */
   @AfterClass
   public void cleanup() {
-    FileUtils.deleteQuietly(new File(OUTPUT_DIR));
+    FileUtils.deleteQuietly(new File(_outputDir));
   }
 
   @Test(dataProvider = "compressionTypes")
-  public void testMVInt(ChunkCompressionType compressionType)
+  public void testMVInt(ChunkCompressionType compressionType, int writerVersion)
       throws IOException {
     // This tests varying lengths of MV rows
     testMV(DataType.INT, ints(false), x -> x.length, int[]::new, MultiValueFixedByteRawIndexCreator::putIntMV,
         (reader, context, docId, buffer) -> {
           int length = reader.getIntMV(docId, buffer, context);
           return Arrays.copyOf(buffer, length);
-        }, compressionType);
+        }, compressionType, writerVersion);
 
     // This tests a fixed length of MV rows to ensure there are no BufferOverflowExceptions on filling up the chunk
     testMV(DataType.INT, ints(true), x -> x.length, int[]::new, MultiValueFixedByteRawIndexCreator::putIntMV,
         (reader, context, docId, buffer) -> {
           int length = reader.getIntMV(docId, buffer, context);
           return Arrays.copyOf(buffer, length);
-        }, compressionType);
+        }, compressionType, writerVersion);
   }
 
   @Test(dataProvider = "compressionTypes")
-  public void testMVLong(ChunkCompressionType compressionType)
+  public void testMVLong(ChunkCompressionType compressionType, int writerVersion)
       throws IOException {
     // This tests varying lengths of MV rows
     testMV(DataType.LONG, longs(false), x -> x.length, long[]::new, MultiValueFixedByteRawIndexCreator::putLongMV,
         (reader, context, docId, buffer) -> {
           int length = reader.getLongMV(docId, buffer, context);
           return Arrays.copyOf(buffer, length);
-        }, compressionType);
+        }, compressionType, writerVersion);
 
     // This tests a fixed length of MV rows to ensure there are no BufferOverflowExceptions on filling up the chunk
     testMV(DataType.LONG, longs(true), x -> x.length, long[]::new, MultiValueFixedByteRawIndexCreator::putLongMV,
         (reader, context, docId, buffer) -> {
           int length = reader.getLongMV(docId, buffer, context);
           return Arrays.copyOf(buffer, length);
-        }, compressionType);
+        }, compressionType, writerVersion);
   }
 
   @Test(dataProvider = "compressionTypes")
-  public void testMVFloat(ChunkCompressionType compressionType)
+  public void testMVFloat(ChunkCompressionType compressionType, int writerVersion)
       throws IOException {
     // This tests varying lengths of MV rows
     testMV(DataType.FLOAT, floats(false), x -> x.length, float[]::new, MultiValueFixedByteRawIndexCreator::putFloatMV,
         (reader, context, docId, buffer) -> {
           int length = reader.getFloatMV(docId, buffer, context);
           return Arrays.copyOf(buffer, length);
-        }, compressionType);
+        }, compressionType, writerVersion);
 
     // This tests a fixed length of MV rows to ensure there are no BufferOverflowExceptions on filling up the chunk
     testMV(DataType.FLOAT, floats(true), x -> x.length, float[]::new, MultiValueFixedByteRawIndexCreator::putFloatMV,
         (reader, context, docId, buffer) -> {
           int length = reader.getFloatMV(docId, buffer, context);
           return Arrays.copyOf(buffer, length);
-        }, compressionType);
+        }, compressionType, writerVersion);
   }
 
   @Test(dataProvider = "compressionTypes")
-  public void testMVDouble(ChunkCompressionType compressionType)
+  public void testMVDouble(ChunkCompressionType compressionType, int writerVersion)
       throws IOException {
     // This tests varying lengths of MV rows
     testMV(DataType.DOUBLE, doubles(false), x -> x.length, double[]::new,
-        MultiValueFixedByteRawIndexCreator::putDoubleMV,
-        (reader, context, docId, buffer) -> {
+        MultiValueFixedByteRawIndexCreator::putDoubleMV, (reader, context, docId, buffer) -> {
           int length = reader.getDoubleMV(docId, buffer, context);
           return Arrays.copyOf(buffer, length);
-        }, compressionType);
+        }, compressionType, writerVersion);
 
     // This tests a fixed length of MV rows to ensure there are no BufferOverflowExceptions on filling up the chunk
     testMV(DataType.DOUBLE, doubles(true), x -> x.length, double[]::new,
-        MultiValueFixedByteRawIndexCreator::putDoubleMV,
-        (reader, context, docId, buffer) -> {
+        MultiValueFixedByteRawIndexCreator::putDoubleMV, (reader, context, docId, buffer) -> {
           int length = reader.getDoubleMV(docId, buffer, context);
           return Arrays.copyOf(buffer, length);
-        }, compressionType);
+        }, compressionType, writerVersion);
+  }
+
+  public MultiValueFixedByteRawIndexCreator getMultiValueFixedByteRawIndexCreator(ChunkCompressionType compressionType,
+      String column, int numDocs, DataType dataType, int maxElements, int writerVersion)
+      throws IOException {
+    return new MultiValueFixedByteRawIndexCreator(new File(_outputDir), compressionType, column, numDocs, dataType,
+        maxElements, false, writerVersion, 1024 * 1024, 1000);
+  }
+
+  public ForwardIndexReader getForwardIndexReader(PinotDataBuffer buffer, DataType dataType, int writerVersion) {
+    return writerVersion == VarByteChunkForwardIndexWriterV4.VERSION ? new VarByteChunkForwardIndexReaderV4(buffer,
+        dataType.getStoredType(), false) : new FixedByteChunkMVForwardIndexReader(buffer, dataType.getStoredType());
   }
 
   public <T> void testMV(DataType dataType, List<T> inputs, ToIntFunction<T> sizeof, IntFunction<T> constructor,
-      Injector<T> injector, Extractor<T> extractor, ChunkCompressionType compressionType)
+      Injector<T> injector, Extractor<T> extractor, ChunkCompressionType compressionType, int writerVersion)
       throws IOException {
     String column = "testCol_" + dataType;
     int numDocs = inputs.size();
     int maxElements = inputs.stream().mapToInt(sizeof).max().orElseThrow(RuntimeException::new);
-    File file = new File(OUTPUT_DIR, column + Indexes.RAW_MV_FORWARD_INDEX_FILE_EXTENSION);
+    File file = new File(_outputDir, column + Indexes.RAW_MV_FORWARD_INDEX_FILE_EXTENSION);
     file.delete();
-    MultiValueFixedByteRawIndexCreator creator = new MultiValueFixedByteRawIndexCreator(new File(OUTPUT_DIR),
-        compressionType, column, numDocs, dataType, maxElements);
+    MultiValueFixedByteRawIndexCreator creator =
+        getMultiValueFixedByteRawIndexCreator(compressionType, column, numDocs, dataType, maxElements, writerVersion);
     inputs.forEach(input -> injector.inject(creator, input));
     creator.close();
 
     //read
-    final PinotDataBuffer buffer = PinotDataBuffer
-        .mapFile(file, true, 0, file.length(), ByteOrder.BIG_ENDIAN, "");
-    FixedByteChunkMVForwardIndexReader reader = new FixedByteChunkMVForwardIndexReader(buffer,
-        dataType.getStoredType());
-    final ChunkReaderContext context = reader.createContext();
-    T valueBuffer = constructor.apply(maxElements);
-    for (int i = 0; i < numDocs; i++) {
-      Assert.assertEquals(inputs.get(i), extractor.extract(reader, context, i, valueBuffer));
+    try (final PinotDataBuffer buffer = PinotDataBuffer.mapFile(file, true, 0, file.length(), ByteOrder.BIG_ENDIAN,
+        "")) {
+      ForwardIndexReader reader = getForwardIndexReader(buffer, dataType, writerVersion);
+
+      final ForwardIndexReaderContext context = reader.createContext();
+      T valueBuffer = constructor.apply(maxElements);
+      for (int i = 0; i < numDocs; i++) {
+        Assert.assertEquals(inputs.get(i), extractor.extract(reader, context, i, valueBuffer));
+      }
+
+      // Value byte range test
+      Assert.assertTrue(reader.isBufferByteRangeInfoSupported());
+      Assert.assertFalse(reader.isFixedOffsetMappingType());
+      final ForwardIndexReaderContext valueRangeContext = reader.createContext();
+      List<ForwardIndexReader.ByteRange> ranges = new ArrayList<>();
+      for (int i = 0; i < numDocs; i++) {
+        try {
+          reader.recordDocIdByteRanges(i, valueRangeContext, ranges);
+        } catch (Exception e) {
+          Assert.fail("Failed to record byte ranges for docId: " + i, e);
+        }
+      }
     }
   }
 
   interface Extractor<T> {
-    T extract(FixedByteChunkMVForwardIndexReader reader, ChunkReaderContext context, int offset, T buffer);
+    T extract(ForwardIndexReader reader, ForwardIndexReaderContext context, int offset, T buffer);
   }
 
   interface Injector<T> {

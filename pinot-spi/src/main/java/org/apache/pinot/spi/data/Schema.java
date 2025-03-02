@@ -30,12 +30,15 @@ import java.io.InputStream;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableSet;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
@@ -63,6 +66,7 @@ public final class Schema implements Serializable {
   private static final Logger LOGGER = LoggerFactory.getLogger(Schema.class);
 
   private String _schemaName;
+  private boolean _enableColumnBasedNullHandling;
   private final List<DimensionFieldSpec> _dimensionFieldSpecs = new ArrayList<>();
   private final List<MetricFieldSpec> _metricFieldSpecs = new ArrayList<>();
   private TimeFieldSpec _timeFieldSpec;
@@ -70,14 +74,16 @@ public final class Schema implements Serializable {
   private final List<ComplexFieldSpec> _complexFieldSpecs = new ArrayList<>();
   // names of the columns that used as primary keys
   // TODO(yupeng): add validation checks like duplicate columns and use of time column
+  @Nullable
   private List<String> _primaryKeyColumns;
 
   // Json ignored fields
-  private final Map<String, FieldSpec> _fieldSpecMap = new HashMap<>();
-  private transient final List<String> _dimensionNames = new ArrayList<>();
-  private transient final List<String> _metricNames = new ArrayList<>();
-  private transient final List<String> _dateTimeNames = new ArrayList<>();
-
+  // NOTE: Use TreeMap so that the columns are ordered alphabetically
+  private final TreeMap<String, FieldSpec> _fieldSpecMap = new TreeMap<>();
+  private final List<String> _dimensionNames = new ArrayList<>();
+  private final List<String> _metricNames = new ArrayList<>();
+  private final List<String> _dateTimeNames = new ArrayList<>();
+  private final List<String> _complexNames = new ArrayList<>();
   // Set to true if this schema has a JSON column (used to quickly decide whether to run JsonStatementOptimizer on
   // queries or not).
   private boolean _hasJSONColumn;
@@ -103,6 +109,56 @@ public final class Schema implements Serializable {
     return JsonUtils.inputStreamToObject(schemaInputStream, Schema.class);
   }
 
+  public static void validate(FieldType fieldType, DataType dataType) {
+    switch (fieldType) {
+      case DIMENSION:
+      case TIME:
+      case DATE_TIME:
+        switch (dataType) {
+          case INT:
+          case LONG:
+          case FLOAT:
+          case DOUBLE:
+          case BIG_DECIMAL:
+          case BOOLEAN:
+          case TIMESTAMP:
+          case STRING:
+          case JSON:
+          case BYTES:
+            break;
+          default:
+            throw new IllegalStateException(
+                "Unsupported data type: " + dataType + " in DIMENSION/TIME field");
+        }
+        break;
+      case METRIC:
+        switch (dataType) {
+          case INT:
+          case LONG:
+          case FLOAT:
+          case DOUBLE:
+          case BIG_DECIMAL:
+          case BYTES:
+            break;
+          default:
+            throw new IllegalStateException("Unsupported data type: " + dataType + " in METRIC field");
+        }
+        break;
+      case COMPLEX:
+        switch (dataType) {
+          case STRUCT:
+          case MAP:
+          case LIST:
+            break;
+          default:
+            throw new IllegalStateException("Unsupported data type: " + dataType + " in COMPLEX field");
+        }
+        break;
+      default:
+        throw new IllegalStateException("Unsupported data type: " + dataType + " for field");
+    }
+  }
+
   /**
    * NOTE: schema name could be null in tests
    */
@@ -114,6 +170,15 @@ public final class Schema implements Serializable {
     _schemaName = schemaName;
   }
 
+  public boolean isEnableColumnBasedNullHandling() {
+    return _enableColumnBasedNullHandling;
+  }
+
+  public void setEnableColumnBasedNullHandling(boolean enableColumnBasedNullHandling) {
+    _enableColumnBasedNullHandling = enableColumnBasedNullHandling;
+  }
+
+  @Nullable
   public List<String> getPrimaryKeyColumns() {
     return _primaryKeyColumns;
   }
@@ -188,12 +253,29 @@ public final class Schema implements Serializable {
     }
   }
 
+  public List<ComplexFieldSpec> getComplexFieldSpecs() {
+    return _complexFieldSpecs;
+  }
+
+  /**
+   * Required by JSON deserializer. DO NOT USE. DO NOT REMOVE.
+   * Adding @Deprecated to prevent usage
+   */
+  @Deprecated
+  public void setComplexFieldSpecs(List<ComplexFieldSpec> complexFieldSpecs) {
+    Preconditions.checkState(_complexFieldSpecs.isEmpty());
+
+    for (ComplexFieldSpec complexFieldSpec : complexFieldSpecs) {
+      addField(complexFieldSpec);
+    }
+  }
+
   public void addField(FieldSpec fieldSpec) {
     Preconditions.checkNotNull(fieldSpec);
     String columnName = fieldSpec.getName();
     Preconditions.checkNotNull(columnName);
-    Preconditions
-        .checkState(!_fieldSpecMap.containsKey(columnName), "Field spec already exists for column: " + columnName);
+    Preconditions.checkState(!_fieldSpecMap.containsKey(columnName),
+        "Field spec already exists for column: " + columnName);
 
     FieldType fieldType = fieldSpec.getFieldType();
     switch (fieldType) {
@@ -213,6 +295,7 @@ public final class Schema implements Serializable {
         _dateTimeFieldSpecs.add((DateTimeFieldSpec) fieldSpec);
         break;
       case COMPLEX:
+        _complexNames.add(columnName);
         _complexFieldSpecs.add((ComplexFieldSpec) fieldSpec);
         break;
       default:
@@ -252,6 +335,11 @@ public final class Schema implements Serializable {
           _dateTimeNames.remove(index);
           _dateTimeFieldSpecs.remove(index);
           break;
+        case COMPLEX:
+          index = _complexNames.indexOf(columnName);
+          _complexNames.remove(index);
+          _complexFieldSpecs.remove(index);
+          break;
         default:
           throw new UnsupportedOperationException("Unsupported field type: " + fieldType);
       }
@@ -265,23 +353,24 @@ public final class Schema implements Serializable {
     return _fieldSpecMap.containsKey(columnName);
   }
 
+  @JsonIgnore
   public boolean hasJSONColumn() {
     return _hasJSONColumn;
   }
 
   @JsonIgnore
-  public Map<String, FieldSpec> getFieldSpecMap() {
+  public TreeMap<String, FieldSpec> getFieldSpecMap() {
     return _fieldSpecMap;
   }
 
   @JsonIgnore
-  public Set<String> getColumnNames() {
-    return _fieldSpecMap.keySet();
+  public NavigableSet<String> getColumnNames() {
+    return _fieldSpecMap.navigableKeySet();
   }
 
   @JsonIgnore
-  public Set<String> getPhysicalColumnNames() {
-    Set<String> physicalColumnNames = new HashSet<>();
+  public TreeSet<String> getPhysicalColumnNames() {
+    TreeSet<String> physicalColumnNames = new TreeSet<>();
     for (FieldSpec fieldSpec : _fieldSpecMap.values()) {
       if (!fieldSpec.isVirtualColumn()) {
         physicalColumnNames.add(fieldSpec.getName());
@@ -290,6 +379,37 @@ public final class Schema implements Serializable {
     return physicalColumnNames;
   }
 
+  /**
+   * Returns a new schema containing only physical columns.
+   *
+   * All properties but the fields are the same.
+   * All field attributes are a shallow copy without the virtual column.
+   */
+  public Schema withoutVirtualColumns() {
+    Schema newSchema = new Schema();
+    newSchema.setSchemaName(getSchemaName());
+    newSchema.setEnableColumnBasedNullHandling(isEnableColumnBasedNullHandling());
+    List<String> primaryKeyColumns = getPrimaryKeyColumns();
+    if (primaryKeyColumns != null) {
+      newSchema.setPrimaryKeyColumns(primaryKeyColumns.stream()
+          .filter(primaryKey -> {
+            FieldSpec fieldSpec = _fieldSpecMap.get(primaryKey);
+            return fieldSpec != null && !fieldSpec.isVirtualColumn();
+          })
+          .collect(Collectors.toList())
+      );
+    }
+    for (FieldSpec fieldSpec : getAllFieldSpecs()) {
+      if (!fieldSpec.isVirtualColumn()) {
+        newSchema.addField(fieldSpec);
+      }
+    }
+    return newSchema;
+  }
+
+  /**
+   * NOTE: The returned FieldSpecs are sorted with the column name alphabetically.
+   */
   @JsonIgnore
   public Collection<FieldSpec> getAllFieldSpecs() {
     return _fieldSpecMap.values();
@@ -331,6 +451,15 @@ public final class Schema implements Serializable {
     return null;
   }
 
+  @JsonIgnore
+  public ComplexFieldSpec getComplexSpec(String complexName) {
+    FieldSpec fieldSpec = _fieldSpecMap.get(complexName);
+    if (fieldSpec != null && fieldSpec.getFieldType() == FieldType.COMPLEX) {
+      return (ComplexFieldSpec) fieldSpec;
+    }
+    return null;
+  }
+
   /**
    * Fetches the DateTimeFieldSpec for the given time column name.
    * If the columnName is a DATE_TIME column, returns the DateTimeFieldSpec
@@ -366,12 +495,18 @@ public final class Schema implements Serializable {
     return _dateTimeNames;
   }
 
+  @JsonIgnore
+  public List<String> getComplexNames() {
+    return _complexNames;
+  }
+
   /**
    * Returns a json representation of the schema.
    */
   public ObjectNode toJsonObject() {
     ObjectNode jsonObject = JsonUtils.newObjectNode();
     jsonObject.put("schemaName", _schemaName);
+    jsonObject.set("enableColumnBasedNullHandling", JsonUtils.objectToJsonNode(_enableColumnBasedNullHandling));
     if (!_dimensionFieldSpecs.isEmpty()) {
       ArrayNode jsonArray = JsonUtils.newArrayNode();
       for (DimensionFieldSpec dimensionFieldSpec : _dimensionFieldSpecs) {
@@ -445,58 +580,16 @@ public final class Schema implements Serializable {
       FieldType fieldType = fieldSpec.getFieldType();
       DataType dataType = fieldSpec.getDataType();
       String fieldName = fieldSpec.getName();
-      switch (fieldType) {
-        case DIMENSION:
-        case TIME:
-        case DATE_TIME:
-          switch (dataType) {
-            case INT:
-            case LONG:
-            case FLOAT:
-            case DOUBLE:
-            case BIG_DECIMAL:
-            case BOOLEAN:
-            case TIMESTAMP:
-            case STRING:
-            case JSON:
-            case BYTES:
-              break;
-            default:
-              throw new IllegalStateException(
-                  "Unsupported data type: " + dataType + " in DIMENSION/TIME field: " + fieldName);
-          }
-          break;
-        case METRIC:
-          switch (dataType) {
-            case INT:
-            case LONG:
-            case FLOAT:
-            case DOUBLE:
-            case BIG_DECIMAL:
-            case BYTES:
-              break;
-            default:
-              throw new IllegalStateException("Unsupported data type: " + dataType + " in METRIC field: " + fieldName);
-          }
-          break;
-        case COMPLEX:
-          switch (dataType) {
-            case STRUCT:
-            case MAP:
-            case LIST:
-              break;
-            default:
-              throw new IllegalStateException("Unsupported data type: " + dataType + " in COMPLEX field: " + fieldName);
-          }
-          break;
-        default:
-          throw new IllegalStateException("Unsupported data type: " + dataType + " for field: " + fieldName);
+      try {
+        validate(fieldType, dataType);
+      } catch (IllegalStateException e) {
+        throw new IllegalStateException(e.getMessage() + ": " + fieldName);
       }
     }
   }
 
   public static class SchemaBuilder {
-    private Schema _schema;
+    private final Schema _schema;
 
     public SchemaBuilder() {
       _schema = new Schema();
@@ -504,6 +597,58 @@ public final class Schema implements Serializable {
 
     public SchemaBuilder setSchemaName(String schemaName) {
       _schema.setSchemaName(schemaName);
+      return this;
+    }
+
+    public SchemaBuilder setEnableColumnBasedNullHandling(boolean enableColumnBasedNullHandling) {
+      _schema.setEnableColumnBasedNullHandling(enableColumnBasedNullHandling);
+      return this;
+    }
+
+    public SchemaBuilder addField(FieldSpec fieldSpec) {
+      _schema.addField(fieldSpec);
+      return this;
+    }
+
+    public SchemaBuilder addMetricField(String name, DataType dataType) {
+      return addMetricField(name, dataType, ignore -> {
+      });
+    }
+
+    public SchemaBuilder addMetricField(String name, DataType dataType, Consumer<MetricFieldSpec> customizer) {
+      MetricFieldSpec fieldSpec = new MetricFieldSpec();
+      return addField(fieldSpec, name, dataType, customizer);
+    }
+
+    public SchemaBuilder addDimensionField(String name, DataType dataType) {
+      return addDimensionField(name, dataType, ignore -> {
+      });
+    }
+
+    public SchemaBuilder addDimensionField(String name, DataType dataType, Consumer<DimensionFieldSpec> customizer) {
+      DimensionFieldSpec fieldSpec = new DimensionFieldSpec();
+      return addField(fieldSpec, name, dataType, customizer);
+    }
+
+    public SchemaBuilder addDateTimeField(String name, DataType dataType, String format, String granularity) {
+      return addDateTimeField(name, dataType, format, granularity, ignore -> {
+      });
+    }
+
+    public SchemaBuilder addDateTimeField(String name, DataType dataType, String format, String granularity,
+        Consumer<DateTimeFieldSpec> customizer) {
+      DateTimeFieldSpec fieldSpec = new DateTimeFieldSpec();
+      fieldSpec.setFormat(format);
+      fieldSpec.setGranularity(granularity);
+      return addField(fieldSpec, name, dataType, customizer);
+    }
+
+    private <E extends FieldSpec> SchemaBuilder addField(E fieldSpec, String name, DataType dataType,
+        Consumer<E> customizer) {
+      fieldSpec.setName(name);
+      fieldSpec.setDataType(dataType);
+      customizer.accept(fieldSpec);
+      _schema.addField(fieldSpec);
       return this;
     }
 
@@ -528,8 +673,8 @@ public final class Schema implements Serializable {
      */
     public SchemaBuilder addSingleValueDimension(String dimensionName, DataType dataType, int maxLength,
         Object defaultNullValue) {
-      Preconditions
-          .checkArgument(dataType == DataType.STRING, "The maxLength field only applies to STRING field right now");
+      Preconditions.checkArgument(dataType == DataType.STRING,
+          "The maxLength field only applies to STRING field right now");
       _schema.addField(new DimensionFieldSpec(dimensionName, dataType, true, maxLength, defaultNullValue));
       return this;
     }
@@ -555,8 +700,8 @@ public final class Schema implements Serializable {
      */
     public SchemaBuilder addMultiValueDimension(String dimensionName, DataType dataType, int maxLength,
         Object defaultNullValue) {
-      Preconditions
-          .checkArgument(dataType == DataType.STRING, "The maxLength field only applies to STRING field right now");
+      Preconditions.checkArgument(dataType == DataType.STRING,
+          "The maxLength field only applies to STRING field right now");
       _schema.addField(new DimensionFieldSpec(dimensionName, dataType, false, maxLength, defaultNullValue));
       return this;
     }
@@ -618,9 +763,10 @@ public final class Schema implements Serializable {
      * Add complex field spec
      * @param name name of complex (nested) field
      * @param dataType root data type of complex field
+     * @param childFieldSpecs map of child field specs
      */
-    public SchemaBuilder addComplex(String name, DataType dataType) {
-      _schema.addField(new ComplexFieldSpec(name, dataType, /* single value field */ true));
+    public SchemaBuilder addComplex(String name, DataType dataType, Map<String, FieldSpec> childFieldSpecs) {
+      _schema.addField(new ComplexFieldSpec(name, dataType, /* single value field */ true, childFieldSpecs));
       return this;
     }
 
@@ -650,22 +796,20 @@ public final class Schema implements Serializable {
     if (EqualityUtils.isSameReference(this, o)) {
       return true;
     }
-
     if (EqualityUtils.isNullOrNotSameClass(this, o)) {
       return false;
     }
-
     Schema that = (Schema) o;
-
-    return EqualityUtils.isEqual(_schemaName, that._schemaName) && EqualityUtils
-        .isEqualIgnoreOrder(_dimensionFieldSpecs, that._dimensionFieldSpecs) && EqualityUtils
-        .isEqualIgnoreOrder(_metricFieldSpecs, that._metricFieldSpecs) && EqualityUtils
-        .isEqual(_timeFieldSpec, that._timeFieldSpec) && EqualityUtils
-        .isEqualIgnoreOrder(_dateTimeFieldSpecs, that._dateTimeFieldSpecs) && EqualityUtils
-        .isEqualIgnoreOrder(_complexFieldSpecs, that._complexFieldSpecs) && EqualityUtils
-        .isEqualMap(_fieldSpecMap, that._fieldSpecMap) && EqualityUtils
-        .isEqual(_primaryKeyColumns, that._primaryKeyColumns) && EqualityUtils
-        .isEqual(_hasJSONColumn, that._hasJSONColumn);
+    //@formatter:off
+    return EqualityUtils.isEqual(_schemaName, that._schemaName)
+        && EqualityUtils.isEqualIgnoreOrder(_dimensionFieldSpecs, that._dimensionFieldSpecs)
+        && EqualityUtils.isEqualIgnoreOrder(_metricFieldSpecs, that._metricFieldSpecs)
+        && EqualityUtils.isEqual(_timeFieldSpec, that._timeFieldSpec)
+        && EqualityUtils.isEqualIgnoreOrder(_dateTimeFieldSpecs, that._dateTimeFieldSpecs)
+        && EqualityUtils.isEqualIgnoreOrder(_complexFieldSpecs, that._complexFieldSpecs)
+        && EqualityUtils.isEqual(_primaryKeyColumns, that._primaryKeyColumns)
+        && EqualityUtils.isEqual(_enableColumnBasedNullHandling, that._enableColumnBasedNullHandling);
+    //@formatter:on
   }
 
   /**
@@ -722,16 +866,22 @@ public final class Schema implements Serializable {
     result = EqualityUtils.hashCodeOf(result, _timeFieldSpec);
     result = EqualityUtils.hashCodeOf(result, _dateTimeFieldSpecs);
     result = EqualityUtils.hashCodeOf(result, _complexFieldSpecs);
-    result = EqualityUtils.hashCodeOf(result, _fieldSpecMap);
     result = EqualityUtils.hashCodeOf(result, _primaryKeyColumns);
-    result = EqualityUtils.hashCodeOf(result, _hasJSONColumn);
+    result = EqualityUtils.hashCodeOf(result, _enableColumnBasedNullHandling);
     return result;
   }
 
+  /**
+   * @deprecated this method is not correctly implemented. ie doesn't call super.clone and does not create a deep copy
+   * of the fieldSpecs.
+   */
+  @Deprecated
+  @Override
   public Schema clone() {
     Schema cloned = new SchemaBuilder()
         .setSchemaName(getSchemaName())
         .setPrimaryKeyColumns(getPrimaryKeyColumns())
+        .setEnableColumnBasedNullHandling(isEnableColumnBasedNullHandling())
         .build();
     getAllFieldSpecs().forEach(fieldSpec -> cloned.addField(fieldSpec));
     return cloned;
@@ -812,30 +962,30 @@ public final class Schema implements Serializable {
         break;
       case SECONDS:
         if (incomingTimeSize > 1) {
-          innerFunction = String.format("fromEpochSecondsBucket(%s, %d)", incomingName, incomingTimeSize);
+          innerFunction = "fromEpochSecondsBucket(" + incomingName + ", " + incomingTimeSize + ")";
         } else {
-          innerFunction = String.format("fromEpochSeconds(%s)", incomingName);
+          innerFunction = "fromEpochSeconds(" + incomingName + ")";
         }
         break;
       case MINUTES:
         if (incomingTimeSize > 1) {
-          innerFunction = String.format("fromEpochMinutesBucket(%s, %d)", incomingName, incomingTimeSize);
+          innerFunction = "fromEpochMinutesBucket(" + incomingName + ", " + incomingTimeSize + ")";
         } else {
-          innerFunction = String.format("fromEpochMinutes(%s)", incomingName);
+          innerFunction = "fromEpochMinutes(" + incomingName + ")";
         }
         break;
       case HOURS:
         if (incomingTimeSize > 1) {
-          innerFunction = String.format("fromEpochHoursBucket(%s, %d)", incomingName, incomingTimeSize);
+          innerFunction = "fromEpochHoursBucket(" + incomingName + ", " + incomingTimeSize + ")";
         } else {
-          innerFunction = String.format("fromEpochHours(%s)", incomingName);
+          innerFunction = "fromEpochHours(" + incomingName + ")";
         }
         break;
       case DAYS:
         if (incomingTimeSize > 1) {
-          innerFunction = String.format("fromEpochDaysBucket(%s, %d)", incomingName, incomingTimeSize);
+          innerFunction = "fromEpochDaysBucket(" + incomingName + ", " + incomingTimeSize + ")";
         } else {
-          innerFunction = String.format("fromEpochDays(%s)", incomingName);
+          innerFunction = "fromEpochDays(" + incomingName + ")";
         }
         break;
       default:
@@ -848,30 +998,30 @@ public final class Schema implements Serializable {
         break;
       case SECONDS:
         if (outgoingTimeSize > 1) {
-          outerFunction = String.format("toEpochSecondsBucket(%s, %d)", innerFunction, outgoingTimeSize);
+          outerFunction = "toEpochSecondsBucket(" + innerFunction + ", " + outgoingTimeSize + ")";
         } else {
-          outerFunction = String.format("toEpochSeconds(%s)", innerFunction);
+          outerFunction = "toEpochSeconds(" + innerFunction + ")";
         }
         break;
       case MINUTES:
         if (outgoingTimeSize > 1) {
-          outerFunction = String.format("toEpochMinutesBucket(%s, %d)", innerFunction, outgoingTimeSize);
+          outerFunction = "toEpochMinutesBucket(" + innerFunction + ", " + outgoingTimeSize + ")";
         } else {
-          outerFunction = String.format("toEpochMinutes(%s)", innerFunction);
+          outerFunction = "toEpochMinutes(" + innerFunction + ")";
         }
         break;
       case HOURS:
         if (outgoingTimeSize > 1) {
-          outerFunction = String.format("toEpochHoursBucket(%s, %d)", innerFunction, outgoingTimeSize);
+          outerFunction = "toEpochHoursBucket(" + innerFunction + ", " + outgoingTimeSize + ")";
         } else {
-          outerFunction = String.format("toEpochHours(%s)", innerFunction);
+          outerFunction = "toEpochHours(" + innerFunction + ")";
         }
         break;
       case DAYS:
         if (outgoingTimeSize > 1) {
-          outerFunction = String.format("toEpochDaysBucket(%s, %d)", innerFunction, outgoingTimeSize);
+          outerFunction = "toEpochDaysBucket(" + innerFunction + ", " + outgoingTimeSize + ")";
         } else {
-          outerFunction = String.format("toEpochDays(%s)", innerFunction);
+          outerFunction = "toEpochDays(" + innerFunction + ")";
         }
         break;
       default:

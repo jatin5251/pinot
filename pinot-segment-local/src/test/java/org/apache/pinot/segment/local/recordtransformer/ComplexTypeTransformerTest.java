@@ -128,10 +128,10 @@ public class ComplexTypeTransformerTest {
     transformer.transform(genericRow);
     Assert.assertNotNull(genericRow.getValue(GenericRow.MULTIPLE_RECORDS_KEY));
     Collection<GenericRow> collection = (Collection<GenericRow>) genericRow.getValue(GenericRow.MULTIPLE_RECORDS_KEY);
-    Assert.assertEquals(2, collection.size());
+    Assert.assertEquals(collection.size(), 2);
     Iterator<GenericRow> itr = collection.iterator();
-    Assert.assertEquals("v1", itr.next().getValue("array.a"));
-    Assert.assertEquals("v2", itr.next().getValue("array.a"));
+    Assert.assertEquals(itr.next().getValue("array.a"), "v1");
+    Assert.assertEquals(itr.next().getValue("array.a"), "v2");
 
     // unnest sibling collections
     //    {
@@ -179,20 +179,20 @@ public class ComplexTypeTransformerTest {
     transformer.transform(genericRow);
     Assert.assertNotNull(genericRow.getValue(GenericRow.MULTIPLE_RECORDS_KEY));
     collection = (Collection<GenericRow>) genericRow.getValue(GenericRow.MULTIPLE_RECORDS_KEY);
-    Assert.assertEquals(4, collection.size());
+    Assert.assertEquals(collection.size(), 4);
     itr = collection.iterator();
     GenericRow next = itr.next();
-    Assert.assertEquals("v1", next.getValue("array.a"));
-    Assert.assertEquals("v3", next.getValue("array2.b"));
+    Assert.assertEquals(next.getValue("array.a"), "v1");
+    Assert.assertEquals(next.getValue("array2.b"), "v3");
     next = itr.next();
-    Assert.assertEquals("v1", next.getValue("array.a"));
-    Assert.assertEquals("v4", next.getValue("array2.b"));
+    Assert.assertEquals(next.getValue("array.a"), "v1");
+    Assert.assertEquals(next.getValue("array2.b"), "v4");
     next = itr.next();
-    Assert.assertEquals("v2", next.getValue("array.a"));
-    Assert.assertEquals("v3", next.getValue("array2.b"));
+    Assert.assertEquals(next.getValue("array.a"), "v2");
+    Assert.assertEquals(next.getValue("array2.b"), "v3");
     next = itr.next();
-    Assert.assertEquals("v2", next.getValue("array.a"));
-    Assert.assertEquals("v4", next.getValue("array2.b"));
+    Assert.assertEquals(next.getValue("array.a"), "v2");
+    Assert.assertEquals(next.getValue("array2.b"), "v4");
 
     // unnest nested collection
     // {
@@ -234,16 +234,32 @@ public class ComplexTypeTransformerTest {
     transformer.transform(genericRow);
     Assert.assertNotNull(genericRow.getValue(GenericRow.MULTIPLE_RECORDS_KEY));
     collection = (Collection<GenericRow>) genericRow.getValue(GenericRow.MULTIPLE_RECORDS_KEY);
-    Assert.assertEquals(3, collection.size());
+    Assert.assertEquals(collection.size(), 3);
     itr = collection.iterator();
     next = itr.next();
-    Assert.assertEquals("v1", next.getValue("array.a"));
-    Assert.assertEquals("v3", next.getValue("array.array2.b"));
+    Assert.assertEquals(next.getValue("array.a"), "v1");
+    Assert.assertEquals(next.getValue("array.array2.b"), "v3");
     next = itr.next();
-    Assert.assertEquals("v1", next.getValue("array.a"));
-    Assert.assertEquals("v4", next.getValue("array.array2.b"));
+    Assert.assertEquals(next.getValue("array.a"), "v1");
+    Assert.assertEquals(next.getValue("array.array2.b"), "v4");
     next = itr.next();
-    Assert.assertEquals("v2", next.getValue("array.a"));
+    Assert.assertEquals(next.getValue("array.a"), "v2");
+
+    transformer = new ComplexTypeTransformer(Arrays.asList("array"), ".");
+    genericRow = new GenericRow();
+    genericRow.putValue("array", array);
+    map1.put("array2", array2);
+    map2.put("array2", new Object[]{});
+    transformer.transform(genericRow);
+    Assert.assertNotNull(genericRow.getValue(GenericRow.MULTIPLE_RECORDS_KEY));
+    collection = (Collection<GenericRow>) genericRow.getValue(GenericRow.MULTIPLE_RECORDS_KEY);
+    Assert.assertEquals(collection.size(), 2);
+    itr = collection.iterator();
+    next = itr.next();
+    Assert.assertEquals(next.getValue("array.a"), "v1");
+    Assert.assertEquals(next.getValue("array.array2"), "[{\"b\":\"v3\"},{\"b\":\"v4\"}]");
+    next = itr.next();
+    Assert.assertEquals(next.getValue("array.a"), "v2");
   }
 
   @Test
@@ -285,7 +301,6 @@ public class ComplexTypeTransformerTest {
     fieldsToUnnest.add("level1");
     fieldsToUnnest.add("level1.level2.level3");
 
-    System.out.println(genericRow);
     ComplexTypeTransformer complexTypeTransformer = new ComplexTypeTransformer(fieldsToUnnest, ".");
     GenericRow result = complexTypeTransformer.transform(genericRow);
 
@@ -354,7 +369,7 @@ public class ComplexTypeTransformerTest {
     //   "array":"[1,2]"
     // }
     transformer = new ComplexTypeTransformer(Arrays.asList(), ".",
-            ComplexTypeConfig.CollectionNotUnnestedToJson.ALL, new HashMap<>(), null);
+        ComplexTypeConfig.CollectionNotUnnestedToJson.ALL, new HashMap<>(), null);
     genericRow = new GenericRow();
     array = new Object[]{1, 2};
     genericRow.putValue("array", array);
@@ -400,7 +415,7 @@ public class ComplexTypeTransformerTest {
     map.put("array1", array1);
     genericRow.putValue("t", map);
     transformer = new ComplexTypeTransformer(Arrays.asList(), ".",
-            ComplexTypeConfig.CollectionNotUnnestedToJson.NONE, new HashMap<>(), null);
+        ComplexTypeConfig.CollectionNotUnnestedToJson.NONE, new HashMap<>(), null);
     transformer.transform(genericRow);
     Assert.assertTrue(ComplexTypeTransformer.isNonPrimitiveArray(genericRow.getValue("t.array1")));
   }
@@ -411,7 +426,7 @@ public class ComplexTypeTransformerTest {
     prefixesToRename.put("map1.", "");
     prefixesToRename.put("map2", "test");
     ComplexTypeTransformer transformer = new ComplexTypeTransformer(new ArrayList<>(), ".",
-            DEFAULT_COLLECTION_TO_JSON_MODE, prefixesToRename, null);
+        DEFAULT_COLLECTION_TO_JSON_MODE, prefixesToRename, null);
 
     GenericRow genericRow = new GenericRow();
     genericRow.putValue("a", 1L);
@@ -426,7 +441,7 @@ public class ComplexTypeTransformerTest {
     prefixesToRename = new HashMap<>();
     prefixesToRename.put("test.", "");
     transformer = new ComplexTypeTransformer(new ArrayList<>(), ".",
-            DEFAULT_COLLECTION_TO_JSON_MODE, prefixesToRename, null);
+        DEFAULT_COLLECTION_TO_JSON_MODE, prefixesToRename, null);
     genericRow = new GenericRow();
     genericRow.putValue("a", 1L);
     genericRow.putValue("test.a", 2L);
@@ -441,7 +456,7 @@ public class ComplexTypeTransformerTest {
     prefixesToRename = new HashMap<>();
     prefixesToRename.put("test", "");
     transformer = new ComplexTypeTransformer(new ArrayList<>(), ".",
-            DEFAULT_COLLECTION_TO_JSON_MODE, prefixesToRename, null);
+        DEFAULT_COLLECTION_TO_JSON_MODE, prefixesToRename, null);
     genericRow = new GenericRow();
     genericRow.putValue("a", 1L);
     genericRow.putValue("test", 2L);
@@ -455,7 +470,7 @@ public class ComplexTypeTransformerTest {
     // case where nothing gets renamed
     prefixesToRename = new HashMap<>();
     transformer = new ComplexTypeTransformer(new ArrayList<>(), ".",
-            DEFAULT_COLLECTION_TO_JSON_MODE, prefixesToRename, null);
+        DEFAULT_COLLECTION_TO_JSON_MODE, prefixesToRename, null);
     genericRow = new GenericRow();
     genericRow.putValue("a", 1L);
     genericRow.putValue("test", 2L);
@@ -470,7 +485,7 @@ public class ComplexTypeTransformerTest {
     prefixesToRename.put("map1.", "");
     prefixesToRename.put("map2", "test");
     ComplexTypeTransformer transformer = new ComplexTypeTransformer(new ArrayList<>(), ".",
-            DEFAULT_COLLECTION_TO_JSON_MODE, prefixesToRename, null);
+        DEFAULT_COLLECTION_TO_JSON_MODE, prefixesToRename, null);
 
     // test flatten root-level tuples
     GenericRow genericRow = new GenericRow();
@@ -492,5 +507,32 @@ public class ComplexTypeTransformerTest {
     Assert.assertEquals(genericRow.getValue("im1.aa"), 2);
     Assert.assertEquals(genericRow.getValue("im1.bb"), "u");
     Assert.assertEquals(genericRow.getValue("test.c"), 3);
+  }
+
+  @Test
+  public void testPrefixesToRename2() {
+    HashMap<String, String> prefixesToRename = new HashMap<>();
+    prefixesToRename.put("info.", "");
+    prefixesToRename.put("class_teacher", "teacher");
+    ComplexTypeTransformer transformer = new ComplexTypeTransformer(new ArrayList<>(), ".",
+        DEFAULT_COLLECTION_TO_JSON_MODE, prefixesToRename, null);
+
+    // test flatten root-level tuples
+    GenericRow genericRow = new GenericRow();
+    genericRow.putValue("name", "Jane");
+    Map<String, Object> info = new HashMap<>();
+    genericRow.putValue("info", Map.of(
+        "id", "100",
+        "address", Map.of("street", "1 Park Street", "city", "San Francisco", "state", "CA")
+    ));
+    genericRow.putValue("class_teacher", Map.of("name", "Max"));
+
+    transformer.transform(genericRow);
+    Assert.assertEquals(genericRow.getValue("name"), "Jane");
+    Assert.assertEquals(genericRow.getValue("id"), "100");
+    Assert.assertEquals(genericRow.getValue("address.street"), "1 Park Street");
+    Assert.assertEquals(genericRow.getValue("address.city"), "San Francisco");
+    Assert.assertEquals(genericRow.getValue("address.state"), "CA");
+    Assert.assertEquals(genericRow.getValue("teacher.name"), "Max");
   }
 }

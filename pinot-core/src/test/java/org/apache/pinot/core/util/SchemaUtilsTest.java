@@ -22,13 +22,16 @@ import com.google.common.collect.Lists;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.apache.pinot.segment.local.utils.SchemaUtils;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.config.table.ingestion.IngestionConfig;
 import org.apache.pinot.spi.config.table.ingestion.TransformConfig;
+import org.apache.pinot.spi.data.ComplexFieldSpec;
 import org.apache.pinot.spi.data.DateTimeFieldSpec;
 import org.apache.pinot.spi.data.DimensionFieldSpec;
 import org.apache.pinot.spi.data.FieldSpec;
@@ -136,13 +139,17 @@ public class SchemaUtilsTest {
     schema = new Schema.SchemaBuilder().setSchemaName(TABLE_NAME)
         .addDateTime(TIME_COLUMN, DataType.LONG, "1:MILLISECONDS:EPOCH", "1:HOURS").build();
     tableConfig =
-        new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setTimeColumnName(TIME_COLUMN).build();
+        new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME)
+            .setStreamConfigs(getStreamConfigs())
+            .setTimeColumnName(TIME_COLUMN).build();
     SchemaUtils.validate(schema, Lists.newArrayList(tableConfig));
 
     // schema doesn't have destination columns from transformConfigs
     schema = new Schema.SchemaBuilder().setSchemaName(TABLE_NAME)
         .addDateTime(TIME_COLUMN, DataType.LONG, "1:MILLISECONDS:EPOCH", "1:HOURS").build();
-    tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME).setTimeColumnName(TIME_COLUMN)
+    tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName(TABLE_NAME)
+        .setStreamConfigs(getStreamConfigs())
+        .setTimeColumnName(TIME_COLUMN)
         .setIngestionConfig(ingestionConfig).build();
     try {
       SchemaUtils.validate(schema, Lists.newArrayList(tableConfig));
@@ -155,6 +162,42 @@ public class SchemaUtilsTest {
         .addDateTime(TIME_COLUMN, DataType.LONG, "1:MILLISECONDS:EPOCH", "1:HOURS")
         .addSingleValueDimension("colA", DataType.STRING).build();
     SchemaUtils.validate(schema, Lists.newArrayList(tableConfig));
+
+    schema = new Schema.SchemaBuilder().setSchemaName(TABLE_NAME).addMetric("double", DataType.DOUBLE, "NaN").build();
+    tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(TABLE_NAME).build();
+    try {
+      SchemaUtils.validate(schema, Lists.newArrayList(tableConfig));
+      Assert.fail("Should fail schema validation, as double has NaN default value");
+    } catch (IllegalStateException e) {
+      // expected
+      Assert.assertTrue(e.getMessage().startsWith("NaN as null default value is not managed yet for"));
+    }
+
+    schema = new Schema.SchemaBuilder().setSchemaName(TABLE_NAME).addMetric("float", DataType.FLOAT, "NaN").build();
+    tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(TABLE_NAME).build();
+    try {
+      SchemaUtils.validate(schema, Lists.newArrayList(tableConfig));
+      Assert.fail("Should fail schema validation, as float has NaN default value");
+    } catch (IllegalStateException e) {
+      // expected
+      Assert.assertTrue(e.getMessage().startsWith("NaN as null default value is not managed yet for"));
+    }
+
+    schema =
+        new Schema.SchemaBuilder().setSchemaName(TABLE_NAME).addSingleValueDimension("string", DataType.STRING, "NaN")
+            .build();
+    tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(TABLE_NAME).build();
+    SchemaUtils.validate(schema, Lists.newArrayList(tableConfig));
+  }
+
+  private Map<String, String> getStreamConfigs() {
+    Map<String, String> streamConfigs = new HashMap<>();
+    streamConfigs.put("streamType", "kafka");
+    streamConfigs.put("stream.kafka.consumer.type", "lowlevel");
+    streamConfigs.put("stream.kafka.topic.name", "test");
+    streamConfigs.put("stream.kafka.decoder.class.name",
+        "org.apache.pinot.plugin.stream.kafka.KafkaJSONMessageDecoder");
+    return streamConfigs;
   }
 
   /**
@@ -246,6 +289,19 @@ public class SchemaUtilsTest {
     pinotSchema = new Schema.SchemaBuilder().addDateTime("datetime4", FieldSpec.DataType.STRING,
         "1:DAYS:SIMPLE_DATE_FORMAT:M/d/yyyy", "1:DAYS").build();
     checkValidationFails(pinotSchema);
+  }
+
+  @Test
+  public void testValidateCaseInsensitive() {
+    Schema pinotSchema = new Schema.SchemaBuilder()
+        .addTime(
+            new TimeGranularitySpec(DataType.LONG, TimeUnit.MILLISECONDS, "incoming"),
+            new TimeGranularitySpec(DataType.INT, TimeUnit.DAYS, "outgoing"))
+        .addSingleValueDimension("dim1", DataType.INT)
+        .addSingleValueDimension("Dim1", DataType.INT)
+        .build();
+
+    checkValidationFails(pinotSchema, true);
   }
 
   @Test
@@ -416,12 +472,55 @@ public class SchemaUtilsTest {
     checkValidationFails(pinotSchema);
   }
 
-  private void checkValidationFails(Schema pinotSchema) {
+  @Test
+  public void testComplexFieldSpec()
+      throws Exception {
+    Schema pinotSchema;
+    // valid schema
+    pinotSchema = new Schema.SchemaBuilder().setSchemaName(TABLE_NAME)
+        .addSingleValueDimension("name", DataType.STRING)
+        .addComplex("intMap", DataType.MAP, Map.of(
+            "key", new DimensionFieldSpec("key", DataType.STRING, true),
+            "value", new DimensionFieldSpec("value", DataType.INT, true)
+        ))
+        .addComplex("stringMap", DataType.MAP, Map.of(
+            "key", new DimensionFieldSpec("key", DataType.STRING, true),
+            "value", new DimensionFieldSpec("value", DataType.STRING, true)
+        ))
+        .build();
+    SchemaUtils.validate(pinotSchema);
+    String schemaStr = pinotSchema.toString();
+    Schema deserSchema = Schema.fromString(schemaStr);
+    Assert.assertEquals(pinotSchema.getSchemaName(), deserSchema.getSchemaName());
+    Assert.assertEquals(pinotSchema.getDimensionNames(), deserSchema.getDimensionNames());
+    Assert.assertEquals(pinotSchema.getMetricNames(), deserSchema.getMetricNames());
+    Assert.assertEquals(pinotSchema.getTimeFieldSpec(), deserSchema.getTimeFieldSpec());
+    Assert.assertEquals(pinotSchema.getComplexFieldSpecs().size(), deserSchema.getComplexFieldSpecs().size());
+    Assert.assertEquals(pinotSchema.getComplexFieldSpecs().get(0).getChildFieldSpecs().size(),
+        deserSchema.getComplexFieldSpecs().get(0).getChildFieldSpecs().size());
+    Assert.assertEquals(pinotSchema.getComplexFieldSpecs().get(0).getChildFieldSpec(ComplexFieldSpec.KEY_FIELD),
+        deserSchema.getComplexFieldSpecs().get(0).getChildFieldSpec(ComplexFieldSpec.KEY_FIELD));
+    Assert.assertEquals(pinotSchema.getComplexFieldSpecs().get(0).getChildFieldSpec(ComplexFieldSpec.VALUE_FIELD),
+        deserSchema.getComplexFieldSpecs().get(0).getChildFieldSpec(ComplexFieldSpec.VALUE_FIELD));
+
+    Assert.assertEquals(pinotSchema.getComplexFieldSpecs().get(1).getChildFieldSpecs().size(),
+        deserSchema.getComplexFieldSpecs().get(1).getChildFieldSpecs().size());
+    Assert.assertEquals(pinotSchema.getComplexFieldSpecs().get(1).getChildFieldSpec(ComplexFieldSpec.KEY_FIELD),
+        deserSchema.getComplexFieldSpecs().get(1).getChildFieldSpec(ComplexFieldSpec.KEY_FIELD));
+    Assert.assertEquals(pinotSchema.getComplexFieldSpecs().get(1).getChildFieldSpec(ComplexFieldSpec.VALUE_FIELD),
+        deserSchema.getComplexFieldSpecs().get(1).getChildFieldSpec(ComplexFieldSpec.VALUE_FIELD));
+  }
+
+  private void checkValidationFails(Schema pinotSchema, boolean isIgnoreCase) {
     try {
-      SchemaUtils.validate(pinotSchema);
+      SchemaUtils.validate(pinotSchema, isIgnoreCase);
       Assert.fail("Schema validation should have failed.");
     } catch (IllegalArgumentException | IllegalStateException e) {
       // expected
     }
+  }
+
+  private void checkValidationFails(Schema pinotSchema) {
+    checkValidationFails(pinotSchema, false);
   }
 }

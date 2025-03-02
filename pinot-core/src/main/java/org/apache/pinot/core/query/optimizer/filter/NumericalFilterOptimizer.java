@@ -24,161 +24,115 @@ import javax.annotation.Nullable;
 import org.apache.pinot.common.request.Expression;
 import org.apache.pinot.common.request.ExpressionType;
 import org.apache.pinot.common.request.Function;
-import org.apache.pinot.common.request.Literal;
-import org.apache.pinot.common.utils.request.RequestUtils;
 import org.apache.pinot.spi.data.FieldSpec;
+import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.sql.FilterKind;
 
 
-
 /**
- * Numerical expressions of form "column <operator> literal", where operator can be '=', '!=', '>', '>=', '<', or '<=',
- * can compare a column of one datatype (say INT) with a literal of different datatype (say DOUBLE). These expressions
- * can not be evaluated on the Server. Hence, we rewrite such expressions into an equivalent expression whose LHS and
- * RHS are of the same datatype.
- *
+ * Numerical expressions of the form "column [operator] literal", where operator can be '=', '!=', '>', '>=', '<', '<=',
+ * or 'BETWEEN' can compare a column of one datatype (say INT) with a literal of different datatype (say DOUBLE). These
+ * expressions can not be evaluated on the Server. Hence, we rewrite such expressions into an equivalent expression
+ * whose LHS and RHS are of the same datatype.
+ * <p>
  * Simple predicate examples:
- *  1) WHERE "intColumn = 5.0"  gets rewritten to "WHERE intColumn = 5"
- *  2) WHERE "intColumn != 5.0" gets rewritten to "WHERE intColumn != 5"
- *  3) WHERE "intColumn = 5.5"  gets rewritten to "WHERE false" because INT values can not match 5.5.
- *  4) WHERE "intColumn = 3000000000" gets rewritten to "WHERE false" because INT values can not match 3000000000.
- *  5) WHERE "intColumn != 3000000000" gets rewritten to "WHERE true" because INT values always not equal to 3000000000.
- *  6) WHERE "intColumn < 5.1" gets rewritten to "WHERE intColumn <= 5"
- *  7) WHERE "intColumn > -3E9" gets rewritten to "WHERE true" because int values are always greater than -3E9.
- *
+ * <ol>
+ *  <li> "WHERE intColumn = 5.0"  gets rewritten to "WHERE intColumn = 5"
+ *  <li> "WHERE intColumn != 5.0" gets rewritten to "WHERE intColumn != 5"
+ *  <li> "WHERE intColumn = 5.5"  gets rewritten to "WHERE false" because INT values can not match 5.5.
+ *  <li> "WHERE intColumn = 3000000000" gets rewritten to "WHERE false" because INT values can not match 3000000000.
+ *  <li> "WHERE intColumn != 3000000000" gets rewritten to "WHERE true" because INT values always not equal to
+ *  3000000000.
+ *  <li> "WHERE intColumn < 5.1" gets rewritten to "WHERE intColumn <= 5"
+ *  <li> "WHERE intColumn > -3E9" gets rewritten to "WHERE true" because int values are always greater than -3E9.
+ *  <li> "WHERE intColumn BETWEEN 2.5 AND 7.5" gets rewritten to "WHERE intColumn BETWEEN 3 AND 7"
+ *  <li> "WHERE intColumn BETWEEN 5.5 AND 3000000000" gets rewritten to "WHERE intColumn BETWEEN 6 AND 2147483647" since
+ *  3000000000 is greater than Integer.MAX_VALUE.
+ *  <li> "WHERE intColumn BETWEEN 10 AND 0" gets rewritten to "WHERE false" because lower bound is greater than upper
+ *  bound.
+ * </ol>
+ * <p>
  * Compound predicate examples:
- *  8) WHERE "intColumn1 = 5.5 AND intColumn2 = intColumn3"
+ * <ol>
+ *  <li> "WHERE intColumn1 = 5.5 AND intColumn2 = intColumn3"
  *       rewrite to "WHERE false AND intColumn2 = intColumn3"
  *       rewrite to "WHERE intColumn2 = intColumn3"
- *  9) WHERE "intColumn1 != 5.5 OR intColumn2 = 5000000000" (5000000000 is out of bounds for integer column)
+ *  <li> "WHERE intColumn1 != 5.5 OR intColumn2 = 5000000000" (5000000000 is out of bounds for integer column)
  *       rewrite to "WHERE true OR false"
  *       rewrite to "WHERE true"
  *       rewrite to query without any WHERE clause.
- *
+ * </ol>
+ * <p>
  * When entire predicate gets rewritten to false (Example 3 above), the query will not return any data. Hence, it is
  * better for the Broker itself to return an empty response rather than sending the query to servers for further
  * evaluation.
- *
- * TODO: Add support for BETWEEN, IN, and NOT IN operators.
+ * <p>
+ * TODO: Add support for IN, and NOT IN operators.
  */
-public class NumericalFilterOptimizer implements FilterOptimizer {
-  private static final Expression TRUE = RequestUtils.getLiteralExpression(true);
-  private static final Expression FALSE = RequestUtils.getLiteralExpression(false);
+public class NumericalFilterOptimizer extends BaseAndOrBooleanFilterOptimizer {
 
   @Override
-  public Expression optimize(Expression expression, @Nullable Schema schema) {
-    ExpressionType type = expression.getType();
-    if (type != ExpressionType.FUNCTION || schema == null) {
-      // We have nothing to rewrite if expression is not a function or schema is null
-      return expression;
-    }
-
-    Function function = expression.getFunctionCall();
-    List<Expression> operands = function.getOperands();
-    FilterKind kind = FilterKind.valueOf(function.getOperator());
-    switch (kind) {
-      case AND:
-      case OR:
-      case NOT:
-        // Recursively traverse the expression tree to find an operator node that can be rewritten.
-        operands.forEach(operand -> optimize(operand, schema));
-
-        // We have rewritten the child operands, so rewrite the parent if needed.
-        return optimizeCurrent(expression);
-      case IS_NULL:
-      case IS_NOT_NULL:
-        // No need to try to optimize IS_NULL and IS_NOT_NULL operations on numerical columns.
-        break;
-      default:
-        // Verify that LHS is a numeric column and RHS is a numeric literal before rewriting.
-        Expression lhs = operands.get(0);
-        Expression rhs = operands.get(1);
-        if (isNumericLiteral(rhs)) {
-          FieldSpec.DataType dataType = getDataType(lhs, schema);
-          if (dataType != null && dataType.isNumeric()) {
-            switch (kind) {
-              case EQUALS:
-              case NOT_EQUALS:
-                return rewriteEqualsExpression(expression, kind, dataType, rhs);
-              case GREATER_THAN:
-              case GREATER_THAN_OR_EQUAL:
-              case LESS_THAN:
-              case LESS_THAN_OR_EQUAL:
-                return rewriteRangeExpression(expression, kind, lhs, rhs, schema);
-              default:
-                break;
-            }
-          }
-        }
-        break;
-    }
-    return expression;
+  boolean canBeOptimized(Expression filterExpression, @Nullable Schema schema) {
+    ExpressionType type = filterExpression.getType();
+    // We have nothing to rewrite if expression is not a function or schema is null
+    return type == ExpressionType.FUNCTION && schema != null;
   }
 
-  /**
-   * If any of the operands of AND function is "false", then the AND function itself is false and can be replaced with
-   * "false" literal. Otherwise, remove all the "true" operands of the AND function. Similarly, if any of the operands
-   * of OR function is "true", then the OR function itself is true and can be replaced with "true" literal. Otherwise,
-   * remove all the "false" operands of the OR function.
-   */
-  private static Expression optimizeCurrent(Expression expression) {
-    Function function = expression.getFunctionCall();
-    String operator = function.getOperator();
-    List<Expression> operands = function.getOperands();
-    if (operator.equals(FilterKind.AND.name())) {
-      // If any of the literal operands are FALSE, then replace AND function with FALSE.
-      for (Expression operand : operands) {
-        if (operand.equals(FALSE)) {
-          return FALSE;
-        }
-      }
+  @Override
+  Expression optimizeChild(Expression filterExpression, @Nullable Schema schema) {
+    Function function = filterExpression.getFunctionCall();
+    FilterKind kind = FilterKind.valueOf(function.getOperator());
 
-      // Remove all Literal operands that are TRUE.
-      operands.removeIf(x -> x.equals(TRUE));
-      if (operands.isEmpty()) {
-        return TRUE;
-      }
-    } else if (operator.equals(FilterKind.OR.name())) {
-      // If any of the literal operands are TRUE, then replace OR function with TRUE
-      for (Expression operand : operands) {
-        if (operand.equals(TRUE)) {
-          return TRUE;
-        }
-      }
-
-      // Remove all Literal operands that are FALSE.
-      operands.removeIf(x -> x.equals(FALSE));
-      if (operands.isEmpty()) {
-        return FALSE;
-      }
-    } else if (operator.equals(FilterKind.NOT.name())) {
-      assert operands.size() == 1;
-      Expression operand = operands.get(0);
-      if (operand.equals(TRUE)) {
-        return FALSE;
-      }
-      if (operand.equals(FALSE)) {
-        return TRUE;
-      }
+    if (!kind.isRange() && kind != FilterKind.EQUALS && kind != FilterKind.NOT_EQUALS) {
+      return filterExpression;
     }
-    return expression;
+
+    List<Expression> operands = function.getOperands();
+    // Verify that LHS is a numeric column and RHS is a literal before rewriting.
+    Expression lhs = operands.get(0);
+    Expression rhs = operands.get(1);
+
+    DataType dataType = getDataType(lhs, schema);
+    if (dataType == null || !dataType.isNumeric() || !rhs.isSetLiteral()) {
+      // No rewrite here
+      return filterExpression;
+    }
+
+    switch (kind) {
+      case BETWEEN: {
+        return rewriteBetweenExpression(filterExpression, dataType);
+      }
+      case EQUALS:
+      case NOT_EQUALS:
+      case GREATER_THAN:
+      case GREATER_THAN_OR_EQUAL:
+      case LESS_THAN:
+      case LESS_THAN_OR_EQUAL: {
+        if (kind.isRange()) {
+          return rewriteRangeExpression(filterExpression, kind, dataType, rhs);
+        } else {
+          return rewriteEqualsExpression(filterExpression, kind, dataType, rhs);
+        }
+      }
+      default:
+        break;
+    }
+    return filterExpression;
   }
 
   /**
    * Rewrite expressions of form "column = literal" or "column != literal" to ensure that RHS literal is the same
    * datatype as LHS column.
    */
-  private static Expression rewriteEqualsExpression(Expression equals, FilterKind kind, FieldSpec.DataType dataType,
+  private static Expression rewriteEqualsExpression(Expression equals, FilterKind kind, DataType dataType,
       Expression rhs) {
     // Get expression operator
     boolean result = kind == FilterKind.NOT_EQUALS;
 
     switch (rhs.getLiteral().getSetField()) {
-      case SHORT_VALUE:
       case INT_VALUE:
-        // No rewrites needed since SHORT and INT conversion to numeric column types (INT, LONG, FLOAT, and DOUBLE) is
-        // lossless and will be implicitly handled on the server side.
+        // No rewrites needed since INT conversion to numeric column types can be handled on the server side.
         break;
       case LONG_VALUE: {
         long actual = rhs.getLiteral().getLongValue();
@@ -187,7 +141,7 @@ public class NumericalFilterOptimizer implements FilterOptimizer {
             int converted = (int) actual;
             if (converted != actual) {
               // Long value does not fall within the bounds of INT column.
-              setExpressionToBoolean(equals, result);
+              return getExpressionFromBoolean(result);
             } else {
               // Replace long value with converted int value.
               rhs.getLiteral().setLongValue(converted);
@@ -198,7 +152,7 @@ public class NumericalFilterOptimizer implements FilterOptimizer {
             float converted = (float) actual;
             if (BigDecimal.valueOf(actual).compareTo(BigDecimal.valueOf(converted)) != 0) {
               // Long to float conversion is lossy.
-              setExpressionToBoolean(equals, result);
+              return getExpressionFromBoolean(result);
             } else {
               // Replace long value with converted float value.
               rhs.getLiteral().setDoubleValue(converted);
@@ -209,7 +163,7 @@ public class NumericalFilterOptimizer implements FilterOptimizer {
             double converted = (double) actual;
             if (BigDecimal.valueOf(actual).compareTo(BigDecimal.valueOf(converted)) != 0) {
               // Long to double conversion is lossy.
-              setExpressionToBoolean(equals, result);
+              return getExpressionFromBoolean(result);
             } else {
               // Replace long value with converted double value.
               rhs.getLiteral().setDoubleValue(converted);
@@ -221,6 +175,11 @@ public class NumericalFilterOptimizer implements FilterOptimizer {
         }
         break;
       }
+      // TODO: Add support for FLOAT_VALUE
+//      case FLOAT_VALUE: {
+//        float actual = Float.intBitsToFloat(rhs.getLiteral().getFloatValue());
+//        break;
+//      }
       case DOUBLE_VALUE: {
         double actual = rhs.getLiteral().getDoubleValue();
         switch (dataType) {
@@ -228,7 +187,7 @@ public class NumericalFilterOptimizer implements FilterOptimizer {
             int converted = (int) actual;
             if (converted != actual) {
               // Double value does not fall within the bounds of INT column.
-              setExpressionToBoolean(equals, result);
+              return getExpressionFromBoolean(result);
             } else {
               // Replace double value with converted int value.
               rhs.getLiteral().setLongValue(converted);
@@ -239,29 +198,18 @@ public class NumericalFilterOptimizer implements FilterOptimizer {
             long converted = (long) actual;
             if (BigDecimal.valueOf(actual).compareTo(BigDecimal.valueOf(converted)) != 0) {
               // Double to long conversion is lossy.
-              setExpressionToBoolean(equals, result);
+              return getExpressionFromBoolean(result);
             } else {
               // Replace double value with converted long value.
               rhs.getLiteral().setLongValue(converted);
             }
             break;
           }
-          case FLOAT: {
-            float converted = (float) actual;
-            if (converted != actual) {
-              // Double to float conversion is lossy.
-              setExpressionToBoolean(equals, result);
-            } else {
-              // Replace double value with converted float value.
-              rhs.getLiteral().setDoubleValue(converted);
-            }
-            break;
-          }
           default:
             break;
         }
+        break;
       }
-      break;
       default:
         break;
     }
@@ -272,16 +220,11 @@ public class NumericalFilterOptimizer implements FilterOptimizer {
    * Rewrite expressions of form "column > literal", "column >= literal", "column < literal", and "column <= literal"
    * to ensure that RHS literal is the same datatype as LHS column.
    */
-  private static Expression rewriteRangeExpression(Expression range, FilterKind kind, Expression lhs, Expression rhs,
-      Schema schema) {
-    // Get column data type.
-    FieldSpec.DataType dataType = schema.getFieldSpecFor(lhs.getIdentifier().getName()).getDataType();
-
+  private static Expression rewriteRangeExpression(Expression range, FilterKind kind, DataType dataType,
+      Expression rhs) {
     switch (rhs.getLiteral().getSetField()) {
-      case SHORT_VALUE:
       case INT_VALUE:
-        // No rewrites needed since SHORT and INT conversion to numeric column types (INT, LONG, FLOAT, and DOUBLE) is
-        // lossless and will be implicitly handled on the server side.
+        // No rewrites needed since INT conversion to numeric column types can be handled on the server side.
         break;
       case LONG_VALUE: {
         long actual = rhs.getLiteral().getLongValue();
@@ -294,12 +237,12 @@ public class NumericalFilterOptimizer implements FilterOptimizer {
               // INT column can never have a value greater than Integer.MAX_VALUE. < and <= expressions will always be
               // true, because an INT column will always have values greater than or equal to Integer.MIN_VALUE and less
               // than or equal to Integer.MAX_VALUE.
-              setExpressionToBoolean(range, kind == FilterKind.LESS_THAN || kind == FilterKind.LESS_THAN_OR_EQUAL);
+              return getExpressionFromBoolean(kind == FilterKind.LESS_THAN || kind == FilterKind.LESS_THAN_OR_EQUAL);
             } else if (comparison < 0) {
               // Literal value is less than the bounds of INT. > and >= expressions will always be true because an
               // INT column will always have a value greater than or equal to Integer.MIN_VALUE. < and <= expressions
               // will always be false, because an INT column will never have values less than Integer.MIN_VALUE.
-              setExpressionToBoolean(range,
+              return getExpressionFromBoolean(
                   kind == FilterKind.GREATER_THAN || kind == FilterKind.GREATER_THAN_OR_EQUAL);
             } else {
               // Long literal value falls within the bounds of INT column, server will successfully convert the literal
@@ -343,6 +286,11 @@ public class NumericalFilterOptimizer implements FilterOptimizer {
         }
         break;
       }
+      // TODO: Add support for FLOAT_VALUE
+//      case FLOAT_VALUE: {
+//        float actual = Float.intBitsToFloat(rhs.getLiteral().getFloatValue());
+//        break;
+//      }
       case DOUBLE_VALUE: {
         double actual = rhs.getLiteral().getDoubleValue();
         switch (dataType) {
@@ -351,10 +299,10 @@ public class NumericalFilterOptimizer implements FilterOptimizer {
             int comparison = Double.compare(actual, converted);
             if (comparison > 0 && converted == Integer.MAX_VALUE) {
               // Literal value is greater than the bounds of INT.
-              setExpressionToBoolean(range, kind == FilterKind.LESS_THAN || kind == FilterKind.LESS_THAN_OR_EQUAL);
+              return getExpressionFromBoolean(kind == FilterKind.LESS_THAN || kind == FilterKind.LESS_THAN_OR_EQUAL);
             } else if (comparison < 0 && converted == Integer.MIN_VALUE) {
               // Literal value is less than the bounds of INT.
-              setExpressionToBoolean(range,
+              return getExpressionFromBoolean(
                   kind == FilterKind.GREATER_THAN || kind == FilterKind.GREATER_THAN_OR_EQUAL);
             } else {
               // Literal value falls within the bounds of INT.
@@ -371,10 +319,10 @@ public class NumericalFilterOptimizer implements FilterOptimizer {
 
             if (comparison > 0 && converted == Long.MAX_VALUE) {
               // Literal value is greater than the bounds of LONG.
-              setExpressionToBoolean(range, kind == FilterKind.LESS_THAN || kind == FilterKind.LESS_THAN_OR_EQUAL);
+              return getExpressionFromBoolean(kind == FilterKind.LESS_THAN || kind == FilterKind.LESS_THAN_OR_EQUAL);
             } else if (comparison < 0 && converted == Long.MIN_VALUE) {
               // Literal value is less than the bounds of LONG.
-              setExpressionToBoolean(range,
+              return getExpressionFromBoolean(
                   kind == FilterKind.GREATER_THAN || kind == FilterKind.GREATER_THAN_OR_EQUAL);
             } else {
               // Rewrite range operator
@@ -389,30 +337,181 @@ public class NumericalFilterOptimizer implements FilterOptimizer {
             float converted = (float) actual;
             if (converted == Float.POSITIVE_INFINITY) {
               // Literal value is greater than the bounds of FLOAT
-              setExpressionToBoolean(range, kind == FilterKind.LESS_THAN || kind == FilterKind.LESS_THAN_OR_EQUAL);
+              return getExpressionFromBoolean(kind == FilterKind.LESS_THAN || kind == FilterKind.LESS_THAN_OR_EQUAL);
             } else if (converted == Float.NEGATIVE_INFINITY) {
               // Literal value is less than the bounds of LONG.
-              setExpressionToBoolean(range,
+              return getExpressionFromBoolean(
                   kind == FilterKind.GREATER_THAN || kind == FilterKind.GREATER_THAN_OR_EQUAL);
-            } else {
-              int comparison = Double.compare(actual, converted);
-              // Rewrite range operator
-              rewriteRangeOperator(range, kind, comparison);
-
-              // Rewrite range literal
-              rhs.getLiteral().setDoubleValue(converted);
             }
+            // Do not rewrite range operator since double has higher precision than float
+            // If we do, we may introduce problems.
+            // For example, in the previous logic, "> 0.05" will be converted into ">= 0.05000000074505806". When the
+            // query reaches a server, the server will convert it to ">= 0.05" in
+            // ColumnValueSegmentPruner#pruneRangePredicate, which is incorrect.
             break;
           }
           default:
             break;
         }
+        break;
       }
-      break;
       default:
         break;
     }
     return range;
+  }
+
+  /**
+   * Rewrite expressions of the form "column BETWEEN lower AND upper" to ensure that lower and upper bounds are the same
+   * datatype as the column (or can be cast to the same datatype in the server).
+   */
+  private static Expression rewriteBetweenExpression(Expression between, DataType dataType) {
+    // TODO: Consider unifying logic with rewriteRangeExpression
+    List<Expression> operands = between.getFunctionCall().getOperands();
+    Expression lower = operands.get(1);
+    Expression upper = operands.get(2);
+
+    // The BETWEEN filter predicate currently only supports literals as lower and upper bounds, but we're still checking
+    // here just in case.
+    if (lower.isSetLiteral()) {
+      switch (lower.getLiteral().getSetField()) {
+        case LONG_VALUE: {
+          long actual = lower.getLiteral().getLongValue();
+          // Other data types can be converted on the server side.
+          if (dataType == DataType.INT) {
+            if (actual > Integer.MAX_VALUE) {
+              // Lower bound literal value is greater than the bounds of INT.
+              return getExpressionFromBoolean(false);
+            }
+            if (actual < Integer.MIN_VALUE) {
+              lower.getLiteral().setIntValue(Integer.MIN_VALUE);
+            }
+          }
+          break;
+        }
+        case DOUBLE_VALUE: {
+          double actual = lower.getLiteral().getDoubleValue();
+
+          switch (dataType) {
+            case INT: {
+              if (actual > Integer.MAX_VALUE) {
+                // Lower bound literal value is greater than the bounds of INT.
+                return getExpressionFromBoolean(false);
+              }
+              if (actual < Integer.MIN_VALUE) {
+                lower.getLiteral().setIntValue(Integer.MIN_VALUE);
+              } else {
+                // Double value is in int range
+                int converted = (int) actual;
+                int comparison = BigDecimal.valueOf(converted).compareTo(BigDecimal.valueOf(actual));
+                if (comparison >= 0) {
+                  lower.getLiteral().setIntValue(converted);
+                } else {
+                  lower.getLiteral().setIntValue(converted + 1);
+                }
+              }
+              break;
+            }
+            case LONG: {
+              if (actual > Long.MAX_VALUE) {
+                // Lower bound literal value is greater than the bounds of LONG.
+                return getExpressionFromBoolean(false);
+              }
+              if (actual < Long.MIN_VALUE) {
+                lower.getLiteral().setLongValue(Long.MIN_VALUE);
+              } else {
+                // Double value is in long range
+                long converted = (long) actual;
+                int comparison = BigDecimal.valueOf(converted).compareTo(BigDecimal.valueOf(actual));
+                if (comparison >= 0) {
+                  lower.getLiteral().setLongValue(converted);
+                } else {
+                  lower.getLiteral().setLongValue(converted + 1);
+                }
+              }
+              break;
+            }
+            default:
+              // For other numeric data types, the double literal can be converted on the server side.
+              break;
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    }
+
+    if (upper.isSetLiteral()) {
+      switch (upper.getLiteral().getSetField()) {
+        case LONG_VALUE: {
+          long actual = upper.getLiteral().getLongValue();
+          // Other data types can be converted on the server side.
+          if (dataType == DataType.INT) {
+            if (actual < Integer.MIN_VALUE) {
+              // Upper bound literal value is lesser than the bounds of INT.
+              return getExpressionFromBoolean(false);
+            }
+            if (actual > Integer.MAX_VALUE) {
+              upper.getLiteral().setIntValue(Integer.MAX_VALUE);
+            }
+          }
+          break;
+        }
+        case DOUBLE_VALUE: {
+          double actual = upper.getLiteral().getDoubleValue();
+
+          switch (dataType) {
+            case INT: {
+              if (actual < Integer.MIN_VALUE) {
+                // Upper bound literal value is lesser than the bounds of INT.
+                return getExpressionFromBoolean(false);
+              }
+              if (actual > Integer.MAX_VALUE) {
+                upper.getLiteral().setIntValue(Integer.MAX_VALUE);
+              } else {
+                // Double value is in int range
+                int converted = (int) actual;
+                int comparison = BigDecimal.valueOf(converted).compareTo(BigDecimal.valueOf(actual));
+                if (comparison <= 0) {
+                  upper.getLiteral().setIntValue(converted);
+                } else {
+                  upper.getLiteral().setIntValue(converted - 1);
+                }
+              }
+              break;
+            }
+            case LONG: {
+              if (actual < Long.MIN_VALUE) {
+                // Upper bound literal value is lesser than the bounds of LONG.
+                return getExpressionFromBoolean(false);
+              }
+              if (actual > Long.MAX_VALUE) {
+                upper.getLiteral().setLongValue(Long.MAX_VALUE);
+              } else {
+                // Double value is in long range
+                long converted = (long) actual;
+                int comparison = BigDecimal.valueOf(converted).compareTo(BigDecimal.valueOf(actual));
+                if (comparison <= 0) {
+                  upper.getLiteral().setLongValue(converted);
+                } else {
+                  upper.getLiteral().setLongValue(converted - 1);
+                }
+              }
+              break;
+            }
+            default:
+              // For other numeric data types, the double literal can be converted on the server side.
+              break;
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    }
+
+    return between;
   }
 
   /**
@@ -425,9 +524,9 @@ public class NumericalFilterOptimizer implements FilterOptimizer {
     if (comparison > 0) {
       // Literal value is greater than the converted value, so rewrite:
       //   "column >  literal" to "column >  converted"
-      //   "column >= literal" to "column >= converted"
+      //   "column >= literal" to "column >  converted"
       //   "column <  literal" to "column <= converted"
-      //   "column <= literal" to "column <  converted"
+      //   "column <= literal" to "column <= converted"
       if (kind == FilterKind.GREATER_THAN || kind == FilterKind.GREATER_THAN_OR_EQUAL) {
         range.getFunctionCall().setOperator(FilterKind.GREATER_THAN.name());
       } else if (kind == FilterKind.LESS_THAN || kind == FilterKind.LESS_THAN_OR_EQUAL) {
@@ -451,52 +550,35 @@ public class NumericalFilterOptimizer implements FilterOptimizer {
 
   /** @return field data type extracted from the expression. null if we can't determine the type. */
   @Nullable
-  private static FieldSpec.DataType getDataType(Expression expression, Schema schema) {
+  private static DataType getDataType(Expression expression, Schema schema) {
     if (expression.getType() == ExpressionType.IDENTIFIER) {
       String column = expression.getIdentifier().getName();
       FieldSpec fieldSpec = schema.getFieldSpecFor(column);
       if (fieldSpec != null && fieldSpec.isSingleValueField()) {
         return fieldSpec.getDataType();
       }
-    } else if (expression.getType() == ExpressionType.FUNCTION
-        && "cast".equalsIgnoreCase(expression.getFunctionCall().getOperator())) {
+    } else if (expression.getType() == ExpressionType.FUNCTION && "cast".equalsIgnoreCase(
+        expression.getFunctionCall().getOperator())) {
       // expression is not identifier but we can also determine the data type.
-      String targetTypeLiteral = expression.getFunctionCall().getOperands().get(1).getLiteral().getStringValue()
-          .toUpperCase();
-      FieldSpec.DataType dataType;
+      String targetTypeLiteral =
+          expression.getFunctionCall().getOperands().get(1).getLiteral().getStringValue().toUpperCase();
+      DataType dataType;
+
+      // Strip out _ARRAY suffix that can be used to represent an MV field type since the semantics here will be the
+      // same as that for the equivalent SV field of the same type
+      if (targetTypeLiteral.endsWith("_ARRAY")) {
+        targetTypeLiteral = targetTypeLiteral.substring(0, targetTypeLiteral.length() - 6);
+      }
+
       if ("INTEGER".equals(targetTypeLiteral)) {
-        dataType = FieldSpec.DataType.INT;
+        dataType = DataType.INT;
       } else if ("VARCHAR".equals(targetTypeLiteral)) {
-        dataType = FieldSpec.DataType.STRING;
+        dataType = DataType.STRING;
       } else {
-        dataType = FieldSpec.DataType.valueOf(targetTypeLiteral);
+        dataType = DataType.valueOf(targetTypeLiteral);
       }
       return dataType;
     }
     return null;
-  }
-
-  /** @return true if expression is a numeric literal; otherwise, false. */
-  private static boolean isNumericLiteral(Expression expression) {
-    if (expression.getType() == ExpressionType.LITERAL) {
-      Literal._Fields type = expression.getLiteral().getSetField();
-      switch (type) {
-        case SHORT_VALUE:
-        case INT_VALUE:
-        case LONG_VALUE:
-        case DOUBLE_VALUE:
-          return true;
-        default:
-          break;
-      }
-    }
-    return false;
-  }
-
-  /** Change the expression value to boolean literal with given value. */
-  private static void setExpressionToBoolean(Expression expression, boolean value) {
-    expression.unsetFunctionCall();
-    expression.setType(ExpressionType.LITERAL);
-    expression.setLiteral(Literal.boolValue(value));
   }
 }

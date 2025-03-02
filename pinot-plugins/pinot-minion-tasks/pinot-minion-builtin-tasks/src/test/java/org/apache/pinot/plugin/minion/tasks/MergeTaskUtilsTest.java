@@ -49,8 +49,9 @@ public class MergeTaskUtilsTest {
   public void testGetTimeHandlerConfig() {
     TableConfig tableConfig =
         new TableConfigBuilder(TableType.OFFLINE).setTableName("myTable").setTimeColumnName("dateTime").build();
-    Schema schema = new Schema.SchemaBuilder()
-        .addDateTime("dateTime", DataType.LONG, "1:SECONDS:SIMPLE_DATE_FORMAT:yyyyMMddHHmmss", "1:SECONDS").build();
+    Schema schema =
+        new Schema.SchemaBuilder().addDateTime("dateTime", DataType.LONG, "1:SECONDS:SIMPLE_DATE_FORMAT:yyyyMMddHHmmss",
+            "1:SECONDS").build();
     Map<String, String> taskConfig = new HashMap<>();
     long expectedWindowStartMs = 1625097600000L;
     long expectedWindowEndMs = 1625184000000L;
@@ -178,15 +179,17 @@ public class MergeTaskUtilsTest {
     taskConfig.put(MergeTask.SEGMENT_NAME_PREFIX_KEY, "myPrefix");
     taskConfig.put(MergeTask.SEGMENT_NAME_POSTFIX_KEY, "myPostfix");
     taskConfig.put(MergeTask.FIXED_SEGMENT_NAME_KEY, "mySegment");
+    taskConfig.put(MergeTask.SEGMENT_MAPPER_FILE_SIZE_IN_BYTES, "1000000000");
     SegmentConfig segmentConfig = MergeTaskUtils.getSegmentConfig(taskConfig);
     assertEquals(segmentConfig.getMaxNumRecordsPerSegment(), 10000);
     assertEquals(segmentConfig.getSegmentNamePrefix(), "myPrefix");
     assertEquals(segmentConfig.getSegmentNamePostfix(), "myPostfix");
     assertEquals(segmentConfig.getSegmentNamePostfix(), "myPostfix");
     assertEquals(segmentConfig.getFixedSegmentName(), "mySegment");
+    assertEquals(segmentConfig.getIntermediateFileSizeThreshold(), 1000000000L);
     assertEquals(segmentConfig.toString(),
-        "SegmentConfig{_maxNumRecordsPerSegment=10000, _segmentNamePrefix='myPrefix', "
-            + "_segmentNamePostfix='myPostfix', _fixedSegmentName='mySegment'}");
+        "SegmentConfig{_maxNumRecordsPerSegment=10000, _segmentMapperFileSizeThresholdInBytes=1000000000, "
+            + "_segmentNamePrefix='myPrefix', _segmentNamePostfix='myPostfix', _fixedSegmentName='mySegment'}");
 
     segmentConfig = MergeTaskUtils.getSegmentConfig(Collections.emptyMap());
     assertEquals(segmentConfig.getMaxNumRecordsPerSegment(), SegmentConfig.DEFAULT_MAX_NUM_RECORDS_PER_SEGMENT);
@@ -204,12 +207,12 @@ public class MergeTaskUtilsTest {
     segmentZKMetadata.setCustomMap(Collections.emptyMap());
     assertTrue(MergeTaskUtils.allowMerge(segmentZKMetadata));
 
-    segmentZKMetadata
-        .setCustomMap(Collections.singletonMap(MergeTask.SEGMENT_ZK_METADATA_SHOULD_NOT_MERGE_KEY, "false"));
+    segmentZKMetadata.setCustomMap(
+        Collections.singletonMap(MergeTask.SEGMENT_ZK_METADATA_SHOULD_NOT_MERGE_KEY, "false"));
     assertTrue(MergeTaskUtils.allowMerge(segmentZKMetadata));
 
-    segmentZKMetadata
-        .setCustomMap(Collections.singletonMap(MergeTask.SEGMENT_ZK_METADATA_SHOULD_NOT_MERGE_KEY, "true"));
+    segmentZKMetadata.setCustomMap(
+        Collections.singletonMap(MergeTask.SEGMENT_ZK_METADATA_SHOULD_NOT_MERGE_KEY, "true"));
     assertFalse(MergeTaskUtils.allowMerge(segmentZKMetadata));
   }
 }

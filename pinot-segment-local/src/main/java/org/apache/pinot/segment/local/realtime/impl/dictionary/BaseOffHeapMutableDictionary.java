@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import org.apache.pinot.common.utils.HashUtil;
 import org.apache.pinot.segment.spi.index.mutable.MutableDictionary;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
 import org.apache.pinot.segment.spi.memory.PinotDataBufferMemoryManager;
@@ -264,7 +265,7 @@ public abstract class BaseOffHeapMutableDictionary implements MutableDictionary 
       iBuf.put(i, NULL_VALUE_INDEX);
     }
     newList.add(iBuf);
-    Map<Object, Integer> newOverflowMap = new ConcurrentHashMap<>(_maxItemsInOverflowHash);
+    Map<Object, Integer> newOverflowMap = new ConcurrentHashMap<>(HashUtil.getHashMapCapacity(_maxItemsInOverflowHash));
     if (_maxItemsInOverflowHash > 0) {
       Map<Object, Integer> oldOverflowMap = valueToDictId.getOverflowMap();
       for (Map.Entry<Object, Integer> entry : oldOverflowMap.entrySet()) {
@@ -419,7 +420,7 @@ public abstract class BaseOffHeapMutableDictionary implements MutableDictionary 
     ValueToDictId valueToDictId = _valueToDict;
     long size = 0;
     for (IntBuffer iBuf : valueToDictId._iBufList) {
-      size = size + iBuf.capacity() * Integer.BYTES;
+      size = size + (long) iBuf.capacity() * Integer.BYTES;
     }
     return size;
   }

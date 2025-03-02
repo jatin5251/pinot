@@ -18,32 +18,23 @@
  */
 package org.apache.pinot.common.datablock;
 
-import java.io.IOException;
-import java.nio.ByteBuffer;
+import javax.annotation.Nonnull;
 import org.apache.pinot.common.utils.DataSchema;
+import org.apache.pinot.segment.spi.memory.DataBuffer;
 
 
 /**
  * Column-wise data table. It stores data in columnar-major format.
  */
 public class ColumnarDataBlock extends BaseDataBlock {
-  private static final int VERSION = 1;
+  private static final int VERSION = 2;
   protected int[] _cumulativeColumnOffsetSizeInBytes;
   protected int[] _columnSizeInBytes;
-
-  public ColumnarDataBlock() {
-    super();
-  }
+  private int _fixDataSize;
 
   public ColumnarDataBlock(int numRows, DataSchema dataSchema, String[] stringDictionary,
-      byte[] fixedSizeDataBytes, byte[] variableSizeDataBytes) {
+      DataBuffer fixedSizeDataBytes, DataBuffer variableSizeDataBytes) {
     super(numRows, dataSchema, stringDictionary, fixedSizeDataBytes, variableSizeDataBytes);
-    computeBlockObjectConstants();
-  }
-
-  public ColumnarDataBlock(ByteBuffer byteBuffer)
-      throws IOException {
-    super(byteBuffer);
     computeBlockObjectConstants();
   }
 
@@ -63,34 +54,25 @@ public class ColumnarDataBlock extends BaseDataBlock {
   }
 
   @Override
-  protected int getDataBlockVersionType() {
-    return VERSION + (Type.COLUMNAR.ordinal() << DataBlockUtils.VERSION_TYPE_SHIFT);
-  }
-
-  @Override
   protected int getOffsetInFixedBuffer(int rowId, int colId) {
     return _cumulativeColumnOffsetSizeInBytes[colId] + _columnSizeInBytes[colId] * rowId;
   }
 
   @Override
-  protected int positionOffsetInVariableBufferAndGetLength(int rowId, int colId) {
-    int offset = getOffsetInFixedBuffer(rowId, colId);
-    _variableSizeData.position(_fixedSizeData.getInt(offset));
-    return _fixedSizeData.getInt(offset + 4);
+  public Type getDataBlockType() {
+    return Type.COLUMNAR;
   }
 
   @Override
-  public ColumnarDataBlock toMetadataOnlyDataTable() {
-    ColumnarDataBlock metadataOnlyDataTable = new ColumnarDataBlock();
-    metadataOnlyDataTable._metadata.putAll(_metadata);
-    metadataOnlyDataTable._errCodeToExceptionMap.putAll(_errCodeToExceptionMap);
-    return metadataOnlyDataTable;
+  protected int getFixDataSize() {
+    return _fixDataSize;
   }
 
+  @Nonnull // the method is override just to override its nullability annotation
   @Override
-  public ColumnarDataBlock toDataOnlyDataTable() {
-    return new ColumnarDataBlock(_numRows, _dataSchema, _stringDictionary, _fixedSizeDataBytes, _variableSizeDataBytes);
+  public DataSchema getDataSchema() {
+    return super.getDataSchema();
   }
 
-  // TODO: add whole-column access methods.
+// TODO: add whole-column access methods.
 }

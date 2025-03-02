@@ -25,9 +25,9 @@ import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
 
 
-@CommandLine.Command(name = "ChangeNumReplicas")
+@CommandLine.Command(name = "ChangeNumReplicas", mixinStandardHelpOptions = true)
 public class ChangeNumReplicasCommand extends AbstractBaseAdminCommand implements Command {
-  private static final Logger LOGGER = LoggerFactory.getLogger(StartBrokerCommand.class);
+  private static final Logger LOGGER = LoggerFactory.getLogger(ChangeNumReplicasCommand.class);
 
   @CommandLine.Option(names = {"-zkAddress"}, required = false, description = "HTTP address of Zookeeper.")
   private String _zkAddress = DEFAULT_ZK_ADDRESS;
@@ -41,14 +41,6 @@ public class ChangeNumReplicasCommand extends AbstractBaseAdminCommand implement
 
   @CommandLine.Option(names = {"-exec"}, required = false, description = "Execute command (Run the replica changer)")
   private boolean _exec;
-
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, help = true,
-      description = "Print this message.")
-  private boolean _help = false;
-
-  public boolean getHelp() {
-    return _help;
-  }
 
   @Override
   public String getName() {

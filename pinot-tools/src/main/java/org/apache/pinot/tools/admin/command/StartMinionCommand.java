@@ -23,8 +23,8 @@ import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.util.HashMap;
 import java.util.Map;
-import org.apache.commons.collections.MapUtils;
-import org.apache.commons.configuration.ConfigurationException;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.configuration2.ex.ConfigurationException;
 import org.apache.pinot.spi.services.ServiceRole;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.tools.Command;
@@ -38,12 +38,9 @@ import picocli.CommandLine;
  * Class to implement StartMinion command.
  *
  */
-@CommandLine.Command(name = "StartMinion")
+@CommandLine.Command(name = "StartMinion", mixinStandardHelpOptions = true)
 public class StartMinionCommand extends AbstractBaseAdminCommand implements Command {
   private static final Logger LOGGER = LoggerFactory.getLogger(StartMinionCommand.class);
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, help = true,
-      description = "Print this message.")
-  private boolean _help = false;
   @CommandLine.Option(names = {"-minionHost"}, required = false, description = "Host name for minion.")
   private String _minionHost;
   @CommandLine.Option(names = {"-minionPort"}, required = false, description = "Port number to start the minion at.")
@@ -62,10 +59,6 @@ public class StartMinionCommand extends AbstractBaseAdminCommand implements Comm
   public StartMinionCommand setConfigOverrides(Map<String, Object> configs) {
     _configOverrides = configs;
     return this;
-  }
-
-  public boolean getHelp() {
-    return _help;
   }
 
   public String getMinionHost() {
@@ -119,7 +112,7 @@ public class StartMinionCommand extends AbstractBaseAdminCommand implements Comm
   public boolean execute()
       throws Exception {
     try {
-      LOGGER.info("Executing command: " + toString());
+      LOGGER.info("Executing command: {}", toString());
       Map<String, Object> minionConf = getMinionConf();
       StartServiceManagerCommand startServiceManagerCommand =
           new StartServiceManagerCommand().setZkAddress(_zkAddress).setClusterName(_clusterName).setPort(-1)

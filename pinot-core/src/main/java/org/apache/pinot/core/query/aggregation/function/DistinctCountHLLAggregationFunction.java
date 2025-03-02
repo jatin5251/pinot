@@ -31,6 +31,7 @@ import org.apache.pinot.core.query.aggregation.ObjectAggregationResultHolder;
 import org.apache.pinot.core.query.aggregation.groupby.GroupByResultHolder;
 import org.apache.pinot.core.query.aggregation.groupby.ObjectGroupByResultHolder;
 import org.apache.pinot.segment.spi.AggregationFunctionType;
+import org.apache.pinot.segment.spi.Constants;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.utils.CommonConstants;
@@ -48,7 +49,7 @@ public class DistinctCountHLLAggregationFunction extends BaseSingleInputAggregat
     Preconditions.checkArgument(numExpressions <= 2, "DistinctCountHLL expects 1 or 2 arguments, got: %s",
         numExpressions);
     if (arguments.size() == 2) {
-      _log2m = Integer.parseInt(arguments.get(1).getLiteralString());
+      _log2m = arguments.get(1).getLiteral().getIntValue();
     } else {
       _log2m = CommonConstants.Helix.DEFAULT_HYPERLOGLOG_LOG2M;
     }
@@ -361,6 +362,24 @@ public class DistinctCountHLLAggregationFunction extends BaseSingleInputAggregat
   @Override
   public Long extractFinalResult(HyperLogLog intermediateResult) {
     return intermediateResult.cardinality();
+  }
+
+  @Override
+  public Long mergeFinalResult(Long finalResult1, Long finalResult2) {
+    return finalResult1 + finalResult2;
+  }
+
+  @Override
+  public boolean canUseStarTree(Map<String, Object> functionParameters) {
+    // Check if log2m matches
+    Object log2m = functionParameters.get(Constants.HLL_LOG2M_KEY);
+    if (log2m != null) {
+      return _log2m == Integer.parseInt(String.valueOf(log2m));
+    } else {
+      // If the functionParameters don't have an explicit log2m set, it means that the star-tree index was built with
+      // the default value for log2m
+      return _log2m == CommonConstants.Helix.DEFAULT_HYPERLOGLOG_LOG2M;
+    }
   }
 
   /**

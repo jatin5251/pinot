@@ -88,7 +88,7 @@ public class BenchmarkScanDocIdIterators {
     FileUtils.forceMkdir(INDEX_DIR);
     File indexFile = new File(INDEX_DIR, "index-file");
     RoaringBitmapWriter<MutableRoaringBitmap> writer = RoaringBitmapWriter.bufferWriter().get();
-    LongSupplier supplier = Distribution.createLongSupplier(_seed, _distribution);
+    LongSupplier supplier = Distribution.createSupplier(_seed, _distribution);
     int[] values = new int[_numDocs];
     int max = Integer.MIN_VALUE;
     for (int i = 0; i < values.length; i++) {
@@ -123,7 +123,7 @@ public class BenchmarkScanDocIdIterators {
 
   @Benchmark
   public MutableRoaringBitmap benchmarkSVLong() {
-    return new SVScanDocIdIterator(_predicateEvaluator, _readerV2, _numDocs, null).applyAnd(_bitmap);
+    return new SVScanDocIdIterator(_predicateEvaluator, _readerV2, _numDocs).applyAnd(_bitmap);
   }
 
   public static class DummyPredicateEvaluator implements PredicateEvaluator {
@@ -180,18 +180,8 @@ public class BenchmarkScanDocIdIterators {
     }
 
     @Override
-    public int getNumMatchingDictIds() {
-      return 0;
-    }
-
-    @Override
     public int[] getMatchingDictIds() {
       return new int[0];
-    }
-
-    @Override
-    public int getNumNonMatchingDictIds() {
-      return 0;
     }
 
     @Override

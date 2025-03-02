@@ -24,7 +24,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.common.utils.TarGzCompressionUtils;
+import org.apache.pinot.common.utils.TarCompressionUtils;
 import org.apache.pinot.core.segment.processing.framework.SegmentProcessorConfig;
 import org.apache.pinot.core.segment.processing.framework.SegmentProcessorFramework;
 import org.apache.pinot.segment.local.segment.readers.PinotSegmentRecordReader;
@@ -43,7 +43,7 @@ import picocli.CommandLine;
 /**
  * Command to run {@link org.apache.pinot.core.segment.processing.framework.SegmentProcessorFramework}
  */
-@CommandLine.Command(name = "SegmentProcessorFramework")
+@CommandLine.Command(name = "SegmentProcessorFramework", mixinStandardHelpOptions = true)
 public class SegmentProcessorFrameworkCommand extends AbstractBaseAdminCommand implements Command {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(SegmentProcessorFrameworkCommand.class);
@@ -51,14 +51,6 @@ public class SegmentProcessorFrameworkCommand extends AbstractBaseAdminCommand i
   @CommandLine.Option(names = {"-segmentProcessorFrameworkSpec"}, required = true,
       description = "Path to SegmentProcessorFrameworkSpec json file")
   private String _segmentProcessorFrameworkSpec;
-
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, help = true, description = "Print this message.")
-  private boolean _help = false;
-
-  @Override
-  public boolean getHelp() {
-    return _help;
-  }
 
   @Override
   public String getName() {
@@ -104,7 +96,7 @@ public class SegmentProcessorFrameworkCommand extends AbstractBaseAdminCommand i
       // Untar the segments if needed
       if (!segmentDir.isDirectory()) {
         if (fileName.endsWith(".tar.gz") || fileName.endsWith(".tgz")) {
-          finalSegmentDir = TarGzCompressionUtils.untar(segmentDir, untarredSegmentsDir).get(0);
+          finalSegmentDir = TarCompressionUtils.untar(segmentDir, untarredSegmentsDir).get(0);
         } else {
           throw new IllegalStateException("Unsupported segment format: " + segmentDir.getAbsolutePath());
         }

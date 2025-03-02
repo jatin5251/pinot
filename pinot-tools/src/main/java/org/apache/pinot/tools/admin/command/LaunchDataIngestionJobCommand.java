@@ -21,7 +21,8 @@ package org.apache.pinot.tools.admin.command;
 import java.util.Arrays;
 import java.util.List;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.pinot.common.utils.TlsUtils;
+import org.apache.pinot.common.auth.AuthProviderUtils;
+import org.apache.pinot.common.utils.tls.TlsUtils;
 import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.ingestion.batch.IngestionJobLauncher;
 import org.apache.pinot.spi.ingestion.batch.spec.SegmentGenerationJobSpec;
@@ -38,12 +39,9 @@ import picocli.CommandLine;
  * Class to implement LaunchDataIngestionJob command.
  *
  */
-@CommandLine.Command(name = "LaunchDataIngestionJob")
+@CommandLine.Command(name = "LaunchDataIngestionJob", mixinStandardHelpOptions = true)
 public class LaunchDataIngestionJobCommand extends AbstractBaseAdminCommand implements Command {
   private static final Logger LOGGER = LoggerFactory.getLogger(LaunchDataIngestionJobCommand.class);
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, help = true,
-      description = "Print this message.")
-  private boolean _help = false;
   @CommandLine.Option(names = {"-jobSpecFile", "-jobSpec"}, required = true,
       description = "Ingestion job spec file")
   private String _jobSpecFile;
@@ -93,15 +91,6 @@ public class LaunchDataIngestionJobCommand extends AbstractBaseAdminCommand impl
   }
 
   @Override
-  public boolean getHelp() {
-    return _help;
-  }
-
-  public void setHelp(boolean help) {
-    _help = help;
-  }
-
-  @Override
   public boolean execute()
       throws Exception {
     String jobSpecFilePath = _jobSpecFile;
@@ -123,7 +112,8 @@ public class LaunchDataIngestionJobCommand extends AbstractBaseAdminCommand impl
     }
 
     if (StringUtils.isBlank(spec.getAuthToken())) {
-      spec.setAuthToken(makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user, _password).getTaskToken());
+      spec.setAuthToken(AuthProviderUtils.makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user, _password)
+          .getTaskToken());
     }
 
     try {
@@ -160,6 +150,9 @@ public class LaunchDataIngestionJobCommand extends AbstractBaseAdminCommand impl
   public static void main(String[] args) {
     PluginManager.get().init();
     int exitCode = new CommandLine(new LaunchDataIngestionJobCommand()).execute(args);
-    System.exit(exitCode);
+    if ((exitCode != 0)
+        || Boolean.parseBoolean(System.getProperties().getProperty("pinot.admin.system.exit"))) {
+      System.exit(exitCode);
+    }
   }
 }

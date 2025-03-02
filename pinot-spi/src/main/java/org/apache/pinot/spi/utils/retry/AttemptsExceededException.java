@@ -27,4 +27,8 @@ public class AttemptsExceededException extends AttemptFailureException {
   public AttemptsExceededException(String message) {
     super(message);
   }
+
+  public AttemptsExceededException(String message, int attempts) {
+    super(message, attempts);
+  }
 }

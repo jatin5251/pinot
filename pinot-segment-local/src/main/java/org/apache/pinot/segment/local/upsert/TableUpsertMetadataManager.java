@@ -19,9 +19,13 @@
 package org.apache.pinot.segment.local.upsert;
 
 import java.io.Closeable;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import javax.annotation.concurrent.ThreadSafe;
-import org.apache.pinot.common.metrics.ServerMetrics;
 import org.apache.pinot.segment.local.data.manager.TableDataManager;
+import org.apache.pinot.segment.spi.SegmentContext;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.UpsertConfig;
 import org.apache.pinot.spi.data.Schema;
@@ -33,9 +37,38 @@ import org.apache.pinot.spi.data.Schema;
 @ThreadSafe
 public interface TableUpsertMetadataManager extends Closeable {
 
-  void init(TableConfig tableConfig, Schema schema, TableDataManager tableDataManager, ServerMetrics serverMetrics);
+  void init(TableConfig tableConfig, Schema schema, TableDataManager tableDataManager);
 
   PartitionUpsertMetadataManager getOrCreatePartitionManager(int partitionId);
 
   UpsertConfig.Mode getUpsertMode();
+
+  UpsertConfig.ConsistencyMode getUpsertConsistencyMode();
+
+  boolean isEnablePreload();
+
+  /**
+   * Stops the metadata manager. After invoking this method, no access to the metadata will be accepted.
+   */
+  void stop();
+
+  /**
+   * Retrieves a mapping of partition id to the primary key count for the partition.
+   *
+   * @return A {@code Map} where keys are partition id and values are count of primary keys for that specific partition
+   */
+  Map<Integer, Long> getPartitionToPrimaryKeyCount();
+
+  default void setSegmentContexts(List<SegmentContext> segmentContexts, Map<String, String> queryOptions) {
+  }
+
+  default void lockForSegmentContexts() {
+  }
+
+  default void unlockForSegmentContexts() {
+  }
+
+  default Set<String> getNewlyAddedSegments() {
+    return Collections.emptySet();
+  }
 }

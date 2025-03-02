@@ -18,16 +18,20 @@
  */
 package org.apache.pinot.common.utils.config;
 
-import com.google.common.base.Preconditions;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import org.apache.commons.collections.CollectionUtils;
+import java.util.Set;
+import javax.annotation.Nullable;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.helix.HelixManager;
+import org.apache.pinot.common.assignment.InstancePartitions;
+import org.apache.pinot.common.assignment.InstancePartitionsUtils;
 import org.apache.pinot.common.tier.FixedTierSegmentSelector;
+import org.apache.pinot.common.tier.PinotServerTierStorage;
 import org.apache.pinot.common.tier.Tier;
 import org.apache.pinot.common.tier.TierFactory;
 import org.apache.pinot.common.tier.TierSegmentSelector;
@@ -59,10 +63,39 @@ public final class TierConfigUtils {
     return tierName == null ? "default" : tierName;
   }
 
+  /**
+   * Consider configured tiers and compute default instance partitions for the segment
+   *
+   * @return InstancePartitions if the one can be derived from the given sorted tiers, null otherwise
+   */
+  @Nullable
+  public static InstancePartitions getTieredInstancePartitionsForSegment(TableConfig tableConfig, String segmentName,
+      @Nullable List<Tier> sortedTiers, HelixManager helixManager) {
+    if (CollectionUtils.isEmpty(sortedTiers)) {
+      return null;
+    }
+
+    // Find first applicable tier
+    String tableNameWithType = tableConfig.getTableName();
+    for (Tier tier : sortedTiers) {
+      if (tier.getSegmentSelector().selectSegment(tableNameWithType, segmentName)) {
+        // Compute default instance partitions
+        PinotServerTierStorage storage = (PinotServerTierStorage) tier.getStorage();
+        return InstancePartitionsUtils.computeDefaultInstancePartitionsForTag(helixManager, tableConfig, tier.getName(),
+            storage.getServerTag());
+      }
+    }
+
+    // Tier not found
+    return null;
+  }
+
+  @Nullable
   public static String getDataDirForTier(TableConfig tableConfig, String tierName) {
     return getDataDirForTier(tableConfig, tierName, Collections.emptyMap());
   }
 
+  @Nullable
   public static String getDataDirForTier(TableConfig tableConfig, String tierName,
       Map<String, Map<String, String>> instanceTierConfigs) {
     String tableNameWithType = tableConfig.getTableName();
@@ -78,17 +111,17 @@ public final class TierConfigUtils {
       }
       if (tierCfg != null) {
         Map<String, String> backendProps = tierCfg.getTierBackendProperties();
-        if (backendProps != null) {
-          dataDir = backendProps.get(CommonConstants.Tier.BACKEND_PROP_DATA_DIR);
-        } else {
+        if (backendProps == null) {
           LOGGER.debug("No backend props for tier: {} in TableConfig of table: {}", tierName, tableNameWithType);
-        }
-        if (StringUtils.isNotEmpty(dataDir)) {
-          LOGGER.debug("Got dataDir: {} for tier: {} in TableConfig of table: {}", dataDir, tierName,
-              tableNameWithType);
-          return dataDir;
         } else {
-          LOGGER.debug("No dataDir for tier: {} in TableConfig of table: {}", tierName, tableNameWithType);
+          dataDir = backendProps.get(CommonConstants.Tier.BACKEND_PROP_DATA_DIR);
+          if (StringUtils.isNotEmpty(dataDir)) {
+            LOGGER.debug("Got dataDir: {} for tier: {} in TableConfig of table: {}", dataDir, tierName,
+                tableNameWithType);
+            return dataDir;
+          } else {
+            LOGGER.debug("No dataDir for tier: {} in TableConfig of table: {}", tierName, tableNameWithType);
+          }
         }
       }
     }
@@ -98,8 +131,6 @@ public final class TierConfigUtils {
       // All instance config names are lower cased while being passed down here.
       dataDir = instanceCfgs.get(CommonConstants.Tier.BACKEND_PROP_DATA_DIR.toLowerCase());
     }
-    Preconditions.checkState(StringUtils.isNotEmpty(dataDir), "No dataDir for tier: %s for table: %s", tierName,
-        tableNameWithType);
     LOGGER.debug("Got dataDir: {} for tier: {} for table: {} in instance configs", dataDir, tierName,
         tableNameWithType);
     return dataDir;
@@ -110,10 +141,18 @@ public final class TierConfigUtils {
    */
   public static List<Tier> getSortedTiersForStorageType(List<TierConfig> tierConfigList, String storageType,
       HelixManager helixManager) {
+    return getSortedTiersForStorageType(tierConfigList, storageType, helixManager, null);
+  }
+
+  public static List<Tier> getSortedTiersForStorageType(List<TierConfig> tierConfigList, String storageType,
+      HelixManager helixManager, @Nullable Map<String, Set<String>> providedTierToSegmentsMap) {
     List<Tier> sortedTiers = new ArrayList<>();
     for (TierConfig tierConfig : tierConfigList) {
       if (storageType.equalsIgnoreCase(tierConfig.getStorageType())) {
-        sortedTiers.add(TierFactory.getTier(tierConfig, helixManager));
+        String tierName = tierConfig.getName();
+        Set<String> providedSegmentsForTier =
+            providedTierToSegmentsMap == null ? null : providedTierToSegmentsMap.get(tierName);
+        sortedTiers.add(TierFactory.getTier(tierConfig, helixManager, providedSegmentsForTier));
       }
     }
     sortedTiers.sort(TierConfigUtils.getTierComparator());

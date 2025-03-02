@@ -18,10 +18,11 @@
  */
 package org.apache.pinot.query.runtime.operator.exchange;
 
-import java.util.Iterator;
+import java.io.IOException;
 import java.util.List;
-import org.apache.pinot.query.mailbox.MailboxIdentifier;
-import org.apache.pinot.query.mailbox.MailboxService;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Function;
+import org.apache.pinot.query.mailbox.SendingMailbox;
 import org.apache.pinot.query.runtime.blocks.BlockSplitter;
 import org.apache.pinot.query.runtime.blocks.TransferableBlock;
 
@@ -31,13 +32,20 @@ import org.apache.pinot.query.runtime.blocks.TransferableBlock;
  */
 class BroadcastExchange extends BlockExchange {
 
-  protected BroadcastExchange(MailboxService<TransferableBlock> mailbox, List<MailboxIdentifier> destinations,
-      BlockSplitter splitter) {
-    super(mailbox, destinations, splitter);
+  protected BroadcastExchange(List<SendingMailbox> sendingMailboxes, BlockSplitter splitter) {
+    super(sendingMailboxes, splitter, BroadcastExchange.RANDOM_INDEX_CHOOSER);
+  }
+
+  protected BroadcastExchange(List<SendingMailbox> sendingMailboxes, BlockSplitter splitter,
+      Function<List<SendingMailbox>, Integer> statsIndexChooser) {
+    super(sendingMailboxes, splitter, statsIndexChooser);
   }
 
   @Override
-  protected Iterator<RoutedBlock> route(List<MailboxIdentifier> destinations, TransferableBlock block) {
-    return destinations.stream().map(dest -> new RoutedBlock(dest, block)).iterator();
+  protected void route(List<SendingMailbox> destinations, TransferableBlock block)
+      throws IOException, TimeoutException {
+    for (SendingMailbox mailbox : destinations) {
+      sendBlock(mailbox, block);
+    }
   }
 }

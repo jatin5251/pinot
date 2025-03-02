@@ -106,7 +106,8 @@ public class HybridQuickstart extends Quickstart {
 
   public void execute()
       throws Exception {
-    File quickstartTmpDir = new File(_dataDir, String.valueOf(System.currentTimeMillis()));
+    File quickstartTmpDir =
+        _setCustomDataDir ? _dataDir : new File(_dataDir, String.valueOf(System.currentTimeMillis()));
     File quickstartRunnerDir = new File(quickstartTmpDir, "quickstart");
     Preconditions.checkState(quickstartRunnerDir.mkdirs());
     Set<QuickstartTableRequest> quickstartTableRequests = new HashSet<>();
@@ -140,6 +141,7 @@ public class HybridQuickstart extends Quickstart {
     printStatus(Color.YELLOW, "***** Realtime quickstart setup complete *****");
     runSampleQueries(runner);
 
-    printStatus(Color.GREEN, "You can always go to http://localhost:9000 to play around in the query console");
+    printStatus(Color.GREEN, "You can always go to http://localhost:" + QuickstartRunner.DEFAULT_CONTROLLER_PORT
+        + " to play around in the query console");
   }
 }

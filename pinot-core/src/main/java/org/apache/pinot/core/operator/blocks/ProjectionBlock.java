@@ -18,24 +18,21 @@
  */
 package org.apache.pinot.core.operator.blocks;
 
-import java.math.BigDecimal;
 import java.util.Map;
-import org.apache.pinot.core.common.Block;
-import org.apache.pinot.core.common.BlockDocIdSet;
-import org.apache.pinot.core.common.BlockDocIdValueSet;
-import org.apache.pinot.core.common.BlockMetadata;
+import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.core.common.BlockValSet;
 import org.apache.pinot.core.common.DataBlockCache;
 import org.apache.pinot.core.operator.docvalsets.ProjectionBlockValSet;
 import org.apache.pinot.segment.spi.datasource.DataSource;
-import org.apache.pinot.segment.spi.evaluator.TransformEvaluator;
+import org.apache.pinot.segment.spi.datasource.MapDataSource;
+import org.apache.pinot.spi.data.ComplexFieldSpec;
 
 
 /**
  * ProjectionBlock holds a column name to Block Map.
  * It provides DocIdSetBlock for a given column.
  */
-public class ProjectionBlock implements Block {
+public class ProjectionBlock implements ValueBlock {
   private final Map<String, DataSource> _dataSourceMap;
   private final DataBlockCache _dataBlockCache;
 
@@ -44,156 +41,36 @@ public class ProjectionBlock implements Block {
     _dataBlockCache = dataBlockCache;
   }
 
+  @Override
   public int getNumDocs() {
     return _dataBlockCache.getNumDocs();
   }
 
+  @Override
   public int[] getDocIds() {
     return _dataBlockCache.getDocIds();
   }
 
+  @Override
+  public BlockValSet getBlockValueSet(ExpressionContext expression) {
+    assert expression.getType() == ExpressionContext.Type.IDENTIFIER;
+    return getBlockValueSet(expression.getIdentifier());
+  }
+
+  @Override
   public BlockValSet getBlockValueSet(String column) {
     return new ProjectionBlockValSet(_dataBlockCache, column, _dataSourceMap.get(column));
   }
 
   @Override
-  public BlockDocIdSet getBlockDocIdSet() {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
-  public BlockValSet getBlockValueSet() {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
-  public BlockDocIdValueSet getBlockDocIdValueSet() {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
-  public BlockMetadata getMetadata() {
-    throw new UnsupportedOperationException();
-  }
-
-  /**
-   * Pushes a {@see TransformEvaluator} which will produce an int value down
-   * to be evaluated against the column. This is an unstable API.
-   * @param column column to evaluate against
-   * @param evaluator the evaluator which produces values from the storage in the column
-   * @param buffer the buffer to write outputs into
-   */
-  public void fillValues(String column, TransformEvaluator evaluator, int[] buffer) {
-    _dataBlockCache.fillValues(column, evaluator, buffer);
-  }
-
-  /**
-   * Pushes a {@see TransformEvaluator} which will produce a long value down
-   * to be evaluated against the column. This is an unstable API.
-   * @param column column to evaluate against
-   * @param evaluator the evaluator which produces values from the storage in the column
-   * @param buffer the buffer to write outputs into
-   */
-  public void fillValues(String column, TransformEvaluator evaluator, long[] buffer) {
-    _dataBlockCache.fillValues(column, evaluator, buffer);
-  }
-
-  /**
-   * Pushes a {@see TransformEvaluator} which will produce a float value down
-   * to be evaluated against the column. This is an unstable API.
-   * @param column column to evaluate against
-   * @param evaluator the evaluator which produces values from the storage in the column
-   * @param buffer the buffer to write outputs into
-   */
-  public void fillValues(String column, TransformEvaluator evaluator, float[] buffer) {
-    _dataBlockCache.fillValues(column, evaluator, buffer);
-  }
-
-  /**
-   * Pushes a {@see TransformEvaluator} which will produce a double value down
-   * to be evaluated against the column. This is an unstable API.
-   * @param column column to evaluate against
-   * @param evaluator the evaluator which produces values from the storage in the column
-   * @param buffer the buffer to write outputs into
-   */
-  public void fillValues(String column, TransformEvaluator evaluator, double[] buffer) {
-    _dataBlockCache.fillValues(column, evaluator, buffer);
-  }
-
-  /**
-   * Pushes a {@see TransformEvaluator} which will produce a BigDecimal value down
-   * to be evaluated against the column. This is an unstable API.
-   * @param column column to evaluate against
-   * @param evaluator the evaluator which produces values from the storage in the column
-   * @param buffer the buffer to write outputs into
-   */
-  public void fillValues(String column, TransformEvaluator evaluator, BigDecimal[] buffer) {
-    _dataBlockCache.fillValues(column, evaluator, buffer);
-  }
-
-  /**
-   * Pushes a {@see TransformEvaluator} which will produce a String value down
-   * to be evaluated against the column. This is an unstable API.
-   * @param column column to evaluate against
-   * @param evaluator the evaluator which produces values from the storage in the column
-   * @param buffer the buffer to write outputs into
-   */
-  public void fillValues(String column, TransformEvaluator evaluator, String[] buffer) {
-    _dataBlockCache.fillValues(column, evaluator, buffer);
-  }
-
-  /**
-   * Pushes a {@see TransformEvaluator} which will produce an int[] array value down
-   * to be evaluated against the column. This is an unstable API.
-   * @param column column to evaluate against
-   * @param evaluator the evaluator which produces values from the storage in the column
-   * @param buffer the buffer to write outputs into
-   */
-  public void fillValues(String column, TransformEvaluator evaluator, int[][] buffer) {
-    _dataBlockCache.fillValues(column, evaluator, buffer);
-  }
-
-  /**
-   * Pushes a {@see TransformEvaluator} which will produce a long[] value down
-   * to be evaluated against the column. This is an unstable API.
-   * @param column column to evaluate against
-   * @param evaluator the evaluator which produces values from the storage in the column
-   * @param buffer the buffer to write outputs into
-   */
-  public void fillValues(String column, TransformEvaluator evaluator, long[][] buffer) {
-    _dataBlockCache.fillValues(column, evaluator, buffer);
-  }
-
-  /**
-   * Pushes a {@see TransformEvaluator} which will produce a float[] value down
-   * to be evaluated against the column. This is an unstable API.
-   * @param column column to evaluate against
-   * @param evaluator the evaluator which produces values from the storage in the column
-   * @param buffer the buffer to write outputs into
-   */
-  public void fillValues(String column, TransformEvaluator evaluator, float[][] buffer) {
-    _dataBlockCache.fillValues(column, evaluator, buffer);
-  }
-
-  /**
-   * Pushes a {@see TransformEvaluator} which will produce a double[] value down
-   * to be evaluated against the column. This is an unstable API.
-   * @param column column to evaluate against
-   * @param evaluator the evaluator which produces values from the storage in the column
-   * @param buffer the buffer to write outputs into
-   */
-  public void fillValues(String column, TransformEvaluator evaluator, double[][] buffer) {
-    _dataBlockCache.fillValues(column, evaluator, buffer);
-  }
-
-  /**
-   * Pushes a {@see TransformEvaluator} which will produce a String[] value down
-   * to be evaluated against the column. This is an unstable API.
-   * @param column column to evaluate against
-   * @param evaluator the evaluator which produces values from the storage in the column
-   * @param buffer the buffer to write outputs into
-   */
-  public void fillValues(String column, TransformEvaluator evaluator, String[][] buffer) {
-    _dataBlockCache.fillValues(column, evaluator, buffer);
+  public BlockValSet getBlockValueSet(String[] paths) {
+    // TODO: only support one level of path for now, e.g. `map.key`
+    assert paths.length == 2;
+    MapDataSource mapDataSource = (MapDataSource) _dataSourceMap.get(paths[0]);
+    DataSource keyDataSource = mapDataSource.getKeyDataSource(paths[1]);
+    String fullColumnKeyName = ComplexFieldSpec.getFullChildName(paths);
+    _dataSourceMap.put(fullColumnKeyName, keyDataSource);
+    _dataBlockCache.addDataSource(fullColumnKeyName, keyDataSource);
+    return getBlockValueSet(fullColumnKeyName);
   }
 }

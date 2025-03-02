@@ -38,6 +38,7 @@ public class StreamConfigProperties {
    */
   public static final String STREAM_TYPE = "streamType";
   public static final String STREAM_TOPIC_NAME = "topic.name";
+  @Deprecated
   public static final String STREAM_CONSUMER_TYPES = "consumer.type";
   public static final String STREAM_CONSUMER_FACTORY_CLASS = "consumer.factory.class.name";
   public static final String STREAM_CONSUMER_OFFSET_CRITERIA = "consumer.prop.auto.offset.reset";
@@ -82,6 +83,12 @@ public class StreamConfigProperties {
   public static final String SEGMENT_FLUSH_THRESHOLD_ROWS = "realtime.segment.flush.threshold.rows";
 
   /**
+   * Config is similar to {@link StreamConfigProperties#SEGMENT_FLUSH_THRESHOLD_ROWS} but independent of
+   * partition count. This is useful when we want to flush segment exactly based on number of rows in a segment
+   */
+  public static final String SEGMENT_FLUSH_THRESHOLD_SEGMENT_ROWS = "realtime.segment.flush.threshold.segment.rows";
+
+  /**
    * @deprecated because the property key is confusing (desired size is not indicative of segment size).
    * Use {@link StreamConfigProperties#SEGMENT_FLUSH_THRESHOLD_SEGMENT_SIZE}
    *
@@ -105,11 +112,28 @@ public class StreamConfigProperties {
   public static final String SEGMENT_FLUSH_THRESHOLD_SEGMENT_SIZE = "realtime.segment.flush.threshold.segment.size";
 
   /**
+   * The variance fraction allowed for the segment size auto tuning. The valid value is [0.0, 0.5].
+   * By default 0.0 is used.
+   */
+  public static final String FLUSH_THRESHOLD_VARIANCE_FRACTION =
+      "realtime.segment.flush.threshold.variance.fraction";
+
+  /**
    * The initial num rows to use for segment size auto tuning. By default 100_000 is used.
    */
   public static final String SEGMENT_FLUSH_AUTOTUNE_INITIAL_ROWS = "realtime.segment.flush.autotune.initialRows";
   // Time threshold that controller will wait for the segment to be built by the server
   public static final String SEGMENT_COMMIT_TIMEOUT_SECONDS = "realtime.segment.commit.timeoutSeconds";
+
+  /**
+   * Config used to indicate whether server should by-pass controller and directly upload the segment to the deep store
+   */
+  public static final String SERVER_UPLOAD_TO_DEEPSTORE = "realtime.segment.serverUploadToDeepStore";
+
+  /**
+   * Config used to indicate which segment commit protocol implementation controller should use for this table
+   */
+  public static final String SEGMENT_COMPLETION_FSM_SCHEME = "segment.completion.fsm.scheme";
 
   /**
    * Helper method to create a stream specific property
@@ -119,6 +143,7 @@ public class StreamConfigProperties {
   }
 
   public static String getPropertySuffix(String incoming, String propertyPrefix) {
-    return incoming.split(propertyPrefix + ".")[1];
+    String prefix = propertyPrefix + DOT_SEPARATOR;
+    return incoming.substring(prefix.length());
   }
 }

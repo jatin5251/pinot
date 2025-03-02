@@ -34,7 +34,7 @@ import picocli.CommandLine;
  *
  *
  */
-@CommandLine.Command(name = "StartZookeeper")
+@CommandLine.Command(name = "StartZookeeper", mixinStandardHelpOptions = true)
 public class StartZookeeperCommand extends AbstractBaseAdminCommand implements Command {
   private static final Logger LOGGER = LoggerFactory.getLogger(StartZookeeperCommand.class);
 
@@ -43,15 +43,6 @@ public class StartZookeeperCommand extends AbstractBaseAdminCommand implements C
 
   @CommandLine.Option(names = {"-dataDir"}, required = false, description = "Directory for zookeper data.")
   private String _dataDir = PinotConfigUtils.TMP_DIR + "PinotAdmin/zkData";
-
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, help = true,
-      description = "Print this message.")
-  private boolean _help = false;
-
-  @Override
-  public boolean getHelp() {
-    return _help;
-  }
 
   @Override
   public String getName() {
@@ -92,7 +83,7 @@ public class StartZookeeperCommand extends AbstractBaseAdminCommand implements C
   @Override
   public boolean execute()
       throws IOException {
-    LOGGER.info("Executing command: " + toString());
+    LOGGER.info("Executing command: {}", toString());
 
     IDefaultNameSpace defaultNameSpace = new IDefaultNameSpace() {
       @Override
@@ -103,7 +94,7 @@ public class StartZookeeperCommand extends AbstractBaseAdminCommand implements C
 
     _zookeeperInstance = ZkStarter.startLocalZkServer(_zkPort, _dataDir);
 
-    LOGGER.info("Start zookeeper at localhost:" + _zkPort + " in thread " + Thread.currentThread().getName());
+    LOGGER.info("Start zookeeper at localhost:{} in thread {}", _zkPort, Thread.currentThread().getName());
 
     savePID(System.getProperty("java.io.tmpdir") + File.separator + ".zooKeeper.pid");
     return true;

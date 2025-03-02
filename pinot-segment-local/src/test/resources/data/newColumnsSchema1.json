@@ -32,6 +32,19 @@
       "dataType": "STRING",
       "name": "newStringMVDimension",
       "singleValueField": false
+    },
+    {
+      "dataType": "STRING",
+      "name": "newRawStringSVDimension"
+    },
+    {
+      "dataType": "STRING",
+      "name": "newNullReturnStringSVDimension",
+      "defaultNullValue": "nil"
+    },
+    {
+      "dataType": "LONG",
+      "name": "newWrongArgDateTruncDerivedColumn"
     }
   ]
 }

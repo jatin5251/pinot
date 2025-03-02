@@ -29,7 +29,9 @@ import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.config.task.AdhocTaskConfig;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
+import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.ingestion.batch.BatchConfigProperties;
+import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.apache.pinot.util.TestUtils;
@@ -45,6 +47,12 @@ import static org.testng.Assert.assertEquals;
 
 public class SegmentGenerationMinionClusterIntegrationTest extends BaseClusterIntegrationTest {
   private static final Logger LOGGER = LoggerFactory.getLogger(SegmentGenerationMinionClusterIntegrationTest.class);
+
+  @Override
+  protected void overrideBrokerConf(PinotConfiguration brokerConf) {
+    super.overrideBrokerConf(brokerConf);
+    brokerConf.setProperty(CommonConstants.Broker.USE_MSE_TO_FILL_EMPTY_RESPONSE_SCHEMA, true);
+  }
 
   @BeforeClass
   public void setUp()
@@ -88,7 +96,7 @@ public class SegmentGenerationMinionClusterIntegrationTest extends BaseClusterIn
     AdhocTaskConfig adhocTaskConfig =
         new AdhocTaskConfig("SegmentGenerationAndPushTask", tableNameWithType, null, taskConfigs);
 
-    String url = _controllerBaseApiUrl + "/tasks/execute";
+    String url = getControllerBaseApiUrl() + "/tasks/execute";
     TestUtils.waitForCondition(aVoid -> {
       try {
         if (getTotalDocs(tableName) < rowCnt) {
@@ -98,11 +106,11 @@ public class SegmentGenerationMinionClusterIntegrationTest extends BaseClusterIn
         }
         return getTotalDocs(tableName) == rowCnt;
       } catch (Exception e) {
-        LOGGER.error("Failed to get expected totalDocs: " + rowCnt, e);
+        LOGGER.error("Failed to get expected totalDocs: {}", rowCnt, e);
         return false;
       }
     }, 5000L, 600_000L, "Failed to load " + rowCnt + " documents", true);
-    JsonNode result = postQuery("SELECT COUNT(*) FROM " + tableName, _brokerBaseApiUrl);
+    JsonNode result = postQuery("SELECT COUNT(*) FROM " + tableName);
     // One segment per file.
     assertEquals(result.get("numSegmentsQueried").asInt(), 7);
   }
@@ -134,8 +142,8 @@ public class SegmentGenerationMinionClusterIntegrationTest extends BaseClusterIn
     TestUtils.waitForCondition(aVoid -> {
       try {
         if (getTotalDocs(tableName) < rowCnt) {
-          JsonNode response = queryController ? postQueryToController(insertFileStatement, _controllerBaseApiUrl)
-              : postQuery(insertFileStatement, _brokerBaseApiUrl);
+          JsonNode response = queryController ? postQueryToController(insertFileStatement)
+              : postQuery(insertFileStatement);
           Assert.assertEquals(response.get("resultTable").get("rows").get(0).get(0).asText(),
               tableName + "_OFFLINE");
           Assert.assertEquals(response.get("resultTable").get("rows").get(0).get(1).asText(),
@@ -143,11 +151,11 @@ public class SegmentGenerationMinionClusterIntegrationTest extends BaseClusterIn
         }
         return getTotalDocs(tableName) == rowCnt;
       } catch (Exception e) {
-        LOGGER.error("Failed to get expected totalDocs: " + rowCnt, e);
+        LOGGER.error("Failed to get expected totalDocs: {}", rowCnt, e);
         return false;
       }
     }, 5000L, 600_000L, "Failed to load " + rowCnt + " documents", true);
-    JsonNode result = postQuery("SELECT COUNT(*) FROM " + tableName, _brokerBaseApiUrl);
+    JsonNode result = postQuery("SELECT COUNT(*) FROM " + tableName);
     // One segment per file.
     assertEquals(result.get("numSegmentsQueried").asInt(), 7);
   }
@@ -178,8 +186,8 @@ public class SegmentGenerationMinionClusterIntegrationTest extends BaseClusterIn
   private int getTotalDocs(String tableName)
       throws Exception {
     String query = "SELECT COUNT(*) FROM " + tableName;
-    JsonNode response = postQuery(query, _brokerBaseApiUrl);
+    JsonNode response = postQuery(query);
     JsonNode resTbl = response.get("resultTable");
-    return (resTbl == null) ? 0 : resTbl.get("rows").get(0).get(0).asInt();
+    return (resTbl.get("rows").size() == 0) ? 0 : resTbl.get("rows").get(0).get(0).asInt();
   }
 }

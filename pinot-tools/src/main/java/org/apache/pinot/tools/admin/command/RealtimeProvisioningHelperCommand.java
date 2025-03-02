@@ -43,7 +43,7 @@ import picocli.CommandLine;
  * Given a set of input params, output a table of num hosts to num hours and the memory required per host
  *
  */
-@CommandLine.Command(name = "RealtimeProvisioningHelper")
+@CommandLine.Command(name = "RealtimeProvisioningHelper", mixinStandardHelpOptions = true)
 public class RealtimeProvisioningHelperCommand extends AbstractBaseAdminCommand implements Command {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(RealtimeProvisioningHelperCommand.class);
@@ -58,6 +58,9 @@ public class RealtimeProvisioningHelperCommand extends AbstractBaseAdminCommand 
 
   @CommandLine.Option(names = {"-tableConfigFile"}, required = true)
   private String _tableConfigFile;
+
+  @CommandLine.Option(names = {"-schemaFile"}, required = false)
+  private String _schemaFile;
 
   @CommandLine.Option(names = {"-numPartitions"}, required = true,
       description = "number of stream partitions for the table")
@@ -100,11 +103,13 @@ public class RealtimeProvisioningHelperCommand extends AbstractBaseAdminCommand 
       description = "Maximum memory per host that can be used for pinot data (e.g. 250G, 100M). Default 48g")
   private String _maxUsableHostMemory = "48G";
 
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, usageHelp = true)
-  private boolean _help = false;
-
   public RealtimeProvisioningHelperCommand setTableConfigFile(String tableConfigFile) {
     _tableConfigFile = tableConfigFile;
+    return this;
+  }
+
+  public RealtimeProvisioningHelperCommand setSchemaFile(String schemaFile) {
+    _schemaFile = schemaFile;
     return this;
   }
 
@@ -155,8 +160,10 @@ public class RealtimeProvisioningHelperCommand extends AbstractBaseAdminCommand 
 
   @Override
   public String toString() {
-    String segmentStr = _sampleCompletedSegmentDir != null ? " -sampleCompletedSegmentDir " + _sampleCompletedSegmentDir
-        : " -schemaWithMetadataFile " + _schemaWithMetadataFile + " -numRows " + _numRows;
+    String segmentStr =
+        _sampleCompletedSegmentDir != null
+            ? " -schemaFile " + _schemaFile + " -sampleCompletedSegmentDir " + _sampleCompletedSegmentDir
+            : " -schemaWithMetadataFile " + _schemaWithMetadataFile + " -numRows " + _numRows;
     return "RealtimeProvisioningHelper -tableConfigFile " + _tableConfigFile + " -numPartitions " + _numPartitions
         + " -pushFrequency " + _pushFrequency + " -numHosts " + _numHosts + " -numHours " + _numHours + segmentStr
         + " -ingestionRate " + _ingestionRate + " -maxUsableHostMemory " + _maxUsableHostMemory + " -retentionHours "
@@ -179,22 +186,17 @@ public class RealtimeProvisioningHelperCommand extends AbstractBaseAdminCommand 
   }
 
   @Override
-  public boolean getHelp() {
-    return _help;
-  }
-
-  @Override
   public void printExamples() {
     StringBuilder builder = new StringBuilder();
     builder.append("\n\nThis command allows you to estimate the capacity needed for provisioning realtime hosts. ")
         .append("It assumes that there is no upper limit to the amount of memory you can mmap").append(
-        "\nIf you have a hybrid table, then consult the push frequency setting in your offline table specify it in "
-            + "the -pushFrequency argument").append(
-        "\nIf you have a realtime-only table, then the default behavior is to assume that your queries need all "
-            + "data in memory all the time").append(
-        "\nHowever, if most of your queries are going to be for (say) the last 96 hours, then you can specify "
-            + "that in -retentionHours").append(
-        "\nDoing so will let this program assume that you are willing to take a page hit when querying older data")
+            "\nIf you have a hybrid table, then consult the push frequency setting in your offline table specify it in "
+                + "the -pushFrequency argument").append(
+            "\nIf you have a realtime-only table, then the default behavior is to assume that your queries need all "
+                + "data in memory all the time").append(
+            "\nHowever, if most of your queries are going to be for (say) the last 96 hours, then you can specify "
+                + "that in -retentionHours").append(
+            "\nDoing so will let this program assume that you are willing to take a page hit when querying older data")
         .append("\nand optimize memory and number of hosts accordingly.")
         .append("\n See https://docs.pinot.apache.org/operators/operating-pinot/tuning/realtime for details");
     System.out.println(builder);
@@ -206,13 +208,14 @@ public class RealtimeProvisioningHelperCommand extends AbstractBaseAdminCommand 
 
     boolean segmentProvided = _sampleCompletedSegmentDir != null;
     boolean characteristicsProvided = _schemaWithMetadataFile != null;
-    Preconditions.checkState(segmentProvided ^ characteristicsProvided,
-        "Either completed segment should be provided or schema with characteristics file!");
+    boolean schemaProvided = _schemaFile != null;
+    Preconditions.checkState((schemaProvided & segmentProvided) ^ characteristicsProvided,
+        "Either schema with completed segment should be provided or schema with characteristics file!");
 
-    LOGGER.info("Executing command: {}", toString());
+    LOGGER.info("Executing command: {}", this);
 
     TableConfig tableConfig;
-    try (FileInputStream fis = new FileInputStream(new File(_tableConfigFile))) {
+    try (FileInputStream fis = new FileInputStream(_tableConfigFile)) {
       String tableConfigString = IOUtils.toString(fis);
       tableConfig = JsonUtils.stringToObject(tableConfigString, TableConfig.class);
     } catch (IOException e) {
@@ -262,21 +265,20 @@ public class RealtimeProvisioningHelperCommand extends AbstractBaseAdminCommand 
     long maxUsableHostMemBytes = DataSizeUtils.toBytes(_maxUsableHostMemory);
 
     File workingDir = Files.createTempDir();
+    Schema schema = extractSchema();
     MemoryEstimator memoryEstimator;
     if (segmentProvided) {
       // use the provided segment to estimate memory
       memoryEstimator =
-          new MemoryEstimator(tableConfig, new File(_sampleCompletedSegmentDir), _ingestionRate, maxUsableHostMemBytes,
-              tableRetentionHours, workingDir);
+          new MemoryEstimator(tableConfig, schema, new File(_sampleCompletedSegmentDir), _ingestionRate,
+              maxUsableHostMemBytes, tableRetentionHours, workingDir);
     } else {
       // no segments provided;
       // generate a segment based on the provided characteristics and then use it to estimate memory
       if (_numRows == 0) {
         _numRows = DEFAULT_NUMBER_OF_ROWS;
       }
-      File file = new File(_schemaWithMetadataFile);
-      Schema schema = deserialize(file, Schema.class);
-      SchemaWithMetaData schemaWithMetaData = deserialize(file, SchemaWithMetaData.class);
+      SchemaWithMetaData schemaWithMetaData = deserialize(new File(_schemaWithMetadataFile), SchemaWithMetaData.class);
       memoryEstimator =
           new MemoryEstimator(tableConfig, schema, schemaWithMetaData, _numRows, _ingestionRate, maxUsableHostMemBytes,
               tableRetentionHours, workingDir);
@@ -297,6 +299,22 @@ public class RealtimeProvisioningHelperCommand extends AbstractBaseAdminCommand 
     LOGGER.info("\nTotal number of segments queried per host (for all partitions)");
     displayResults(memoryEstimator.getNumSegmentsQueriedPerHost(), numHosts, numHours);
     return true;
+  }
+
+  private Schema extractSchema() {
+    if (_schemaFile != null) {
+      try (FileInputStream fis = new FileInputStream(_schemaFile)) {
+        String schemaString = IOUtils.toString(fis);
+        return Schema.fromString(schemaString);
+      } catch (IOException e) {
+        throw new RuntimeException("Exception in reading schema from file " + _schemaFile, e);
+      }
+    } else if (_schemaWithMetadataFile != null) {
+      File file = new File(_schemaWithMetadataFile);
+      return deserialize(file, Schema.class);
+    } else {
+      throw new IllegalArgumentException("Schema file is required");
+    }
   }
 
   private void displayOutputHeader(StringBuilder note) {

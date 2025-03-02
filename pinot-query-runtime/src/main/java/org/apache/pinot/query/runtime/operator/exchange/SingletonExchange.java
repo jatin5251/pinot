@@ -18,12 +18,13 @@
  */
 package org.apache.pinot.query.runtime.operator.exchange;
 
-import com.google.common.collect.Iterables;
-import com.google.common.collect.Iterators;
-import java.util.Iterator;
+import com.google.common.base.Preconditions;
+import java.io.IOException;
 import java.util.List;
-import org.apache.pinot.query.mailbox.MailboxIdentifier;
-import org.apache.pinot.query.mailbox.MailboxService;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Function;
+import org.apache.pinot.query.mailbox.InMemorySendingMailbox;
+import org.apache.pinot.query.mailbox.SendingMailbox;
 import org.apache.pinot.query.runtime.blocks.BlockSplitter;
 import org.apache.pinot.query.runtime.blocks.TransferableBlock;
 
@@ -34,13 +35,21 @@ import org.apache.pinot.query.runtime.blocks.TransferableBlock;
  */
 class SingletonExchange extends BlockExchange {
 
-  SingletonExchange(MailboxService<TransferableBlock> mailbox, List<MailboxIdentifier> destinations,
-      BlockSplitter splitter) {
-    super(mailbox, destinations, splitter);
+  SingletonExchange(List<SendingMailbox> sendingMailboxes, BlockSplitter splitter,
+      Function<List<SendingMailbox>, Integer> statsIndexChooser) {
+    super(sendingMailboxes, splitter, statsIndexChooser);
+    Preconditions.checkArgument(
+        sendingMailboxes.size() == 1 && sendingMailboxes.get(0) instanceof InMemorySendingMailbox,
+        "Expect single InMemorySendingMailbox for SingletonExchange");
+  }
+
+  SingletonExchange(List<SendingMailbox> sendingMailboxes, BlockSplitter splitter) {
+    this(sendingMailboxes, splitter, RANDOM_INDEX_CHOOSER);
   }
 
   @Override
-  protected Iterator<RoutedBlock> route(List<MailboxIdentifier> destinations, TransferableBlock block) {
-    return Iterators.singletonIterator(new RoutedBlock(Iterables.getOnlyElement(destinations), block));
+  protected void route(List<SendingMailbox> sendingMailboxes, TransferableBlock block)
+      throws IOException, TimeoutException {
+    sendBlock(sendingMailboxes.get(0), block);
   }
 }

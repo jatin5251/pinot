@@ -18,10 +18,14 @@
  */
 package org.apache.pinot.common.metadata.segment;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.IOException;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
-import org.apache.commons.collections.MapUtils;
+import org.apache.commons.collections4.MapUtils;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.pinot.common.metadata.ZKMetadata;
 import org.apache.pinot.spi.utils.CommonConstants.Segment;
@@ -33,6 +37,8 @@ import org.slf4j.LoggerFactory;
 
 public class SegmentZKMetadata implements ZKMetadata {
   private static final Logger LOGGER = LoggerFactory.getLogger(SegmentZKMetadata.class);
+  private static final String SEGMENT_NAME_KEY = "segmentName";
+  private static final String SIMPLE_FIELDS_KEY = "simpleFields";
   private static final String NULL = "null";
 
   private final ZNRecord _znRecord;
@@ -56,6 +62,16 @@ public class SegmentZKMetadata implements ZKMetadata {
 
   public String getSegmentName() {
     return _znRecord.getId();
+  }
+
+  public Map<String, String> getSimpleFields() {
+    return _simpleFields;
+  }
+
+  public void setSimpleFields(Map<String, String> simpleFields) {
+    _simpleFields = simpleFields;
+    _startTimeMsCached = false;
+    _endTimeMsCached = false;
   }
 
   public long getStartTimeMs() {
@@ -166,6 +182,10 @@ public class SegmentZKMetadata implements ZKMetadata {
     setValue(Segment.TIER, tier);
   }
 
+  /**
+   * For uploaded segment, this is the time when the segment file is created. For real-time segment, this is the time
+   * when the consuming segment is created.
+   */
   public long getCreationTime() {
     return _znRecord.getLongField(Segment.CREATION_TIME, -1);
   }
@@ -174,6 +194,10 @@ public class SegmentZKMetadata implements ZKMetadata {
     setNonNegativeValue(Segment.CREATION_TIME, creationTime);
   }
 
+  /**
+   * Push time exists only for uploaded segments. It is the time when the segment is first pushed to the cluster (i.e.
+   * when the segment ZK metadata is created).
+   */
   public long getPushTime() {
     String pushTimeString = _simpleFields.get(Segment.PUSH_TIME);
     // Handle legacy push time key
@@ -188,6 +212,10 @@ public class SegmentZKMetadata implements ZKMetadata {
     setNonNegativeValue(Segment.PUSH_TIME, pushTime);
   }
 
+  /**
+   * Refresh time exists only for uploaded segments that have been replaced. It is the time when the segment is last
+   * replaced.
+   */
   public long getRefreshTime() {
     String refreshTimeString = _simpleFields.get(Segment.REFRESH_TIME);
     // Handle legacy refresh time key
@@ -356,6 +384,25 @@ public class SegmentZKMetadata implements ZKMetadata {
       }
     }
     return metadataMap;
+  }
+
+  public String toJsonString() {
+    ObjectNode objectNode = JsonUtils.newObjectNode();
+    objectNode.put(SEGMENT_NAME_KEY, getSegmentName());
+    objectNode.set(SIMPLE_FIELDS_KEY, JsonUtils.objectToJsonNode(_simpleFields));
+    return objectNode.toString();
+  }
+
+  public static SegmentZKMetadata fromJsonString(String jsonString)
+      throws IOException {
+    JsonNode jsonNode = JsonUtils.stringToJsonNode(jsonString);
+    String segmentName = jsonNode.get(SEGMENT_NAME_KEY).asText();
+    JsonNode simpleFieldsJsonNode = jsonNode.get(SIMPLE_FIELDS_KEY);
+    Map<String, String> simpleFields = JsonUtils.jsonNodeToObject(simpleFieldsJsonNode, new TypeReference<>() {
+    });
+    ZNRecord znRecord = new ZNRecord(segmentName);
+    znRecord.setSimpleFields(simpleFields);
+    return new SegmentZKMetadata(znRecord);
   }
 
   @Override

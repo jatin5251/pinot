@@ -18,15 +18,18 @@
  */
 package org.apache.pinot.query.context;
 
+import java.util.Collections;
 import java.util.Map;
 import org.apache.calcite.plan.Contexts;
 import org.apache.calcite.plan.RelOptPlanner;
 import org.apache.calcite.plan.hep.HepProgram;
 import org.apache.calcite.prepare.PlannerImpl;
 import org.apache.calcite.prepare.Prepare;
+import org.apache.calcite.rel.RelDistributionTraitDef;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.tools.FrameworkConfig;
+import org.apache.pinot.query.QueryEnvironment;
 import org.apache.pinot.query.planner.logical.LogicalPlanner;
 import org.apache.pinot.query.validate.Validator;
 
@@ -43,14 +46,18 @@ public class PlannerContext implements AutoCloseable {
   private final SqlValidator _validator;
 
   private final RelOptPlanner _relOptPlanner;
+  private final LogicalPlanner _relTraitPlanner;
 
-  private Map<String, String> _options;
+  private final Map<String, String> _options;
 
   public PlannerContext(FrameworkConfig config, Prepare.CatalogReader catalogReader, RelDataTypeFactory typeFactory,
-      HepProgram hepProgram) {
+      HepProgram optProgram, HepProgram traitProgram, Map<String, String> options, QueryEnvironment.Config envConfig) {
     _planner = new PlannerImpl(config);
     _validator = new Validator(config.getOperatorTable(), catalogReader, typeFactory);
-    _relOptPlanner = new LogicalPlanner(hepProgram, Contexts.EMPTY_CONTEXT);
+    _relOptPlanner = new LogicalPlanner(optProgram, Contexts.EMPTY_CONTEXT, config.getTraitDefs());
+    _relTraitPlanner = new LogicalPlanner(traitProgram, Contexts.of(envConfig),
+        Collections.singletonList(RelDistributionTraitDef.INSTANCE));
+    _options = options;
   }
 
   public PlannerImpl getPlanner() {
@@ -65,8 +72,8 @@ public class PlannerContext implements AutoCloseable {
     return _relOptPlanner;
   }
 
-  public void setOptions(Map<String, String> options) {
-    _options = options;
+  public LogicalPlanner getRelTraitPlanner() {
+    return _relTraitPlanner;
   }
 
   public Map<String, String> getOptions() {
@@ -74,8 +81,7 @@ public class PlannerContext implements AutoCloseable {
   }
 
   @Override
-  public void close()
-      throws Exception {
+  public void close() {
     _planner.close();
   }
 }

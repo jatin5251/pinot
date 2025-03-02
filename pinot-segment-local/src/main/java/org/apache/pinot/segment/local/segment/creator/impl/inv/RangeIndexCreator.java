@@ -30,6 +30,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.commons.io.FileUtils;
@@ -94,8 +95,8 @@ public final class RangeIndexCreator implements CombinedInvertedIndexCreator {
   private final int _numValues;
   private int _nextDocId;
   private int _nextValueId;
-  private int _numValuesPerRange;
-  private DataType _valueType;
+  private final int _numValuesPerRange;
+  private final DataType _valueType;
 
   /**
    *
@@ -158,6 +159,11 @@ public final class RangeIndexCreator implements CombinedInvertedIndexCreator {
       destroyBuffer(_tempValueBuffer, _tempDocIdBufferFile);
       throw e;
     }
+  }
+
+  @Override
+  public DataType getDataType() {
+    return _valueType;
   }
 
   @Override
@@ -316,6 +322,7 @@ public final class RangeIndexCreator implements CombinedInvertedIndexCreator {
     try (BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(_rangeIndexFile));
         DataOutputStream header = new DataOutputStream(bos);
         FileOutputStream fos = new FileOutputStream(_rangeIndexFile);
+        FileChannel channel = fos.getChannel();
         DataOutputStream dataOutputStream = new DataOutputStream(new BufferedOutputStream(fos))) {
 
       //VERSION
@@ -340,7 +347,7 @@ public final class RangeIndexCreator implements CombinedInvertedIndexCreator {
         Number rangeStart = _numberValueBuffer.get(range.getLeft());
         writeNumberToHeader(header, rangeStart);
       }
-      bytesWritten += ranges.size() * _valueType.size(); // Range start values
+      bytesWritten += (long) ranges.size() * _valueType.size(); // Range start values
 
       Number lastRangeEnd = _numberValueBuffer.get(ranges.get(ranges.size() - 1).getRight());
       writeNumberToHeader(header, lastRangeEnd);
@@ -348,12 +355,13 @@ public final class RangeIndexCreator implements CombinedInvertedIndexCreator {
 
       //compute the offset where the bitmap for the first range would be written
       //bitmap start offset for each range, one extra to make it easy to get the length for last one.
-      long bitmapOffsetHeaderSize = (ranges.size() + 1) * Long.BYTES;
+      long bitmapOffsetHeaderSize = (long) (ranges.size() + 1) * Long.BYTES;
 
       long bitmapOffset = bytesWritten + bitmapOffsetHeaderSize;
       header.writeLong(bitmapOffset);
       bytesWritten += Long.BYTES;
-      fos.getChannel().position(bitmapOffset);
+
+      channel.position(bitmapOffset);
 
       for (int i = 0; i < ranges.size(); i++) {
         Pair<Integer, Integer> range = ranges.get(i);
@@ -415,8 +423,8 @@ public final class RangeIndexCreator implements CombinedInvertedIndexCreator {
     }
     rangeOffsets.append(" ]");
     rangeValues.append(" ]");
-    LOGGER.info("rangeOffsets = " + rangeOffsets);
-    LOGGER.info("rangeValues = " + rangeValues);
+    LOGGER.info("rangeOffsets = {}", rangeOffsets);
+    LOGGER.info("rangeValues = {}", rangeValues);
   }
 
   @Override

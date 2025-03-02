@@ -29,12 +29,13 @@ import com.jayway.jsonpath.spi.mapper.JacksonMappingProvider;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
+import java.util.function.IntFunction;
 import org.apache.pinot.common.function.JsonPathCache;
-import org.apache.pinot.core.operator.blocks.ProjectionBlock;
+import org.apache.pinot.core.operator.ColumnContext;
+import org.apache.pinot.core.operator.blocks.ValueBlock;
 import org.apache.pinot.core.operator.transform.TransformResultMetadata;
-import org.apache.pinot.segment.spi.datasource.DataSource;
-import org.apache.pinot.segment.spi.evaluator.json.JsonPathEvaluator;
-import org.apache.pinot.segment.spi.evaluator.json.JsonPathEvaluators;
+import org.apache.pinot.core.util.NumberUtils;
+import org.apache.pinot.core.util.NumericException;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.utils.JsonUtils;
 
@@ -69,10 +70,8 @@ public class JsonExtractScalarTransformFunction extends BaseTransformFunction {
           .mappingProvider(new JacksonMappingProvider()).options(Option.SUPPRESS_EXCEPTIONS).build());
 
   private TransformFunction _jsonFieldTransformFunction;
-  private String _jsonPathString;
   private JsonPath _jsonPath;
   private Object _defaultValue;
-  private JsonPathEvaluator _jsonPathEvaluator;
   private TransformResultMetadata _resultMetadata;
 
   @Override
@@ -81,7 +80,8 @@ public class JsonExtractScalarTransformFunction extends BaseTransformFunction {
   }
 
   @Override
-  public void init(List<TransformFunction> arguments, Map<String, DataSource> dataSourceMap) {
+  public void init(List<TransformFunction> arguments, Map<String, ColumnContext> columnContextMap) {
+    super.init(arguments, columnContextMap);
     // Check that there are exactly 3 or 4 arguments
     if (arguments.size() < 3 || arguments.size() > 4) {
       throw new IllegalArgumentException(
@@ -96,23 +96,23 @@ public class JsonExtractScalarTransformFunction extends BaseTransformFunction {
               + "function");
     }
     _jsonFieldTransformFunction = firstArgument;
-    _jsonPathString = ((LiteralTransformFunction) arguments.get(1)).getLiteral();
-    String resultsType = ((LiteralTransformFunction) arguments.get(2)).getLiteral().toUpperCase();
+    String jsonPathString = ((LiteralTransformFunction) arguments.get(1)).getStringLiteral();
+    _jsonPath = JsonPathCache.INSTANCE.getOrCompute(jsonPathString);
+    String resultsType = ((LiteralTransformFunction) arguments.get(2)).getStringLiteral().toUpperCase();
     boolean isSingleValue = !resultsType.endsWith("_ARRAY");
+    DataType dataType;
     try {
-      DataType dataType =
-          DataType.valueOf(isSingleValue ? resultsType : resultsType.substring(0, resultsType.length() - 6));
-      if (arguments.size() == 4) {
-        _defaultValue = dataType.convert(((LiteralTransformFunction) arguments.get(3)).getLiteral());
-      }
-      _resultMetadata = new TransformResultMetadata(dataType, isSingleValue, false);
-      _jsonPathEvaluator = JsonPathEvaluators.create(_jsonPathString, _defaultValue);
+      dataType = DataType.valueOf(isSingleValue ? resultsType : resultsType.substring(0, resultsType.length() - 6));
     } catch (Exception e) {
-      throw new IllegalStateException(String.format(
+      throw new IllegalArgumentException(String.format(
           "Unsupported results type: %s for jsonExtractScalar function. Supported types are: "
               + "INT/LONG/FLOAT/DOUBLE/BOOLEAN/BIG_DECIMAL/TIMESTAMP/STRING/INT_ARRAY/LONG_ARRAY/FLOAT_ARRAY"
               + "/DOUBLE_ARRAY/STRING_ARRAY", resultsType));
     }
+    if (arguments.size() == 4) {
+      _defaultValue = dataType.convert(((LiteralTransformFunction) arguments.get(3)).getStringLiteral());
+    }
+    _resultMetadata = new TransformResultMetadata(dataType, isSingleValue, false);
   }
 
   @Override
@@ -121,38 +121,35 @@ public class JsonExtractScalarTransformFunction extends BaseTransformFunction {
   }
 
   @Override
-  public int[] transformToIntValuesSV(ProjectionBlock projectionBlock) {
-    int numDocs = projectionBlock.getNumDocs();
-    if (_intValuesSV == null) {
-      _intValuesSV = new int[numDocs];
+  public int[] transformToIntValuesSV(ValueBlock valueBlock) {
+    if (_resultMetadata.getDataType().getStoredType() != DataType.INT) {
+      return super.transformToIntValuesSV(valueBlock);
     }
-    if (_jsonFieldTransformFunction instanceof PushDownTransformFunction) {
-      ((PushDownTransformFunction) _jsonFieldTransformFunction).transformToIntValuesSV(projectionBlock,
-          _jsonPathEvaluator, _intValuesSV);
-      return _intValuesSV;
-    }
-    // operating on the output of another transform so can't pass the evaluation down to the storage
-    return transformTransformedValuesToIntValuesSV(projectionBlock);
-  }
 
-  private int[] transformTransformedValuesToIntValuesSV(ProjectionBlock projectionBlock) {
-    // operating on the output of another transform so can't pass the evaluation down to the storage
-    ensureJsonPathCompiled();
-    String[] jsonStrings = _jsonFieldTransformFunction.transformToStringValuesSV(projectionBlock);
-    int numDocs = projectionBlock.getNumDocs();
+    initIntValuesSV(valueBlock.getNumDocs());
+    IntFunction<Object> resultExtractor = getResultExtractor(valueBlock);
+    int defaultValue = 0;
+    if (_defaultValue != null) {
+      if (_defaultValue instanceof Number) {
+        defaultValue = ((Number) _defaultValue).intValue();
+      } else {
+        defaultValue = Integer.parseInt(_defaultValue.toString());
+      }
+    }
+    int numDocs = valueBlock.getNumDocs();
     for (int i = 0; i < numDocs; i++) {
       Object result = null;
       try {
-        result = JSON_PARSER_CONTEXT.parse(jsonStrings[i]).read(_jsonPath);
+        result = resultExtractor.apply(i);
       } catch (Exception ignored) {
       }
       if (result == null) {
         if (_defaultValue != null) {
-          _intValuesSV[i] = (int) _defaultValue;
+          _intValuesSV[i] = defaultValue;
           continue;
         }
-        throw new RuntimeException(
-            String.format("Illegal Json Path: [%s], when reading [%s]", _jsonPathString, jsonStrings[i]));
+        throw new IllegalArgumentException(
+            "Cannot resolve JSON path on some records. Consider setting a default value.");
       }
       if (result instanceof Number) {
         _intValuesSV[i] = ((Number) result).intValue();
@@ -164,80 +161,74 @@ public class JsonExtractScalarTransformFunction extends BaseTransformFunction {
   }
 
   @Override
-  public long[] transformToLongValuesSV(ProjectionBlock projectionBlock) {
-    int numDocs = projectionBlock.getNumDocs();
-    if (_longValuesSV == null) {
-      _longValuesSV = new long[numDocs];
+  public long[] transformToLongValuesSV(ValueBlock valueBlock) {
+    if (_resultMetadata.getDataType().getStoredType() != DataType.LONG) {
+      return super.transformToLongValuesSV(valueBlock);
     }
-    if (_jsonFieldTransformFunction instanceof PushDownTransformFunction) {
-      ((PushDownTransformFunction) _jsonFieldTransformFunction).transformToLongValuesSV(projectionBlock,
-          _jsonPathEvaluator, _longValuesSV);
-      return _longValuesSV;
+    initLongValuesSV(valueBlock.getNumDocs());
+    IntFunction<Object> resultExtractor = getResultExtractor(valueBlock);
+    long defaultValue = 0;
+    if (_defaultValue != null) {
+      if (_defaultValue instanceof Number) {
+        defaultValue = ((Number) _defaultValue).longValue();
+      } else {
+        defaultValue = Long.parseLong(_defaultValue.toString());
+      }
     }
-    return transformTransformedValuesToLongValuesSV(projectionBlock);
-  }
-
-  private long[] transformTransformedValuesToLongValuesSV(ProjectionBlock projectionBlock) {
-    // operating on the output of another transform so can't pass the evaluation down to the storage
-    ensureJsonPathCompiled();
-    String[] jsonStrings = _jsonFieldTransformFunction.transformToStringValuesSV(projectionBlock);
-    int numDocs = projectionBlock.getNumDocs();
+    int numDocs = valueBlock.getNumDocs();
     for (int i = 0; i < numDocs; i++) {
       Object result = null;
       try {
-        result = JSON_PARSER_CONTEXT.parse(jsonStrings[i]).read(_jsonPath);
+        result = resultExtractor.apply(i);
       } catch (Exception ignored) {
       }
       if (result == null) {
         if (_defaultValue != null) {
-          _longValuesSV[i] = (long) _defaultValue;
+          _longValuesSV[i] = defaultValue;
           continue;
         }
-        throw new RuntimeException(
-            String.format("Illegal Json Path: [%s], when reading [%s]", _jsonPathString, jsonStrings[i]));
+        throw new IllegalArgumentException(
+            "Cannot resolve JSON path on some records. Consider setting a default value.");
       }
       if (result instanceof Number) {
         _longValuesSV[i] = ((Number) result).longValue();
       } else {
-        // Handle scientific notation
-        _longValuesSV[i] = (long) Double.parseDouble(result.toString());
+        try {
+          _longValuesSV[i] = NumberUtils.parseJsonLong(result.toString());
+        } catch (NumericException nfe) {
+          throw new NumberFormatException("For input string: \"" + result + "\"");
+        }
       }
     }
     return _longValuesSV;
   }
 
   @Override
-  public float[] transformToFloatValuesSV(ProjectionBlock projectionBlock) {
-    int numDocs = projectionBlock.getNumDocs();
-    if (_floatValuesSV == null) {
-      _floatValuesSV = new float[numDocs];
+  public float[] transformToFloatValuesSV(ValueBlock valueBlock) {
+    initFloatValuesSV(valueBlock.getNumDocs());
+    IntFunction<Object> resultExtractor = getResultExtractor(valueBlock);
+    float defaultValue = 0;
+    if (_defaultValue != null) {
+      if (_defaultValue instanceof Number) {
+        defaultValue = ((Number) _defaultValue).floatValue();
+      } else {
+        defaultValue = Float.parseFloat(_defaultValue.toString());
+      }
     }
-    if (_jsonFieldTransformFunction instanceof PushDownTransformFunction) {
-      ((PushDownTransformFunction) _jsonFieldTransformFunction).transformToFloatValuesSV(projectionBlock,
-          _jsonPathEvaluator, _floatValuesSV);
-      return _floatValuesSV;
-    }
-    return transformTransformedValuesToFloatValuesSV(projectionBlock);
-  }
-
-  private float[] transformTransformedValuesToFloatValuesSV(ProjectionBlock projectionBlock) {
-    // operating on the output of another transform so can't pass the evaluation down to the storage
-    ensureJsonPathCompiled();
-    String[] jsonStrings = _jsonFieldTransformFunction.transformToStringValuesSV(projectionBlock);
-    int numDocs = projectionBlock.getNumDocs();
+    int numDocs = valueBlock.getNumDocs();
     for (int i = 0; i < numDocs; i++) {
       Object result = null;
       try {
-        result = JSON_PARSER_CONTEXT.parse(jsonStrings[i]).read(_jsonPath);
+        result = resultExtractor.apply(i);
       } catch (Exception ignored) {
       }
       if (result == null) {
         if (_defaultValue != null) {
-          _floatValuesSV[i] = (float) _defaultValue;
+          _floatValuesSV[i] = defaultValue;
           continue;
         }
-        throw new RuntimeException(
-            String.format("Illegal Json Path: [%s], when reading [%s]", _jsonPathString, jsonStrings[i]));
+        throw new IllegalArgumentException(
+            "Cannot resolve JSON path on some records. Consider setting a default value.");
       }
       if (result instanceof Number) {
         _floatValuesSV[i] = ((Number) result).floatValue();
@@ -249,37 +240,31 @@ public class JsonExtractScalarTransformFunction extends BaseTransformFunction {
   }
 
   @Override
-  public double[] transformToDoubleValuesSV(ProjectionBlock projectionBlock) {
-    int numDocs = projectionBlock.getNumDocs();
-    if (_doubleValuesSV == null) {
-      _doubleValuesSV = new double[numDocs];
+  public double[] transformToDoubleValuesSV(ValueBlock valueBlock) {
+    initDoubleValuesSV(valueBlock.getNumDocs());
+    IntFunction<Object> resultExtractor = getResultExtractor(valueBlock);
+    double defaultValue = 0;
+    if (_defaultValue != null) {
+      if (_defaultValue instanceof Number) {
+        defaultValue = ((Number) _defaultValue).doubleValue();
+      } else {
+        defaultValue = Double.parseDouble(_defaultValue.toString());
+      }
     }
-    if (_jsonFieldTransformFunction instanceof PushDownTransformFunction) {
-      ((PushDownTransformFunction) _jsonFieldTransformFunction).transformToDoubleValuesSV(projectionBlock,
-          _jsonPathEvaluator, _doubleValuesSV);
-      return _doubleValuesSV;
-    }
-    return transformTransformedValuesToDoubleValuesSV(projectionBlock);
-  }
-
-  private double[] transformTransformedValuesToDoubleValuesSV(ProjectionBlock projectionBlock) {
-    // operating on the output of another transform so can't pass the evaluation down to the storage
-    ensureJsonPathCompiled();
-    String[] jsonStrings = _jsonFieldTransformFunction.transformToStringValuesSV(projectionBlock);
-    int numDocs = projectionBlock.getNumDocs();
+    int numDocs = valueBlock.getNumDocs();
     for (int i = 0; i < numDocs; i++) {
       Object result = null;
       try {
-        result = JSON_PARSER_CONTEXT.parse(jsonStrings[i]).read(_jsonPath);
+        result = resultExtractor.apply(i);
       } catch (Exception ignored) {
       }
       if (result == null) {
         if (_defaultValue != null) {
-          _doubleValuesSV[i] = (double) _defaultValue;
+          _doubleValuesSV[i] = defaultValue;
           continue;
         }
-        throw new RuntimeException(
-            String.format("Illegal Json Path: [%s], when reading [%s]", _jsonPathString, jsonStrings[i]));
+        throw new IllegalArgumentException(
+            "Cannot resolve JSON path on some records. Consider setting a default value.");
       }
       if (result instanceof Number) {
         _doubleValuesSV[i] = ((Number) result).doubleValue();
@@ -291,39 +276,33 @@ public class JsonExtractScalarTransformFunction extends BaseTransformFunction {
   }
 
   @Override
-  public BigDecimal[] transformToBigDecimalValuesSV(ProjectionBlock projectionBlock) {
-    int numDocs = projectionBlock.getNumDocs();
-    if (_bigDecimalValuesSV == null) {
-      _bigDecimalValuesSV = new BigDecimal[numDocs];
+  public BigDecimal[] transformToBigDecimalValuesSV(ValueBlock valueBlock) {
+    initBigDecimalValuesSV(valueBlock.getNumDocs());
+    IntFunction<Object> resultExtractor = getResultExtractor(valueBlock, JSON_PARSER_CONTEXT_WITH_BIG_DECIMAL);
+    BigDecimal defaultValue = null;
+    if (_defaultValue != null) {
+      if (_defaultValue instanceof BigDecimal) {
+        defaultValue = (BigDecimal) _defaultValue;
+      } else {
+        defaultValue = new BigDecimal(_defaultValue.toString());
+      }
     }
-    if (_jsonFieldTransformFunction instanceof PushDownTransformFunction) {
-      ((PushDownTransformFunction) _jsonFieldTransformFunction).transformToBigDecimalValuesSV(projectionBlock,
-          _jsonPathEvaluator, _bigDecimalValuesSV);
-      return _bigDecimalValuesSV;
-    }
-    return transformTransformedValuesToBigDecimalValuesSV(projectionBlock);
-  }
-
-  private BigDecimal[] transformTransformedValuesToBigDecimalValuesSV(ProjectionBlock projectionBlock) {
-    // operating on the output of another transform so can't pass the evaluation down to the storage
-    ensureJsonPathCompiled();
-    String[] jsonStrings = _jsonFieldTransformFunction.transformToStringValuesSV(projectionBlock);
-    int numDocs = projectionBlock.getNumDocs();
+    int numDocs = valueBlock.getNumDocs();
     for (int i = 0; i < numDocs; i++) {
       Object result = null;
       try {
-        result = JSON_PARSER_CONTEXT_WITH_BIG_DECIMAL.parse(jsonStrings[i]).read(_jsonPath);
+        result = resultExtractor.apply(i);
       } catch (Exception ignored) {
       }
       if (result == null) {
         if (_defaultValue != null) {
-          _bigDecimalValuesSV[i] = (BigDecimal) _defaultValue;
+          _bigDecimalValuesSV[i] = defaultValue;
           continue;
         }
-        throw new RuntimeException(
-            String.format("Illegal Json Path: [%s], when reading [%s]", _jsonPathString, jsonStrings[i]));
+        throw new IllegalArgumentException(
+            "Cannot resolve JSON path on some records. Consider setting a default value.");
       }
-      if (result instanceof Number) {
+      if (result instanceof BigDecimal) {
         _bigDecimalValuesSV[i] = (BigDecimal) result;
       } else {
         _bigDecimalValuesSV[i] = new BigDecimal(result.toString());
@@ -333,37 +312,27 @@ public class JsonExtractScalarTransformFunction extends BaseTransformFunction {
   }
 
   @Override
-  public String[] transformToStringValuesSV(ProjectionBlock projectionBlock) {
-    int numDocs = projectionBlock.getNumDocs();
-    if (_stringValuesSV == null) {
-      _stringValuesSV = new String[numDocs];
+  public String[] transformToStringValuesSV(ValueBlock valueBlock) {
+    initStringValuesSV(valueBlock.getNumDocs());
+    IntFunction<Object> resultExtractor = getResultExtractor(valueBlock, JSON_PARSER_CONTEXT_WITH_BIG_DECIMAL);
+    String defaultValue = null;
+    if (_defaultValue != null) {
+      defaultValue = _defaultValue.toString();
     }
-    if (_jsonFieldTransformFunction instanceof PushDownTransformFunction) {
-      ((PushDownTransformFunction) _jsonFieldTransformFunction).transformToStringValuesSV(projectionBlock,
-          _jsonPathEvaluator, _stringValuesSV);
-      return _stringValuesSV;
-    }
-    return transformTransformedValuesToStringValuesSV(projectionBlock);
-  }
-
-  private String[] transformTransformedValuesToStringValuesSV(ProjectionBlock projectionBlock) {
-    // operating on the output of another transform so can't pass the evaluation down to the storage
-    ensureJsonPathCompiled();
-    String[] jsonStrings = _jsonFieldTransformFunction.transformToStringValuesSV(projectionBlock);
-    int numDocs = projectionBlock.getNumDocs();
+    int numDocs = valueBlock.getNumDocs();
     for (int i = 0; i < numDocs; i++) {
       Object result = null;
       try {
-        result = JSON_PARSER_CONTEXT_WITH_BIG_DECIMAL.parse(jsonStrings[i]).read(_jsonPath);
+        result = resultExtractor.apply(i);
       } catch (Exception ignored) {
       }
       if (result == null) {
         if (_defaultValue != null) {
-          _stringValuesSV[i] = (String) _defaultValue;
+          _stringValuesSV[i] = defaultValue;
           continue;
         }
-        throw new RuntimeException(
-            String.format("Illegal Json Path: [%s], when reading [%s]", _jsonPathString, jsonStrings[i]));
+        throw new IllegalArgumentException(
+            "Cannot resolve JSON path on some records. Consider setting a default value.");
       }
       if (result instanceof String) {
         _stringValuesSV[i] = (String) result;
@@ -375,28 +344,14 @@ public class JsonExtractScalarTransformFunction extends BaseTransformFunction {
   }
 
   @Override
-  public int[][] transformToIntValuesMV(ProjectionBlock projectionBlock) {
-    int numDocs = projectionBlock.getNumDocs();
-    if (_intValuesMV == null) {
-      _intValuesMV = new int[numDocs][];
-    }
-    if (_jsonFieldTransformFunction instanceof PushDownTransformFunction) {
-      ((PushDownTransformFunction) _jsonFieldTransformFunction).transformToIntValuesMV(projectionBlock,
-          _jsonPathEvaluator, _intValuesMV);
-      return _intValuesMV;
-    }
-    return transformTransformedValuesToIntValuesMV(projectionBlock);
-  }
-
-  private int[][] transformTransformedValuesToIntValuesMV(ProjectionBlock projectionBlock) {
-    // operating on the output of another transform so can't pass the evaluation down to the storage
-    ensureJsonPathCompiled();
-    String[] jsonStrings = _jsonFieldTransformFunction.transformToStringValuesSV(projectionBlock);
-    int numDocs = projectionBlock.getNumDocs();
+  public int[][] transformToIntValuesMV(ValueBlock valueBlock) {
+    initIntValuesMV(valueBlock.getNumDocs());
+    IntFunction<List<Integer>> resultExtractor = getResultExtractor(valueBlock);
+    int numDocs = valueBlock.getNumDocs();
     for (int i = 0; i < numDocs; i++) {
       List<Integer> result = null;
       try {
-        result = JSON_PARSER_CONTEXT.parse(jsonStrings[i]).read(_jsonPath);
+        result = resultExtractor.apply(i);
       } catch (Exception ignored) {
       }
       if (result == null) {
@@ -414,28 +369,14 @@ public class JsonExtractScalarTransformFunction extends BaseTransformFunction {
   }
 
   @Override
-  public long[][] transformToLongValuesMV(ProjectionBlock projectionBlock) {
-    int numDocs = projectionBlock.getNumDocs();
-    if (_longValuesMV == null) {
-      _longValuesMV = new long[numDocs][];
-    }
-    if (_jsonFieldTransformFunction instanceof PushDownTransformFunction) {
-      ((PushDownTransformFunction) _jsonFieldTransformFunction).transformToLongValuesMV(projectionBlock,
-          _jsonPathEvaluator, _longValuesMV);
-      return _longValuesMV;
-    }
-    return transformTransformedValuesToLongValuesMV(projectionBlock);
-  }
-
-  private long[][] transformTransformedValuesToLongValuesMV(ProjectionBlock projectionBlock) {
-    // operating on the output of another transform so can't pass the evaluation down to the storage
-    ensureJsonPathCompiled();
-    String[] jsonStrings = _jsonFieldTransformFunction.transformToStringValuesSV(projectionBlock);
-    int length = projectionBlock.getNumDocs();
+  public long[][] transformToLongValuesMV(ValueBlock valueBlock) {
+    initLongValuesMV(valueBlock.getNumDocs());
+    IntFunction<List<Long>> resultExtractor = getResultExtractor(valueBlock);
+    int length = valueBlock.getNumDocs();
     for (int i = 0; i < length; i++) {
       List<Long> result = null;
       try {
-        result = JSON_PARSER_CONTEXT.parse(jsonStrings[i]).read(_jsonPath);
+        result = resultExtractor.apply(i);
       } catch (Exception ignored) {
       }
       if (result == null) {
@@ -453,28 +394,14 @@ public class JsonExtractScalarTransformFunction extends BaseTransformFunction {
   }
 
   @Override
-  public float[][] transformToFloatValuesMV(ProjectionBlock projectionBlock) {
-    int numDocs = projectionBlock.getNumDocs();
-    if (_floatValuesMV == null) {
-      _floatValuesMV = new float[numDocs][];
-    }
-    if (_jsonFieldTransformFunction instanceof PushDownTransformFunction) {
-      ((PushDownTransformFunction) _jsonFieldTransformFunction).transformToFloatValuesMV(projectionBlock,
-          _jsonPathEvaluator, _floatValuesMV);
-      return _floatValuesMV;
-    }
-    return transformTransformedValuesToFloatValuesMV(projectionBlock);
-  }
-
-  private float[][] transformTransformedValuesToFloatValuesMV(ProjectionBlock projectionBlock) {
-    // operating on the output of another transform so can't pass the evaluation down to the storage
-    ensureJsonPathCompiled();
-    String[] jsonStrings = _jsonFieldTransformFunction.transformToStringValuesSV(projectionBlock);
-    int length = projectionBlock.getNumDocs();
+  public float[][] transformToFloatValuesMV(ValueBlock valueBlock) {
+    initFloatValuesMV(valueBlock.getNumDocs());
+    IntFunction<List<Float>> resultExtractor = getResultExtractor(valueBlock);
+    int length = valueBlock.getNumDocs();
     for (int i = 0; i < length; i++) {
       List<Float> result = null;
       try {
-        result = JSON_PARSER_CONTEXT.parse(jsonStrings[i]).read(_jsonPath);
+        result = resultExtractor.apply(i);
       } catch (Exception ignored) {
       }
       if (result == null) {
@@ -492,28 +419,14 @@ public class JsonExtractScalarTransformFunction extends BaseTransformFunction {
   }
 
   @Override
-  public double[][] transformToDoubleValuesMV(ProjectionBlock projectionBlock) {
-    int numDocs = projectionBlock.getNumDocs();
-    if (_doubleValuesMV == null) {
-      _doubleValuesMV = new double[numDocs][];
-    }
-    if (_jsonFieldTransformFunction instanceof PushDownTransformFunction) {
-      ((PushDownTransformFunction) _jsonFieldTransformFunction).transformToDoubleValuesMV(projectionBlock,
-          _jsonPathEvaluator, _doubleValuesMV);
-      return _doubleValuesMV;
-    }
-    return transformTransformedToDoubleValuesMV(projectionBlock);
-  }
-
-  private double[][] transformTransformedToDoubleValuesMV(ProjectionBlock projectionBlock) {
-    // operating on the output of another transform so can't pass the evaluation down to the storage
-    ensureJsonPathCompiled();
-    String[] jsonStrings = _jsonFieldTransformFunction.transformToStringValuesSV(projectionBlock);
-    int length = projectionBlock.getNumDocs();
+  public double[][] transformToDoubleValuesMV(ValueBlock valueBlock) {
+    initDoubleValuesMV(valueBlock.getNumDocs());
+    IntFunction<List<Double>> resultExtractor = getResultExtractor(valueBlock);
+    int length = valueBlock.getNumDocs();
     for (int i = 0; i < length; i++) {
       List<Double> result = null;
       try {
-        result = JSON_PARSER_CONTEXT.parse(jsonStrings[i]).read(_jsonPath);
+        result = resultExtractor.apply(i);
       } catch (Exception ignored) {
       }
       if (result == null) {
@@ -531,28 +444,14 @@ public class JsonExtractScalarTransformFunction extends BaseTransformFunction {
   }
 
   @Override
-  public String[][] transformToStringValuesMV(ProjectionBlock projectionBlock) {
-    int numDocs = projectionBlock.getNumDocs();
-    if (_stringValuesMV == null || _stringValuesMV.length < numDocs) {
-      _stringValuesMV = new String[numDocs][];
-    }
-    if (_jsonFieldTransformFunction instanceof PushDownTransformFunction) {
-      ((PushDownTransformFunction) _jsonFieldTransformFunction).transformToStringValuesMV(projectionBlock,
-          _jsonPathEvaluator, _stringValuesMV);
-      return _stringValuesMV;
-    }
-    return transformTransformedValuesToStringValuesMV(projectionBlock);
-  }
-
-  private String[][] transformTransformedValuesToStringValuesMV(ProjectionBlock projectionBlock) {
-    // operating on the output of another transform so can't pass the evaluation down to the storage
-    ensureJsonPathCompiled();
-    String[] jsonStrings = _jsonFieldTransformFunction.transformToStringValuesSV(projectionBlock);
-    int length = projectionBlock.getNumDocs();
+  public String[][] transformToStringValuesMV(ValueBlock valueBlock) {
+    initStringValuesMV(valueBlock.getNumDocs());
+    IntFunction<List<String>> resultExtractor = getResultExtractor(valueBlock);
+    int length = valueBlock.getNumDocs();
     for (int i = 0; i < length; i++) {
       List<String> result = null;
       try {
-        result = JSON_PARSER_CONTEXT.parse(jsonStrings[i]).read(_jsonPath);
+        result = resultExtractor.apply(i);
       } catch (Exception ignored) {
       }
       if (result == null) {
@@ -569,9 +468,17 @@ public class JsonExtractScalarTransformFunction extends BaseTransformFunction {
     return _stringValuesMV;
   }
 
-  private void ensureJsonPathCompiled() {
-    if (_jsonPath == null) {
-      _jsonPath = JsonPathCache.INSTANCE.getOrCompute(_jsonPathString);
+  private <T> IntFunction<T> getResultExtractor(ValueBlock valueBlock, ParseContext parseContext) {
+    if (_jsonFieldTransformFunction.getResultMetadata().getDataType() == DataType.BYTES) {
+      byte[][] jsonBytes = _jsonFieldTransformFunction.transformToBytesValuesSV(valueBlock);
+      return i -> parseContext.parseUtf8(jsonBytes[i]).read(_jsonPath);
+    } else {
+      String[] jsonStrings = _jsonFieldTransformFunction.transformToStringValuesSV(valueBlock);
+      return i -> parseContext.parse(jsonStrings[i]).read(_jsonPath);
     }
+  }
+
+  private <T> IntFunction<T> getResultExtractor(ValueBlock valueBlock) {
+    return getResultExtractor(valueBlock, JSON_PARSER_CONTEXT);
   }
 }

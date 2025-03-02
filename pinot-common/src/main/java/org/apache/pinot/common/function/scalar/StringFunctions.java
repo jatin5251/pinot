@@ -19,16 +19,16 @@
 package org.apache.pinot.common.function.scalar;
 
 import java.io.UnsupportedEncodingException;
-import java.net.URLDecoder;
-import java.net.URLEncoder;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.text.Normalizer;
 import java.util.Base64;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.UUID;
+import javax.annotation.Nullable;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.pinot.common.utils.RegexpPatternConverterUtils;
+import org.apache.pinot.common.utils.URIUtils;
 import org.apache.pinot.spi.annotations.ScalarFunction;
+import org.apache.pinot.spi.utils.JsonUtils;
 
 
 /**
@@ -42,9 +42,6 @@ import org.apache.pinot.spi.annotations.ScalarFunction;
 public class StringFunctions {
   private StringFunctions() {
   }
-
-  private final static Pattern LTRIM = Pattern.compile("^\\s+");
-  private final static Pattern RTRIM = Pattern.compile("\\s+$");
 
   /**
    * @see StringUtils#reverse(String)
@@ -82,7 +79,7 @@ public class StringFunctions {
    * @param beginIndex index from which substring should be created
    * @return substring from beginIndex to end of the parent string
    */
-  @ScalarFunction(names = {"substr", "substring"})
+  @ScalarFunction
   public static String substr(String input, int beginIndex) {
     return StringUtils.substring(input, beginIndex);
   }
@@ -97,7 +94,7 @@ public class StringFunctions {
    * @param endIndex index at which substring should be terminated
    * @return substring from beginIndex to endIndex
    */
-  @ScalarFunction(names = {"substr", "substring"})
+  @ScalarFunction
   public static String substr(String input, int beginIndex, int endIndex) {
     if (endIndex == -1) {
       return substr(input, beginIndex);
@@ -106,40 +103,37 @@ public class StringFunctions {
   }
 
   /**
-   * Join two input string with seperator in between
-   * @param input1
-   * @param input2
-   * @param seperator
-   * @return The two input strings joined by the seperator
-   */
-  @ScalarFunction(names = "concat_ws")
-  public static String concatws(String seperator, String input1, String input2) {
-    return concat(input1, input2, seperator);
-  }
-
-  /**
-   * Join two input string with seperator in between
-   * @param input1
-   * @param input2
-   * @param seperator
-   * @return The two input strings joined by the seperator
+   * @param input Parent string
+   * @param beginIndex 1 based index from which substring should be created
+   * @return substring from beginIndex to end of the parent string
    */
   @ScalarFunction
-  public static String concat(String input1, String input2, String seperator) {
-    String result = input1;
-    result = result + seperator + input2;
-    return result;
+  public static String substring(String input, int beginIndex) {
+    return StringUtils.substring(input, beginIndex - 1);
   }
 
   /**
-   * Join two input string with no seperator in between
-   * @param input1
-   * @param input2
-   * @return The two input strings joined
+   * Returns the substring of the main string from beginIndex of length.
+   *
+   * @param input Parent string
+   * @param beginIndex 1 based index from which substring should be created
+   * @param length length of substring to be created
+   * @return a substirng of input string from beginIndex of length 'length'
+   */
+  @ScalarFunction
+  public static String substring(String input, int beginIndex, int length) {
+    // index is always 1 based
+    beginIndex = beginIndex - 1;
+    int endIndex = beginIndex + length;
+    return StringUtils.substring(input, beginIndex, endIndex);
+  }
+
+  /**
+   * Joins two input strings with no separator in between.
    */
   @ScalarFunction
   public static String concat(String input1, String input2) {
-    return concat(input1, input2, "");
+    return input1 + input2;
   }
 
   /**
@@ -191,29 +185,11 @@ public class StringFunctions {
   }
 
   /**
-   * @param input
-   * @return trim spaces from left side of the string
-   */
-  @ScalarFunction
-  public static String ltrim(String input) {
-    return LTRIM.matcher(input).replaceAll("");
-  }
-
-  /**
-   * @param input
-   * @return trim spaces from right side of the string
-   */
-  @ScalarFunction
-  public static String rtrim(String input) {
-    return RTRIM.matcher(input).replaceAll("");
-  }
-
-  /**
    * @see StringUtils#left(String, int)
    * @param input
    * @return get substring starting from the first index and extending upto specified length.
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"leftSubStr", "left"})
   public static String leftSubStr(String input, int length) {
     return StringUtils.left(input, length);
   }
@@ -223,51 +199,9 @@ public class StringFunctions {
    * @param input
    * @return get substring ending at the last index with specified length
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"rightSubStr", "right"})
   public static String rightSubStr(String input, int length) {
     return StringUtils.right(input, length);
-  }
-
-  /**
-   * @see #StringFunctions#regexpExtract(String, String, int, String)
-   * @param value
-   * @param regexp
-   * @return the matched result.
-   */
-  @ScalarFunction(names = {"regexp_extract", "regexpExtract"})
-  public static String regexpExtract(String value, String regexp) {
-    return regexpExtract(value, regexp, 0, "");
-  }
-
-  /**
-   * @see #StringFunctions#regexpExtract(String, String, int, String)
-   * @param value
-   * @param regexp
-   * @param group
-   * @return the matched result.
-   */
-  @ScalarFunction(names = {"regexp_extract", "regexpExtract"})
-  public static String regexpExtract(String value, String regexp, int group) {
-    return regexpExtract(value, regexp, group, "");
-  }
-
-  /**
-   * Regular expression that extract first matched substring.
-   * @param value input value
-   * @param regexp regular expression
-   * @param group the group number within the regular expression to extract.
-   * @param defaultValue the default value if no match found
-   * @return the matched result
-   */
-  @ScalarFunction(names = {"regexp_extract", "regexpExtract"})
-  public static String regexpExtract(String value, String regexp, int group, String defaultValue) {
-    Pattern p = Pattern.compile(regexp);
-    Matcher matcher = p.matcher(value);
-    if (matcher.find() && matcher.groupCount() >= group) {
-      return matcher.group(group);
-    } else {
-      return defaultValue;
-    }
   }
 
   /**
@@ -336,7 +270,7 @@ public class StringFunctions {
    * @param prefix substring to check if it is the prefix
    * @return true if string starts with prefix, false o.w.
    */
-  @ScalarFunction(names = {"startsWith", "starts_with"})
+  @ScalarFunction
   public static boolean startsWith(String input, String prefix) {
     return StringUtils.startsWith(input, prefix);
   }
@@ -347,20 +281,9 @@ public class StringFunctions {
    * @param suffix substring to check if it is the prefix
    * @return true if string ends with prefix, false o.w.
    */
-  @ScalarFunction(names = {"endsWith", "ends_with"})
+  @ScalarFunction
   public static boolean endsWith(String input, String suffix) {
     return StringUtils.endsWith(input, suffix);
-  }
-
-  /**
-   * @see String#replaceAll(String, String)
-   * @param input
-   * @param find target substring to replace
-   * @param substitute new substring to be replaced with target
-   */
-  @ScalarFunction
-  public static String replace(String input, String find, String substitute) {
-    return StringUtils.replace(input, find, substitute);
   }
 
   /**
@@ -468,6 +391,46 @@ public class StringFunctions {
   }
 
   /**
+   * @param input bytes
+   * @return ASCII encoded string
+   */
+  @ScalarFunction
+  public static String fromAscii(byte[] input) {
+    return new String(input, StandardCharsets.US_ASCII);
+  }
+
+  /**
+   * @param input UUID as string
+   * @return bytearray
+   * returns bytes and null on exception
+   */
+  @ScalarFunction
+  public static byte[] toUUIDBytes(String input) {
+    try {
+      UUID uuid = UUID.fromString(input);
+      ByteBuffer bb = ByteBuffer.wrap(new byte[16]);
+      bb.putLong(uuid.getMostSignificantBits());
+      bb.putLong(uuid.getLeastSignificantBits());
+      return bb.array();
+    } catch (IllegalArgumentException e) {
+      return null;
+    }
+  }
+
+  /**
+   * @param input UUID serialized to bytes
+   * @return String representation of UUID
+   * returns bytes and null on exception
+   */
+  @ScalarFunction
+  public static String fromUUIDBytes(byte[] input) {
+    ByteBuffer bb = ByteBuffer.wrap(input);
+    long firstLong = bb.getLong();
+    long secondLong = bb.getLong();
+    return new UUID(firstLong, secondLong).toString();
+  }
+
+  /**
    * @see Normalizer#normalize(CharSequence, Normalizer.Form)
    * @param input
    * @return transforms string with NFC normalization form.
@@ -495,7 +458,7 @@ public class StringFunctions {
    * @param delimiter
    * @return splits string on specified delimiter and returns an array.
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"split", "stringToArray"})
   public static String[] split(String input, String delimiter) {
     return StringUtils.splitByWholeSeparator(input, delimiter);
   }
@@ -506,23 +469,112 @@ public class StringFunctions {
    * @param limit
    * @return splits string on specified delimiter limiting the number of results till the specified limit
    */
-  @ScalarFunction
+  @ScalarFunction(names = {"split", "stringToArray"})
   public static String[] split(String input, String delimiter, int limit) {
     return StringUtils.splitByWholeSeparator(input, delimiter, limit);
+  }
+
+  /**
+   * @param input an input string for prefix strings generations.
+   * @param maxlength the max length of the prefix strings for the string.
+   * @return generate an array of prefix strings of the string that are shorter than the specified length.
+   */
+  @ScalarFunction
+  public static String[] prefixes(String input, int maxlength) {
+    int arrLength = Math.min(maxlength, input.length());
+    String[] prefixArr = new String[arrLength];
+    for (int prefixIdx = 1; prefixIdx <= arrLength; prefixIdx++) {
+      prefixArr[prefixIdx - 1] = input.substring(0, prefixIdx);
+    }
+    return prefixArr;
+  }
+
+  /**
+   * @param input an input string for prefix strings generations.
+   * @param maxlength the max length of the prefix strings for the string.
+   * @param prefix the prefix to be prepended to prefix strings generated. e.g. '^' for regex matching
+   * @return generate an array of prefix matchers of the string that are shorter than the specified length.
+   */
+  @ScalarFunction(nullableParameters = true)
+  public static String[] prefixesWithPrefix(String input, int maxlength, @Nullable String prefix) {
+    if (prefix == null) {
+      return prefixes(input, maxlength);
+    }
+    int arrLength = Math.min(maxlength, input.length());
+    String[] prefixArr = new String[arrLength];
+    for (int prefixIdx = 1; prefixIdx <= arrLength; prefixIdx++) {
+      prefixArr[prefixIdx - 1] = prefix + input.substring(0, prefixIdx);
+    }
+    return prefixArr;
+  }
+
+  /**
+   * @param input an input string for suffix strings generations.
+   * @param maxlength the max length of the suffix strings for the string.
+   * @return generate an array of suffix strings of the string that are shorter than the specified length.
+   */
+  @ScalarFunction
+  public static String[] suffixes(String input, int maxlength) {
+    int arrLength = Math.min(maxlength, input.length());
+    String[] suffixArr = new String[arrLength];
+    for (int suffixIdx = 1; suffixIdx <= arrLength; suffixIdx++) {
+      suffixArr[suffixIdx - 1] = input.substring(input.length() - suffixIdx);
+    }
+    return suffixArr;
+  }
+
+  /**
+   * @param input an input string for suffix strings generations.
+   * @param maxlength the max length of the suffix strings for the string.
+   * @param suffix the suffix string to be appended for suffix strings generated. e.g. '$' for regex matching.
+   * @return generate an array of suffix matchers of the string that are shorter than the specified length.
+   */
+  @ScalarFunction(nullableParameters = true)
+  public static String[] suffixesWithSuffix(String input, int maxlength, @Nullable String suffix) {
+    if (suffix == null) {
+      return suffixes(input, maxlength);
+    }
+    int arrLength = Math.min(maxlength, input.length());
+    String[] suffixArr = new String[arrLength];
+    for (int suffixIdx = 1; suffixIdx <= arrLength; suffixIdx++) {
+      suffixArr[suffixIdx - 1] = input.substring(input.length() - suffixIdx) + suffix;
+    }
+    return suffixArr;
   }
 
   /**
    * TODO: Revisit if index should be one-based (both Presto and Postgres use one-based index, which starts with 1)
    * @param input
    * @param delimiter
-   * @param index
+   * @param index we allow negative value for index which indicates the index from the end.
    * @return splits string on specified delimiter and returns String at specified index from the split.
    */
   @ScalarFunction
   public static String splitPart(String input, String delimiter, int index) {
     String[] splitString = StringUtils.splitByWholeSeparator(input, delimiter);
-    if (index < splitString.length) {
+    if (index >= 0 && index < splitString.length) {
       return splitString[index];
+    } else if (index < 0 && index >= -splitString.length) {
+      return splitString[splitString.length + index];
+    } else {
+      return "null";
+    }
+  }
+
+  /**
+   * @param input the input String to be split into parts.
+   * @param delimiter the specified delimiter to split the input string.
+   * @param limit the max count of parts that the input string can be splitted into.
+   * @param index the specified index for the splitted parts to be returned.
+   * @return splits string on the delimiter with the limit count and returns String at specified index from the split.
+   */
+  @ScalarFunction
+  public static String splitPart(String input, String delimiter, int limit, int index) {
+    String[] splitString = StringUtils.splitByWholeSeparator(input, delimiter, limit);
+    if (index >= 0 && index < splitString.length) {
+      return splitString[index];
+    } else if (index < 0 && index >= -splitString.length) {
+      return splitString[splitString.length + index];
     } else {
       return "null";
     }
@@ -606,24 +658,20 @@ public class StringFunctions {
    *
    * @param input plaintext string
    * @return url encoded string
-   * @throws UnsupportedEncodingException
    */
   @ScalarFunction
-  public static String encodeUrl(String input)
-      throws UnsupportedEncodingException {
-    return URLEncoder.encode(input, StandardCharsets.UTF_8.toString());
+  public static String encodeUrl(String input) {
+    return URIUtils.encode(input);
   }
 
   /**
    *
    * @param input url encoded string
    * @return plaintext string
-   * @throws UnsupportedEncodingException
    */
   @ScalarFunction
-  public static String decodeUrl(String input)
-      throws UnsupportedEncodingException {
-    return URLDecoder.decode(input, StandardCharsets.UTF_8.toString());
+  public static String decodeUrl(String input) {
+    return URIUtils.decode(input);
   }
 
   /**
@@ -645,121 +693,21 @@ public class StringFunctions {
   }
 
   /**
-   * Replace a regular expression pattern. If matchStr is not found, inputStr will be returned. By default, all
-   * occurences of match pattern in the input string will be replaced. Default matching pattern is case sensitive.
+   * Checks whether the input string can be parsed into a json node or not. Useful for scenarios where we want
+   * to filter out malformed json.
+   * Null values are handled by the function invoker here and this function processes the results on non-null values.
    *
-   * @param inputStr Input string to apply the regexpReplace
-   * @param matchStr Regexp or string to match against inputStr
-   * @param replaceStr Regexp or string to replace if matchStr is found
-   * @param matchStartPos Index of inputStr from where matching should start. Default is 0.
-   * @param occurence Controls which occurence of the matched pattern must be replaced. Counting starts at 0. Default
-   *                  is -1
-   * @param flag Single character flag that controls how the regex finds matches in inputStr. If an incorrect flag is
-   *            specified, the function applies default case sensitive match. Only one flag can be specified. Supported
-   *             flags:
-   *             i -> Case insensitive
-   * @return replaced input string
-   */
-  @ScalarFunction(names = {"regexpReplace", "regexp_replace"})
-  public static String regexpReplace(String inputStr, String matchStr, String replaceStr, int matchStartPos,
-      int occurence, String flag) {
-    Integer patternFlag;
-
-    // TODO: Support more flags like MULTILINE, COMMENTS, etc.
-    switch (flag) {
-      case "i":
-        patternFlag = Pattern.CASE_INSENSITIVE;
-        break;
-      default:
-        patternFlag = null;
-        break;
-    }
-
-    Pattern p;
-    if (patternFlag != null) {
-      p = Pattern.compile(matchStr, patternFlag);
-    } else {
-      p = Pattern.compile(matchStr);
-    }
-
-    Matcher matcher = p.matcher(inputStr).region(matchStartPos, inputStr.length());
-    StringBuffer sb;
-
-    if (occurence >= 0) {
-      sb = new StringBuffer(inputStr);
-      while (occurence >= 0 && matcher.find()) {
-        if (occurence == 0) {
-          sb.replace(matcher.start(), matcher.end(), replaceStr);
-          break;
-        }
-        occurence--;
-      }
-    } else {
-      sb = new StringBuffer();
-      while (matcher.find()) {
-        matcher.appendReplacement(sb, replaceStr);
-      }
-      matcher.appendTail(sb);
-    }
-
-    return sb.toString();
-  }
-
-  /**
-   * See #regexpReplace(String, String, String, int, int, String). Matches against entire inputStr and replaces all
-   * occurences. Match is performed in case-sensitive mode.
+   * @param inputStr Input string to test for valid json
+   * @return  true in case of valid json parsing else false
    *
-   * @param inputStr Input string to apply the regexpReplace
-   * @param matchStr Regexp or string to match against inputStr
-   * @param replaceStr Regexp or string to replace if matchStr is found
-   * @return replaced input string
    */
-  @ScalarFunction(names = {"regexpReplace", "regexp_replace"})
-  public static String regexpReplace(String inputStr, String matchStr, String replaceStr) {
-    return regexpReplace(inputStr, matchStr, replaceStr, 0, -1, "");
-  }
-
-  /**
-   * See #regexpReplace(String, String, String, int, int, String). Matches against entire inputStr and replaces all
-   * occurences. Match is performed in case-sensitive mode.
-   *
-   * @param inputStr Input string to apply the regexpReplace
-   * @param matchStr Regexp or string to match against inputStr
-   * @param replaceStr Regexp or string to replace if matchStr is found
-   * @param matchStartPos Index of inputStr from where matching should start. Default is 0.
-   * @return replaced input string
-   */
-  @ScalarFunction(names = {"regexpReplace", "regexp_replace"})
-  public static String regexpReplace(String inputStr, String matchStr, String replaceStr, int matchStartPos) {
-    return regexpReplace(inputStr, matchStr, replaceStr, matchStartPos, -1, "");
-  }
-
-  /**
-   * See #regexpReplace(String, String, String, int, int, String). Match is performed in case-sensitive mode.
-   *
-   * @param inputStr Input string to apply the regexpReplace
-   * @param matchStr Regexp or string to match against inputStr
-   * @param replaceStr Regexp or string to replace if matchStr is found
-   * @param matchStartPos Index of inputStr from where matching should start. Default is 0.
-   * @param occurence Controls which occurence of the matched pattern must be replaced. Counting starts
-   *                    at 0. Default is -1
-   * @return replaced input string
-   */
-  @ScalarFunction(names = {"regexpReplace", "regexp_replace"})
-  public static String regexpReplace(String inputStr, String matchStr, String replaceStr, int matchStartPos,
-      int occurence) {
-    return regexpReplace(inputStr, matchStr, replaceStr, matchStartPos, occurence, "");
-  }
-
-  @ScalarFunction(names = {"regexpLike", "regexp_like"})
-  public static boolean regexpLike(String inputStr, String regexPatternStr) {
-    Pattern pattern = Pattern.compile(regexPatternStr, Pattern.UNICODE_CASE | Pattern.CASE_INSENSITIVE);
-    return pattern.matcher(inputStr).find();
-  }
-
   @ScalarFunction
-  public static boolean like(String inputStr, String likePatternStr) {
-    String regexPatternStr = RegexpPatternConverterUtils.likeToRegexpLike(likePatternStr);
-    return regexpLike(inputStr, regexPatternStr);
+  public static boolean isJson(String inputStr) {
+    try {
+      JsonUtils.stringToJsonNode(inputStr);
+      return true;
+    } catch (Exception e) {
+      return false;
+    }
   }
 }

@@ -29,7 +29,7 @@ import java.util.UUID;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadataCustomMapModifier;
 import org.apache.pinot.common.segment.generation.SegmentGenerationUtils;
-import org.apache.pinot.common.utils.TarGzCompressionUtils;
+import org.apache.pinot.common.utils.TarCompressionUtils;
 import org.apache.pinot.core.minion.PinotTaskConfig;
 import org.apache.pinot.minion.MinionContext;
 import org.apache.pinot.minion.event.MinionEventObserver;
@@ -257,7 +257,7 @@ public class SegmentGenerationAndPushTaskExecutor extends BaseTaskExecutor {
     String segmentTarFileName = segmentName + Constants.TAR_GZ_FILE_EXT;
     File localSegmentTarFile = new File(localOutputTempDir, segmentTarFileName);
     LOGGER.info("Tarring segment from: {} to: {}", localSegmentDir, localSegmentTarFile);
-    TarGzCompressionUtils.createTarGzFile(localSegmentDir, localSegmentTarFile);
+    TarCompressionUtils.createCompressedTarFile(localSegmentDir, localSegmentTarFile);
     long uncompressedSegmentSize = FileUtils.sizeOf(localSegmentDir);
     long compressedSegmentSize = FileUtils.sizeOf(localSegmentTarFile);
     LOGGER.info("Size for segment: {}, uncompressed: {}, compressed: {}", segmentName,
@@ -287,6 +287,8 @@ public class SegmentGenerationAndPushTaskExecutor extends BaseTaskExecutor {
       recordReaderSpec.setDataFormat(taskConfigs.get(BatchConfigProperties.INPUT_FORMAT));
       recordReaderSpec.setClassName(taskConfigs.get(BatchConfigProperties.RECORD_READER_CLASS));
       recordReaderSpec.setConfigClassName(taskConfigs.get(BatchConfigProperties.RECORD_READER_CONFIG_CLASS));
+      recordReaderSpec.setConfigs(IngestionConfigUtils.getConfigMapWithPrefix(taskConfigs,
+          BatchConfigProperties.RECORD_READER_PROP_PREFIX));
       taskSpec.setRecordReaderSpec(recordReaderSpec);
 
       String authToken = taskConfigs.get(BatchConfigProperties.AUTH_TOKEN);
@@ -321,6 +323,8 @@ public class SegmentGenerationAndPushTaskExecutor extends BaseTaskExecutor {
       segmentNameGeneratorSpec.setType(taskConfigs.get(BatchConfigProperties.SEGMENT_NAME_GENERATOR_TYPE));
       segmentNameGeneratorSpec.setConfigs(IngestionConfigUtils.getConfigMapWithPrefix(taskConfigs,
           BatchConfigProperties.SEGMENT_NAME_GENERATOR_PROP_PREFIX));
+      segmentNameGeneratorSpec.addConfig(SegmentGenerationTaskRunner.APPEND_UUID_TO_SEGMENT_NAME,
+          taskConfigs.getOrDefault(BatchConfigProperties.APPEND_UUID_TO_SEGMENT_NAME, Boolean.toString(false)));
       taskSpec.setSegmentNameGeneratorSpec(segmentNameGeneratorSpec);
       taskSpec.setCustomProperty(BatchConfigProperties.INPUT_DATA_FILE_URI_KEY, inputFileURI.toString());
 

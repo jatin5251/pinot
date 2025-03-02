@@ -22,12 +22,17 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.Collections;
+import java.util.List;
 import java.util.stream.Stream;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.pinot.spi.config.table.DedupConfig;
+import org.apache.pinot.spi.config.table.HashFunction;
+import org.apache.pinot.spi.config.table.QueryConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.config.table.TierConfig;
+import org.apache.pinot.spi.config.table.ingestion.IngestionConfig;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.testng.annotations.DataProvider;
@@ -38,10 +43,7 @@ import static org.testng.AssertJUnit.assertTrue;
 
 
 public class TableConfigTest {
-
-  private static final String TEST_OFFLINE_TABLE_NAME = "testllc_OFFLINE";
-  private static final String TEST_REALTIME_HLC_TABLE_NAME = "testhlc_REALTIME";
-  private static final String TEST_REALTIME_LLC_TABLE_NAME = "testllc_REALTIME";
+  private static final String RAW_TABLE_NAME = "testTable";
 
   @DataProvider
   public Object[][] configs()
@@ -67,45 +69,42 @@ public class TableConfigTest {
   @Test
   public void testGetReplication() {
     TableConfig offlineTableConfig =
-        new TableConfigBuilder(TableType.OFFLINE).setTableName(TEST_OFFLINE_TABLE_NAME).setNumReplicas(2).build();
-    assertEquals(2, offlineTableConfig.getReplication());
-
+        new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME).setNumReplicas(2).build();
+    assertEquals(offlineTableConfig.getReplication(), 2);
     offlineTableConfig.getValidationConfig().setReplication("4");
-    assertEquals(4, offlineTableConfig.getReplication());
+    assertEquals(offlineTableConfig.getReplication(), 4);
 
-    offlineTableConfig.getValidationConfig().setReplicasPerPartition("3");
-    assertEquals(4, offlineTableConfig.getReplication());
-
-    TableConfig realtimeHLCTableConfig =
-        new TableConfigBuilder(TableType.REALTIME).setTableName(TEST_REALTIME_HLC_TABLE_NAME)
-            .setStreamConfigs(getStreamConfigMap("highlevel")).setNumReplicas(2).build();
-    assertEquals(2, realtimeHLCTableConfig.getReplication());
-
-    realtimeHLCTableConfig.getValidationConfig().setReplication("4");
-    assertEquals(4, realtimeHLCTableConfig.getReplication());
-
-    realtimeHLCTableConfig.getValidationConfig().setReplicasPerPartition("3");
-    assertEquals(4, realtimeHLCTableConfig.getReplication());
-
-    TableConfig realtimeLLCTableConfig =
-        new TableConfigBuilder(TableType.REALTIME).setTableName(TEST_REALTIME_LLC_TABLE_NAME)
-            .setStreamConfigs(getStreamConfigMap("lowlevel")).setLLC(true).setNumReplicas(2).build();
-
-    assertEquals(2, realtimeLLCTableConfig.getReplication());
-
-    realtimeLLCTableConfig.getValidationConfig().setReplication("4");
-    assertEquals(2, realtimeLLCTableConfig.getReplication());
-
-    realtimeLLCTableConfig.getValidationConfig().setReplicasPerPartition("3");
-    assertEquals(3, realtimeLLCTableConfig.getReplication());
+    TableConfig realtimeTableConfig =
+        new TableConfigBuilder(TableType.REALTIME).setTableName(RAW_TABLE_NAME).setNumReplicas(2).build();
+    assertEquals(realtimeTableConfig.getReplication(), 2);
+    realtimeTableConfig.getValidationConfig().setReplication("4");
+    assertEquals(realtimeTableConfig.getReplication(), 4);
+    realtimeTableConfig.getValidationConfig().setReplication("3");
+    assertEquals(realtimeTableConfig.getReplication(), 3);
   }
 
-  private Map<String, String> getStreamConfigMap(String consumerType) {
-    Map<String, String> configMap = new HashMap<>();
-    configMap.put("streamType", "kafka");
-    configMap.put("stream.kafka.consumer.type", consumerType);
-    configMap.put("stream.kafka.topic.name", "test");
-    configMap.put("stream.kafka.decoder.class.name", "test");
-    return configMap;
+  @Test
+  public void testCopyConstructor() {
+    IngestionConfig ingestionConfig = new IngestionConfig();
+    ingestionConfig.setContinueOnError(true);
+    ingestionConfig.setRowTimeValueCheck(true);
+    ingestionConfig.setSegmentTimeValueCheck(false);
+
+    TableConfig config = new TableConfigBuilder(TableType.OFFLINE)
+        .setTableName(RAW_TABLE_NAME)
+        .setAggregateMetrics(true)
+        .setRetentionTimeValue("5")
+        .setRetentionTimeUnit("DAYS")
+        .setNumReplicas(2)
+        .setDedupConfig(new DedupConfig(true, HashFunction.MD5))
+        .setIngestionConfig(ingestionConfig)
+        .setQueryConfig(new QueryConfig(2000L, true, false, Collections.emptyMap(), 100_000L, 100_000L))
+        .setTierConfigList(List.of(new TierConfig("name", "type", null, null, "storageType", null, null, null)))
+        .build();
+
+    TableConfig copy = new TableConfig(config);
+
+    assertEquals(config, copy);
+    assertEquals(config.toJsonString(), copy.toJsonString());
   }
 }

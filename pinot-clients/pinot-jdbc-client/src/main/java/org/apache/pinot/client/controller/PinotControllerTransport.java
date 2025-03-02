@@ -21,6 +21,7 @@ package org.apache.pinot.client.controller;
 import io.netty.handler.ssl.ClientAuth;
 import io.netty.handler.ssl.JdkSslContext;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
@@ -61,8 +62,8 @@ public class PinotControllerTransport {
       builder.setSslContext(new JdkSslContext(sslContext, true, ClientAuth.OPTIONAL));
     }
 
-    builder.setReadTimeout(connectionTimeouts.getReadTimeoutMs())
-        .setConnectTimeout(connectionTimeouts.getConnectTimeoutMs())
+    builder.setReadTimeout(Duration.ofMillis(connectionTimeouts.getReadTimeoutMs()))
+        .setConnectTimeout(Duration.ofMillis(connectionTimeouts.getConnectTimeoutMs()))
         .setHandshakeTimeout(connectionTimeouts.getHandshakeTimeoutMs())
         .setUserAgent(getUserAgentVersionFromClassPath(appId))
         .setEnabledProtocols(tlsProtocols.getEnabledProtocols().toArray(new String[0]));
@@ -76,7 +77,7 @@ public class PinotControllerTransport {
       userAgentProperties.load(
           PinotControllerTransport.class.getClassLoader().getResourceAsStream("version.properties"));
     } catch (IOException e) {
-      LOGGER.warn("Unable to set user agent version");
+      LOGGER.warn("Unable to set user agent version", e);
     }
     String userAgentFromProperties = userAgentProperties.getProperty("ua", "unknown");
     if (StringUtils.isNotEmpty(appId)) {
@@ -130,6 +131,7 @@ public class PinotControllerTransport {
       if (_headers != null) {
         _headers.forEach((k, v) -> requestBuilder.addHeader(k, v));
       }
+
 
       final Future<Response> response =
           requestBuilder.addHeader("Content-Type", "application/json; charset=utf-8").execute();

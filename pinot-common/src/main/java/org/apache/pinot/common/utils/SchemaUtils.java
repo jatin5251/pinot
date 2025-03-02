@@ -21,17 +21,20 @@ package org.apache.pinot.common.utils;
 import com.google.common.base.Preconditions;
 import java.io.IOException;
 import java.net.URL;
+import java.nio.charset.Charset;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
-import org.apache.commons.httpclient.HttpClient;
-import org.apache.commons.httpclient.methods.DeleteMethod;
-import org.apache.commons.httpclient.methods.GetMethod;
-import org.apache.commons.httpclient.methods.PostMethod;
-import org.apache.commons.httpclient.methods.multipart.MultipartRequestEntity;
-import org.apache.commons.httpclient.methods.multipart.Part;
-import org.apache.commons.httpclient.methods.multipart.StringPart;
-import org.apache.commons.httpclient.params.HttpMethodParams;
+import org.apache.commons.io.IOUtils;
+import org.apache.hc.client5.http.classic.methods.HttpDelete;
+import org.apache.hc.client5.http.classic.methods.HttpGet;
+import org.apache.hc.client5.http.classic.methods.HttpPost;
+import org.apache.hc.client5.http.entity.mime.MultipartEntityBuilder;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
+import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
+import org.apache.hc.core5.http.HttpEntity;
+import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
@@ -47,7 +50,7 @@ import org.slf4j.LoggerFactory;
 public class SchemaUtils {
   private static final Logger LOGGER = LoggerFactory.getLogger(SchemaUtils.class);
 
-  private static final HttpClient HTTP_CLIENT = new HttpClient();
+  private static final CloseableHttpClient HTTP_CLIENT = HttpClientBuilder.create().build();
 
   private SchemaUtils() {
   }
@@ -76,17 +79,16 @@ public class SchemaUtils {
    * @return schema on success.
    * <P><code>null</code> on failure.
    */
-  public static @Nullable
-  Schema getSchema(@Nonnull String host, int port, @Nonnull String schemaName) {
+  public static @Nullable Schema getSchema(@Nonnull String host, int port, @Nonnull String schemaName) {
     Preconditions.checkNotNull(host);
     Preconditions.checkNotNull(schemaName);
 
     try {
       URL url = new URL(CommonConstants.HTTP_PROTOCOL, host, port, "/schemas/" + schemaName);
-      GetMethod httpGet = new GetMethod(url.toString());
-      try {
-        int responseCode = HTTP_CLIENT.executeMethod(httpGet);
-        String response = httpGet.getResponseBodyAsString();
+      HttpGet httpGet = new HttpGet(url.toString());
+      try (CloseableHttpResponse response = HTTP_CLIENT.execute(httpGet)) {
+        int responseCode = response.getCode();
+        String responseString = EntityUtils.toString(response.getEntity());
         if (responseCode >= 400) {
           // File not find error code.
           if (responseCode == 404) {
@@ -96,9 +98,7 @@ public class SchemaUtils {
           }
           return null;
         }
-        return Schema.fromString(response);
-      } finally {
-        httpGet.releaseConnection();
+        return Schema.fromString(responseString);
       }
     } catch (Exception e) {
       LOGGER.error("Caught exception while getting the schema: {} from host: {}, port: {}", schemaName, host, port, e);
@@ -118,20 +118,18 @@ public class SchemaUtils {
 
     try {
       URL url = new URL(CommonConstants.HTTP_PROTOCOL, host, port, "/schemas");
-      PostMethod httpPost = new PostMethod(url.toString());
-      try {
-        Part[] parts = {new StringPart(schema.getSchemaName(), schema.toSingleLineJsonString())};
-        MultipartRequestEntity requestEntity = new MultipartRequestEntity(parts, new HttpMethodParams());
-        httpPost.setRequestEntity(requestEntity);
-        int responseCode = HTTP_CLIENT.executeMethod(httpPost);
+      HttpPost httpPost = new HttpPost(url.toString());
+      HttpEntity requestEntity =
+          MultipartEntityBuilder.create().addTextBody(schema.getSchemaName(), schema.toSingleLineJsonString()).build();
+      httpPost.setEntity(requestEntity);
+      try (CloseableHttpResponse response = HTTP_CLIENT.execute(httpPost)) {
+        int responseCode = response.getCode();
         if (responseCode >= 400) {
-          String response = httpPost.getResponseBodyAsString();
-          LOGGER.warn("Got error response code: {}, response: {}", responseCode, response);
+          String responseString = IOUtils.toString(response.getEntity().getContent(), Charset.defaultCharset());
+          LOGGER.warn("Got error response code: {}, response: {}", responseCode, responseString);
           return false;
         }
         return true;
-      } finally {
-        httpPost.releaseConnection();
       }
     } catch (Exception e) {
       LOGGER.error("Caught exception while posting the schema: {} to host: {}, port: {}", schema.getSchemaName(), host,
@@ -152,17 +150,15 @@ public class SchemaUtils {
 
     try {
       URL url = new URL(CommonConstants.HTTP_PROTOCOL, host, port, "/schemas/" + schemaName);
-      DeleteMethod httpDelete = new DeleteMethod(url.toString());
-      try {
-        int responseCode = HTTP_CLIENT.executeMethod(httpDelete);
+      HttpDelete httpDelete = new HttpDelete(url.toString());
+      try (CloseableHttpResponse response = HTTP_CLIENT.execute(httpDelete)) {
+        int responseCode = response.getCode();
         if (responseCode >= 400) {
-          String response = httpDelete.getResponseBodyAsString();
-          LOGGER.warn("Got error response code: {}, response: {}", responseCode, response);
+          String responseString = EntityUtils.toString(response.getEntity());
+          LOGGER.warn("Got error response code: {}, response: {}", responseCode, responseString);
           return false;
         }
         return true;
-      } finally {
-        httpDelete.releaseConnection();
       }
     } catch (Exception e) {
       LOGGER.error("Caught exception while getting the schema: {} from host: {}, port: {}", schemaName, host, port, e);

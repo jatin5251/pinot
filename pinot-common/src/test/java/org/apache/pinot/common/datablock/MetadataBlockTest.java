@@ -18,9 +18,9 @@
  */
 package org.apache.pinot.common.datablock;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import java.io.IOException;
-import java.nio.ByteBuffer;
+import java.util.List;
+import org.apache.pinot.segment.spi.memory.DataBuffer;
+import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
 import org.testng.annotations.Test;
 
 import static org.testng.Assert.*;
@@ -28,100 +28,28 @@ import static org.testng.Assert.*;
 public class MetadataBlockTest {
 
   @Test
-  public void shouldEncodeContentsAsJSON()
+  public void emptyMetadataBlock()
       throws Exception {
     // Given:
-    MetadataBlock.MetadataBlockType type = MetadataBlock.MetadataBlockType.EOS;
-
     // When:
-    MetadataBlock metadataBlock = new MetadataBlock(type);
+    MetadataBlock metadataBlock = MetadataBlock.newEos();
 
     // Then:
-    byte[] expected = new ObjectMapper().writeValueAsBytes(new MetadataBlock.Contents("EOS"));
-    assertEquals(metadataBlock._variableSizeDataBytes, expected);
-  }
+    assertEquals(metadataBlock._fixedSizeData, PinotDataBuffer.empty());
+    assertEquals(metadataBlock._variableSizeData, PinotDataBuffer.empty());
 
-  @Test
-  public void shouldDefaultToEosWithNoErrorsOnLegacyMetadataBlock()
-      throws IOException {
-    // Given:
-    // MetadataBlock used to be encoded without any data, we should make sure that
-    // during rollout or if server versions are mismatched that we can still handle
-    // the old format
-    OldMetadataBlock legacyBlock = new OldMetadataBlock();
-    byte[] bytes = legacyBlock.toBytes();
-
-    // When:
-    ByteBuffer buff = ByteBuffer.wrap(bytes);
-    buff.getInt(); // consume the version information before decoding
-    MetadataBlock metadataBlock = new MetadataBlock(buff);
-
-    // Then:
-    assertEquals(metadataBlock.getType(), MetadataBlock.MetadataBlockType.EOS);
-  }
-
-  @Test
-  public void shouldDefaultToErrorOnLegacyMetadataBlockWithErrors()
-      throws IOException {
-    // Given:
-    // MetadataBlock used to be encoded without any data, we should make sure that
-    // during rollout or if server versions are mismatched that we can still handle
-    // the old format
-    OldMetadataBlock legacyBlock = new OldMetadataBlock();
-    legacyBlock.addException(250, "timeout");
-    byte[] bytes = legacyBlock.toBytes();
-
-    // When:
-    ByteBuffer buff = ByteBuffer.wrap(bytes);
-    buff.getInt(); // consume the version information before decoding
-    MetadataBlock metadataBlock = new MetadataBlock(buff);
-
-    // Then:
-    assertEquals(metadataBlock.getType(), MetadataBlock.MetadataBlockType.ERROR);
+    List<DataBuffer> statsByStage = metadataBlock.getStatsByStage();
+    assertNotNull(statsByStage, "Expected stats by stage to be non-null");
+    assertEquals(statsByStage.size(), 0, "Expected no stats by stage");
   }
 
   @Test(expectedExceptions = UnsupportedOperationException.class)
   public void shouldThrowExceptionWhenUsingReadMethods() {
     // Given:
-    MetadataBlock block = new MetadataBlock(MetadataBlock.MetadataBlockType.EOS);
+    MetadataBlock block = MetadataBlock.newEos();
 
     // When:
     // (should through exception)
     block.getInt(0, 0);
-  }
-
-  /**
-   * This is mostly just used as an internal serialization tool
-   */
-  private static class OldMetadataBlock extends BaseDataBlock {
-
-    public OldMetadataBlock() {
-      super(0, null, new String[0], new byte[0], new byte[0]);
-    }
-
-    @Override
-    protected int getDataBlockVersionType() {
-      return MetadataBlock.VERSION + (Type.METADATA.ordinal() << DataBlockUtils.VERSION_TYPE_SHIFT);
-    }
-
-    @Override
-    protected int getOffsetInFixedBuffer(int rowId, int colId) {
-      return 0;
-    }
-
-    @Override
-    protected int positionOffsetInVariableBufferAndGetLength(int rowId, int colId) {
-      return 0;
-    }
-
-    @Override
-    public DataBlock toMetadataOnlyDataTable() {
-      return null;
-    }
-
-    @Override
-    public DataBlock toDataOnlyDataTable() {
-      return null;
-    }
   }
 }

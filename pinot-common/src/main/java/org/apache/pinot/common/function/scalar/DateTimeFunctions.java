@@ -23,11 +23,14 @@ import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 import org.apache.pinot.common.function.DateTimePatternHandler;
 import org.apache.pinot.common.function.DateTimeUtils;
+import org.apache.pinot.common.function.FunctionUtils;
 import org.apache.pinot.common.function.TimeZoneKey;
 import org.apache.pinot.spi.annotations.ScalarFunction;
+import org.apache.pinot.spi.utils.TimeUtils;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 import org.joda.time.chrono.ISOChronology;
+
 
 /**
  * Inbuilt date time related transform functions
@@ -79,12 +82,30 @@ public class DateTimeFunctions {
     return TimeUnit.MILLISECONDS.toSeconds(millis);
   }
 
+  @ScalarFunction
+  public static long[] toEpochSecondsMV(long[] millis) {
+    long[] results = new long[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = toEpochSeconds(millis[i]);
+    }
+    return results;
+  }
+
   /**
    * Convert epoch millis to epoch minutes
    */
   @ScalarFunction
   public static long toEpochMinutes(long millis) {
     return TimeUnit.MILLISECONDS.toMinutes(millis);
+  }
+
+  @ScalarFunction
+  public static long[] toEpochMinutesMV(long[] millis) {
+    long[] results = new long[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = toEpochMinutes(millis[i]);
+    }
+    return results;
   }
 
   /**
@@ -95,12 +116,30 @@ public class DateTimeFunctions {
     return TimeUnit.MILLISECONDS.toHours(millis);
   }
 
+  @ScalarFunction
+  public static long[] toEpochHoursMV(long[] millis) {
+    long[] results = new long[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = toEpochHours(millis[i]);
+    }
+    return results;
+  }
+
   /**
    * Convert epoch millis to epoch days
    */
   @ScalarFunction
   public static long toEpochDays(long millis) {
     return TimeUnit.MILLISECONDS.toDays(millis);
+  }
+
+  @ScalarFunction
+  public static long[] toEpochDaysMV(long[] millis) {
+    long[] results = new long[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = toEpochDays(millis[i]);
+    }
+    return results;
   }
 
   /**
@@ -111,12 +150,30 @@ public class DateTimeFunctions {
     return (TimeUnit.MILLISECONDS.toSeconds(millis) / roundToNearest) * roundToNearest;
   }
 
+  @ScalarFunction
+  public static long[] toEpochSecondsRoundedMV(long[] millis, long roundToNearest) {
+    long[] results = new long[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = toEpochSecondsRounded(millis[i], roundToNearest);
+    }
+    return results;
+  }
+
   /**
    * Convert epoch millis to epoch minutes, round to nearest rounding bucket
    */
   @ScalarFunction
   public static long toEpochMinutesRounded(long millis, long roundToNearest) {
     return (TimeUnit.MILLISECONDS.toMinutes(millis) / roundToNearest) * roundToNearest;
+  }
+
+  @ScalarFunction
+  public static long[] toEpochMinutesRoundedMV(long[] millis, long roundToNearest) {
+    long[] results = new long[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = toEpochMinutesRounded(millis[i], roundToNearest);
+    }
+    return results;
   }
 
   /**
@@ -127,12 +184,30 @@ public class DateTimeFunctions {
     return (TimeUnit.MILLISECONDS.toHours(millis) / roundToNearest) * roundToNearest;
   }
 
+  @ScalarFunction
+  public static long[] toEpochHoursRoundedMV(long[] millis, long roundToNearest) {
+    long[] results = new long[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = toEpochHoursRounded(millis[i], roundToNearest);
+    }
+    return results;
+  }
+
   /**
    * Convert epoch millis to epoch days, round to nearest rounding bucket
    */
   @ScalarFunction
   public static long toEpochDaysRounded(long millis, long roundToNearest) {
     return (TimeUnit.MILLISECONDS.toDays(millis) / roundToNearest) * roundToNearest;
+  }
+
+  @ScalarFunction
+  public static long[] toEpochDaysRoundedMV(long[] millis, long roundToNearest) {
+    long[] results = new long[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = toEpochDaysRounded(millis[i], roundToNearest);
+    }
+    return results;
   }
 
   /**
@@ -143,12 +218,30 @@ public class DateTimeFunctions {
     return TimeUnit.MILLISECONDS.toSeconds(millis) / bucket;
   }
 
+  @ScalarFunction
+  public static long[] toEpochSecondsBucketMV(long[] millis, long bucket) {
+    long[] results = new long[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = toEpochSecondsBucket(millis[i], bucket);
+    }
+    return results;
+  }
+
   /**
    * Convert epoch millis to epoch minutes, divided by given bucket, to get nMinutesSinceEpoch
    */
   @ScalarFunction
   public static long toEpochMinutesBucket(long millis, long bucket) {
     return TimeUnit.MILLISECONDS.toMinutes(millis) / bucket;
+  }
+
+  @ScalarFunction
+  public static long[] toEpochMinutesBucketMV(long[] millis, long bucket) {
+    long[] results = new long[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = toEpochMinutesBucket(millis[i], bucket);
+    }
+    return results;
   }
 
   /**
@@ -159,12 +252,30 @@ public class DateTimeFunctions {
     return TimeUnit.MILLISECONDS.toHours(millis) / bucket;
   }
 
+  @ScalarFunction
+  public static long[] toEpochHoursBucketMV(long[] millis, long bucket) {
+    long[] results = new long[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = toEpochHoursBucket(millis[i], bucket);
+    }
+    return results;
+  }
+
   /**
    * Convert epoch millis to epoch days, divided by given bucket, to get nDaysSinceEpoch
    */
   @ScalarFunction
   public static long toEpochDaysBucket(long millis, long bucket) {
     return TimeUnit.MILLISECONDS.toDays(millis) / bucket;
+  }
+
+  @ScalarFunction
+  public static long[] toEpochDaysBucketMV(long[] millis, long bucket) {
+    long[] results = new long[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = toEpochDaysBucket(millis[i], bucket);
+    }
+    return results;
   }
 
   /**
@@ -175,12 +286,30 @@ public class DateTimeFunctions {
     return TimeUnit.SECONDS.toMillis(seconds);
   }
 
+  @ScalarFunction
+  public static long[] fromEpochSecondsMV(long[] seconds) {
+    long[] results = new long[seconds.length];
+    for (int i = 0; i < seconds.length; i++) {
+      results[i] = fromEpochSeconds(seconds[i]);
+    }
+    return results;
+  }
+
   /**
    * Converts epoch minutes to epoch millis
    */
   @ScalarFunction
   public static long fromEpochMinutes(long minutes) {
     return TimeUnit.MINUTES.toMillis(minutes);
+  }
+
+  @ScalarFunction
+  public static long[] fromEpochMinutesMV(long[] minutes) {
+    long[] results = new long[minutes.length];
+    for (int i = 0; i < minutes.length; i++) {
+      results[i] = fromEpochMinutes(minutes[i]);
+    }
+    return results;
   }
 
   /**
@@ -191,12 +320,30 @@ public class DateTimeFunctions {
     return TimeUnit.HOURS.toMillis(hours);
   }
 
+  @ScalarFunction
+  public static long[] fromEpochHoursMV(long[] hours) {
+    long[] results = new long[hours.length];
+    for (int i = 0; i < hours.length; i++) {
+      results[i] = fromEpochHours(hours[i]);
+    }
+    return results;
+  }
+
   /**
    * Converts epoch days to epoch millis
    */
   @ScalarFunction
   public static long fromEpochDays(long days) {
     return TimeUnit.DAYS.toMillis(days);
+  }
+
+  @ScalarFunction
+  public static long[] fromEpochDaysMV(long[] days) {
+    long[] results = new long[days.length];
+    for (int i = 0; i < days.length; i++) {
+      results[i] = fromEpochDays(days[i]);
+    }
+    return results;
   }
 
   /**
@@ -207,12 +354,30 @@ public class DateTimeFunctions {
     return TimeUnit.SECONDS.toMillis(seconds * bucket);
   }
 
+  @ScalarFunction
+  public static long[] fromEpochSecondsBucketMV(long[] seconds, long bucket) {
+    long[] results = new long[seconds.length];
+    for (int i = 0; i < seconds.length; i++) {
+      results[i] = fromEpochSecondsBucket(seconds[i], bucket);
+    }
+    return results;
+  }
+
   /**
    * Converts nMinutesSinceEpoch (minutes that have been divided by a bucket), to epoch millis
    */
   @ScalarFunction
   public static long fromEpochMinutesBucket(long minutes, long bucket) {
     return TimeUnit.MINUTES.toMillis(minutes * bucket);
+  }
+
+  @ScalarFunction
+  public static long[] fromEpochMinutesBucketMV(long[] minutes, long bucket) {
+    long[] results = new long[minutes.length];
+    for (int i = 0; i < minutes.length; i++) {
+      results[i] = fromEpochMinutesBucket(minutes[i], bucket);
+    }
+    return results;
   }
 
   /**
@@ -223,12 +388,30 @@ public class DateTimeFunctions {
     return TimeUnit.HOURS.toMillis(hours * bucket);
   }
 
+  @ScalarFunction
+  public static long[] fromEpochHoursBucketMV(long[] hours, long bucket) {
+    long[] results = new long[hours.length];
+    for (int i = 0; i < hours.length; i++) {
+      results[i] = fromEpochHoursBucket(hours[i], bucket);
+    }
+    return results;
+  }
+
   /**
    * Converts nDaysSinceEpoch (days that have been divided by a bucket), to epoch millis
    */
   @ScalarFunction
   public static long fromEpochDaysBucket(long days, long bucket) {
     return TimeUnit.DAYS.toMillis(days * bucket);
+  }
+
+  @ScalarFunction
+  public static long[] fromEpochDaysBucketMV(long[] days, long bucket) {
+    long[] results = new long[days.length];
+    for (int i = 0; i < days.length; i++) {
+      results[i] = fromEpochDaysBucket(days[i], bucket);
+    }
+    return results;
   }
 
   /**
@@ -239,12 +422,30 @@ public class DateTimeFunctions {
     return new Timestamp(millis);
   }
 
+  @ScalarFunction
+  public static Timestamp[] toTimestampMV(long[] millis) {
+    Timestamp[] results = new Timestamp[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = toTimestamp(millis[i]);
+    }
+    return results;
+  }
+
   /**
    * Converts Timestamp to epoch millis
    */
   @ScalarFunction
   public static long fromTimestamp(Timestamp timestamp) {
     return timestamp.getTime();
+  }
+
+  @ScalarFunction
+  public static long[] fromTimestampMV(Timestamp[] timestamp) {
+    long[] results = new long[timestamp.length];
+    for (int i = 0; i < timestamp.length; i++) {
+      results[i] = fromTimestamp(timestamp[i]);
+    }
+    return results;
   }
 
   /**
@@ -255,12 +456,30 @@ public class DateTimeFunctions {
     return DateTimePatternHandler.parseEpochMillisToDateTimeString(millis, pattern);
   }
 
+  @ScalarFunction
+  public static String[] toDateTimeMV(long[] millis, String pattern) {
+    String[] results = new String[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = toDateTime(millis[i], pattern);
+    }
+    return results;
+  }
+
   /**
    * Converts epoch millis to DateTime string represented by pattern and the time zone id.
    */
   @ScalarFunction
   public static String toDateTime(long millis, String pattern, String timezoneId) {
     return DateTimePatternHandler.parseEpochMillisToDateTimeString(millis, pattern, timezoneId);
+  }
+
+  @ScalarFunction
+  public static String[] toDateTimeMV(long[] millis, String pattern, String timezoneId) {
+    String[] results = new String[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = toDateTime(millis[i], pattern, timezoneId);
+    }
+    return results;
   }
 
   /**
@@ -271,12 +490,35 @@ public class DateTimeFunctions {
     return DateTimePatternHandler.parseDateTimeStringToEpochMillis(dateTimeString, pattern);
   }
 
+  @ScalarFunction
+  public static long[] fromDateTimeMV(String[] dateTimeString, String pattern) {
+    long[] results = new long[dateTimeString.length];
+    for (int i = 0; i < dateTimeString.length; i++) {
+      results[i] = fromDateTime(dateTimeString[i], pattern);
+    }
+    return results;
+  }
+
   /**
    * Converts DateTime string represented by pattern to epoch millis
    */
   @ScalarFunction
   public static long fromDateTime(String dateTimeString, String pattern, String timeZoneId) {
     return DateTimePatternHandler.parseDateTimeStringToEpochMillis(dateTimeString, pattern, timeZoneId);
+  }
+
+  @ScalarFunction
+  public static long fromDateTime(String dateTimeString, String pattern, String timeZoneId, long defaultVal) {
+    return DateTimePatternHandler.parseDateTimeStringToEpochMillis(dateTimeString, pattern, timeZoneId, defaultVal);
+  }
+
+  @ScalarFunction
+  public static long[] fromDateTimeMV(String[] dateTimeString, String pattern, String timeZoneId) {
+    long[] results = new long[dateTimeString.length];
+    for (int i = 0; i < dateTimeString.length; i++) {
+      results[i] = fromDateTime(dateTimeString[i], pattern, timeZoneId);
+    }
+    return results;
   }
 
   /**
@@ -288,6 +530,15 @@ public class DateTimeFunctions {
     return (timeValue / roundToNearest) * roundToNearest;
   }
 
+  @ScalarFunction
+  public static long[] roundMV(long[] timeValue, long roundToNearest) {
+    long[] results = new long[timeValue.length];
+    for (int i = 0; i < timeValue.length; i++) {
+      results[i] = round(timeValue[i], roundToNearest);
+    }
+    return results;
+  }
+
   /**
    * Return current time as epoch millis
    * TODO: Consider changing the return type to Timestamp
@@ -295,6 +546,19 @@ public class DateTimeFunctions {
   @ScalarFunction
   public static long now() {
     return System.currentTimeMillis();
+  }
+
+  @ScalarFunction
+  public static long sleep(long millis) {
+    try {
+      if (FunctionUtils.isAssertEnabled()) {
+        Thread.sleep(millis);
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new RuntimeException(e);
+    }
+    return millis;
   }
 
   /**
@@ -315,6 +579,15 @@ public class DateTimeFunctions {
     return System.currentTimeMillis() - period.toMillis();
   }
 
+  @ScalarFunction
+  public static long[] agoMV(String[] periodString) {
+    long[] results = new long[periodString.length];
+    for (int i = 0; i < periodString.length; i++) {
+      results[i] = ago(periodString[i]);
+    }
+    return results;
+  }
+
   /**
    * The {@code timezoneId} for the following methods must be of a Joda-Time format:
    * https://www.joda.org/joda-time/timezones.html
@@ -328,6 +601,15 @@ public class DateTimeFunctions {
     return timezoneHour(timezoneId, 0);
   }
 
+  @ScalarFunction
+  public static int[] timezoneHourMV(String[] timezoneId) {
+    int[] results = new int[timezoneId.length];
+    for (int i = 0; i < timezoneId.length; i++) {
+      results[i] = timezoneHour(timezoneId[i], 0);
+    }
+    return results;
+  }
+
   /**
    * Returns the hour of the time zone offset, for the UTC timestamp at {@code millis}. This will
    * properly handle daylight savings time.
@@ -337,12 +619,30 @@ public class DateTimeFunctions {
     return (int) TimeUnit.MILLISECONDS.toHours(DateTimeZone.forID(timezoneId).getOffset(millis));
   }
 
+  @ScalarFunction
+  public static int[] timezoneHourMV(String timezoneId, long[] millis) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = timezoneHour(timezoneId, millis[i]);
+    }
+    return results;
+  }
+
   /**
    * Returns the minute of the time zone offset.
    */
   @ScalarFunction
   public static int timezoneMinute(String timezoneId) {
     return timezoneMinute(timezoneId, 0);
+  }
+
+  @ScalarFunction
+  public static int[] timezoneMinuteMV(String[] timezoneId) {
+    int[] results = new int[timezoneId.length];
+    for (int i = 0; i < timezoneId.length; i++) {
+      results[i] = timezoneMinute(timezoneId[i], 0);
+    }
+    return results;
   }
 
   /**
@@ -354,12 +654,30 @@ public class DateTimeFunctions {
     return (int) TimeUnit.MILLISECONDS.toMinutes(DateTimeZone.forID(timezoneId).getOffset(millis)) % 60;
   }
 
+  @ScalarFunction
+  public static int[] timezoneMinuteMV(String timezoneId, long[] millis) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = timezoneMinute(timezoneId, millis[i]);
+    }
+    return results;
+  }
+
   /**
    * Returns the year from the given epoch millis in UTC timezone.
    */
   @ScalarFunction
   public static int year(long millis) {
     return new DateTime(millis, DateTimeZone.UTC).getYear();
+  }
+
+  @ScalarFunction
+  public static int[] yearMV(long[] millis) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = year(millis[i]);
+    }
+    return results;
   }
 
   /**
@@ -370,20 +688,47 @@ public class DateTimeFunctions {
     return new DateTime(millis, DateTimeZone.forID(timezoneId)).getYear();
   }
 
+  @ScalarFunction
+  public static int[] yearMV(long[] millis, String timezoneId) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = year(millis[i], timezoneId);
+    }
+    return results;
+  }
+
   /**
    * Returns the year of the ISO week from the given epoch millis in UTC timezone.
    */
-  @ScalarFunction(names = {"yearOfWeek", "year_of_week", "yow"})
+  @ScalarFunction(names = {"yearOfWeek", "yow"})
   public static int yearOfWeek(long millis) {
     return new DateTime(millis, DateTimeZone.UTC).getWeekyear();
+  }
+
+  @ScalarFunction(names = {"yearOfWeekMV", "yowMV"})
+  public static int[] yearOfWeekMV(long[] millis) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = yearOfWeek(millis[i]);
+    }
+    return results;
   }
 
   /**
    * Returns the year of the ISO week from the given epoch millis and timezone id.
    */
-  @ScalarFunction(names = {"yearOfWeek", "year_of_week", "yow"})
+  @ScalarFunction(names = {"yearOfWeek", "yow"})
   public static int yearOfWeek(long millis, String timezoneId) {
     return new DateTime(millis, DateTimeZone.forID(timezoneId)).getWeekyear();
+  }
+
+  @ScalarFunction(names = {"yearOfWeekMV", "yowMV"})
+  public static int[] yearOfWeekMV(long[] millis, String timezoneId) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = yearOfWeek(millis[i], timezoneId);
+    }
+    return results;
   }
 
   /**
@@ -391,7 +736,16 @@ public class DateTimeFunctions {
    */
   @ScalarFunction
   public static int quarter(long millis) {
-    return (monthOfYear(millis) - 1) / 3 + 1;
+    return (month(millis) - 1) / 3 + 1;
+  }
+
+  @ScalarFunction
+  public static int[] quarterMV(long[] millis) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = quarter(millis[i]);
+    }
+    return results;
   }
 
   /**
@@ -399,89 +753,188 @@ public class DateTimeFunctions {
    */
   @ScalarFunction
   public static int quarter(long millis, String timezoneId) {
-    return (monthOfYear(millis, timezoneId) - 1) / 3 + 1;
+    return (month(millis, timezoneId) - 1) / 3 + 1;
+  }
+
+  @ScalarFunction
+  public static int[] quarterMV(long[] millis, String timezoneId) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = quarter(millis[i], timezoneId);
+    }
+    return results;
   }
 
   /**
    * Returns the month of the year from the given epoch millis in UTC timezone. The value ranges from 1 to 12.
    */
-  @ScalarFunction(names = {"month", "month_of_year", "monthOfYear"})
-  public static int monthOfYear(long millis) {
+  @ScalarFunction(names = {"month", "monthOfYear"})
+  public static int month(long millis) {
     return new DateTime(millis, DateTimeZone.UTC).getMonthOfYear();
+  }
+
+  @ScalarFunction(names = {"monthMV", "monthOfYearMV"})
+  public static int[] monthMV(long[] millis) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = month(millis[i]);
+    }
+    return results;
   }
 
   /**
    * Returns the month of the year from the given epoch millis and timezone id. The value ranges from 1 to 12.
    */
-  @ScalarFunction(names = {"month", "month_of_year", "monthOfYear"})
-  public static int monthOfYear(long millis, String timezoneId) {
+  @ScalarFunction(names = {"month", "monthOfYear"})
+  public static int month(long millis, String timezoneId) {
     return new DateTime(millis, DateTimeZone.forID(timezoneId)).getMonthOfYear();
+  }
+
+  @ScalarFunction(names = {"monthMV", "monthOfYearMV"})
+  public static int[] monthMV(long[] millis, String timezoneId) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = month(millis[i], timezoneId);
+    }
+    return results;
   }
 
   /**
    * Returns the ISO week of the year from the given epoch millis in UTC timezone.The value ranges from 1 to 53.
    */
-  @ScalarFunction(names = {"weekOfYear", "week_of_year", "week"})
-  public static int weekOfYear(long millis) {
+  @ScalarFunction(names = {"week", "weekOfYear"})
+  public static int week(long millis) {
     return new DateTime(millis, DateTimeZone.UTC).getWeekOfWeekyear();
+  }
+
+  @ScalarFunction(names = {"weekMV", "weekOfYearMV"})
+  public static int[] weekMV(long[] millis) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = week(millis[i]);
+    }
+    return results;
   }
 
   /**
    * Returns the ISO week of the year from the given epoch millis and timezone id. The value ranges from 1 to 53.
    */
-  @ScalarFunction(names = {"weekOfYear", "week_of_year", "week"})
-  public static int weekOfYear(long millis, String timezoneId) {
+  @ScalarFunction(names = {"week", "weekOfYear"})
+  public static int week(long millis, String timezoneId) {
     return new DateTime(millis, DateTimeZone.forID(timezoneId)).getWeekOfWeekyear();
+  }
+
+  @ScalarFunction(names = {"weekMV", "weekOfYearMV"})
+  public static int[] weekMV(long[] millis, String timezoneId) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = week(millis[i], timezoneId);
+    }
+    return results;
   }
 
   /**
    * Returns the day of the year from the given epoch millis in UTC timezone. The value ranges from 1 to 366.
    */
-  @ScalarFunction(names = {"dayOfYear", "day_of_year", "doy"})
+  @ScalarFunction(names = {"dayOfYear", "doy"})
   public static int dayOfYear(long millis) {
     return new DateTime(millis, DateTimeZone.UTC).getDayOfYear();
+  }
+
+  @ScalarFunction(names = {"dayOfYearMV", "doyMV"})
+  public static int[] dayOfYear(long[] millis) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = dayOfYear(millis[i]);
+    }
+    return results;
   }
 
   /**
    * Returns the day of the year from the given epoch millis and timezone id. The value ranges from 1 to 366.
    */
-  @ScalarFunction(names = {"dayOfYear", "day_of_year", "doy"})
+  @ScalarFunction(names = {"dayOfYear", "doy"})
   public static int dayOfYear(long millis, String timezoneId) {
     return new DateTime(millis, DateTimeZone.forID(timezoneId)).getDayOfYear();
+  }
+
+  @ScalarFunction(names = {"dayOfYearMV", "doyMV"})
+  public static int[] dayOfYear(long[] millis, String timezoneId) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = dayOfYear(millis[i], timezoneId);
+    }
+    return results;
   }
 
   /**
    * Returns the day of the month from the given epoch millis in UTC timezone. The value ranges from 1 to 31.
    */
-  @ScalarFunction(names = {"day", "dayOfMonth", "day_of_month"})
+  @ScalarFunction(names = {"dayOfMonth", "day"})
   public static int dayOfMonth(long millis) {
     return new DateTime(millis, DateTimeZone.UTC).getDayOfMonth();
+  }
+
+  @ScalarFunction(names = {"dayOfMonthMV", "dayMV"})
+  public static int[] dayOfMonthMV(long[] millis) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = dayOfMonth(millis[i]);
+    }
+    return results;
   }
 
   /**
    * Returns the day of the month from the given epoch millis and timezone id. The value ranges from 1 to 31.
    */
-  @ScalarFunction(names = {"day", "dayOfMonth", "day_of_month"})
+  @ScalarFunction(names = {"dayOfMonth", "day"})
   public static int dayOfMonth(long millis, String timezoneId) {
     return new DateTime(millis, DateTimeZone.forID(timezoneId)).getDayOfMonth();
+  }
+
+  @ScalarFunction(names = {"dayOfMonthMV", "dayMV"})
+  public static int[] dayOfMonthMV(long[] millis, String timezoneId) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = dayOfMonth(millis[i], timezoneId);
+    }
+    return results;
   }
 
   /**
    * Returns the day of the week from the given epoch millis in UTC timezone. The value ranges from 1 (Monday) to 7
    * (Sunday).
    */
-  @ScalarFunction(names = {"dayOfWeek", "day_of_week", "dow"})
+  @ScalarFunction(names = {"dayOfWeek", "dow"})
   public static int dayOfWeek(long millis) {
     return new DateTime(millis, DateTimeZone.UTC).getDayOfWeek();
+  }
+
+  @ScalarFunction(names = {"dayOfWeekMV", "dowMV"})
+  public static int[] dayOfWeekMV(long[] millis) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = dayOfWeek(millis[i]);
+    }
+    return results;
   }
 
   /**
    * Returns the day of the week from the given epoch millis and timezone id. The value ranges from 1 (Monday) to 7
    * (Sunday).
    */
-  @ScalarFunction(names = {"dayOfWeek", "day_of_week", "dow"})
+  @ScalarFunction(names = {"dayOfWeek", "dow"})
   public static int dayOfWeek(long millis, String timezoneId) {
     return new DateTime(millis, DateTimeZone.forID(timezoneId)).getDayOfWeek();
+  }
+
+  @ScalarFunction(names = {"dayOfWeekMV", "dowMV"})
+  public static int[] dayOfWeekMV(long[] millis, String timezoneId) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = dayOfWeek(millis[i], timezoneId);
+    }
+    return results;
   }
 
   /**
@@ -492,12 +945,30 @@ public class DateTimeFunctions {
     return new DateTime(millis, DateTimeZone.UTC).getHourOfDay();
   }
 
+  @ScalarFunction
+  public static int[] hourMV(long[] millis) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = hour(millis[i]);
+    }
+    return results;
+  }
+
   /**
    * Returns the hour of the day from the given epoch millis and timezone id. The value ranges from 0 to 23.
    */
   @ScalarFunction
   public static int hour(long millis, String timezoneId) {
     return new DateTime(millis, DateTimeZone.forID(timezoneId)).getHourOfDay();
+  }
+
+  @ScalarFunction
+  public static int[] hourMV(long[] millis, String timezoneId) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = hour(millis[i], timezoneId);
+    }
+    return results;
   }
 
   /**
@@ -508,12 +979,30 @@ public class DateTimeFunctions {
     return new DateTime(millis, DateTimeZone.UTC).getMinuteOfHour();
   }
 
+  @ScalarFunction
+  public static int[] minuteMV(long[] millis) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = minute(millis[i]);
+    }
+    return results;
+  }
+
   /**
    * Returns the minute of the hour from the given epoch millis and timezone id. The value ranges from 0 to 59.
    */
   @ScalarFunction
   public static int minute(long millis, String timezoneId) {
     return new DateTime(millis, DateTimeZone.forID(timezoneId)).getMinuteOfHour();
+  }
+
+  @ScalarFunction
+  public static int[] minuteMV(long[] millis, String timezoneId) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = minute(millis[i], timezoneId);
+    }
+    return results;
   }
 
   /**
@@ -524,12 +1013,30 @@ public class DateTimeFunctions {
     return new DateTime(millis, DateTimeZone.UTC).getSecondOfMinute();
   }
 
+  @ScalarFunction
+  public static int[] secondMV(long[] millis) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = second(millis[i]);
+    }
+    return results;
+  }
+
   /**
    * Returns the second of the minute from the given epoch millis and timezone id. The value ranges from 0 to 59.
    */
   @ScalarFunction
   public static int second(long millis, String timezoneId) {
     return new DateTime(millis, DateTimeZone.forID(timezoneId)).getSecondOfMinute();
+  }
+
+  @ScalarFunction
+  public static int[] secondMV(long[] millis, String timezoneId) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = second(millis[i], timezoneId);
+    }
+    return results;
   }
 
   /**
@@ -540,12 +1047,30 @@ public class DateTimeFunctions {
     return new DateTime(millis, DateTimeZone.UTC).getMillisOfSecond();
   }
 
+  @ScalarFunction
+  public static int[] millisecondMV(long[] millis) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = millisecond(millis[i]);
+    }
+    return results;
+  }
+
   /**
    * Returns the millisecond of the second from the given epoch millis and timezone id. The value ranges from 0 to 999.
    */
   @ScalarFunction
   public static int millisecond(long millis, String timezoneId) {
     return new DateTime(millis, DateTimeZone.forID(timezoneId)).getMillisOfSecond();
+  }
+
+  @ScalarFunction
+  public static int[] millisecondMV(long[] millis, String timezoneId) {
+    int[] results = new int[millis.length];
+    for (int i = 0; i < millis.length; i++) {
+      results[i] = millisecond(millis[i], timezoneId);
+    }
+    return results;
   }
 
   /**
@@ -557,7 +1082,17 @@ public class DateTimeFunctions {
    */
   @ScalarFunction
   public static long dateTrunc(String unit, long timeValue) {
-    return dateTrunc(unit, timeValue, TimeUnit.MILLISECONDS, ISOChronology.getInstanceUTC(), TimeUnit.MILLISECONDS);
+    return dateTrunc(unit, timeValue, TimeUnit.MILLISECONDS.name(), ISOChronology.getInstanceUTC(),
+        TimeUnit.MILLISECONDS.name());
+  }
+
+  @ScalarFunction
+  public static long[] dateTruncMV(String unit, long[] timeValue) {
+    long[] results = new long[timeValue.length];
+    for (int i = 0; i < timeValue.length; i++) {
+      results[i] = dateTrunc(unit, timeValue[i]);
+    }
+    return results;
   }
 
   /**
@@ -565,13 +1100,21 @@ public class DateTimeFunctions {
    *
    * @param unit truncate to unit (millisecond, second, minute, hour, day, week, month, quarter, year)
    * @param timeValue value to truncate
-   * @param inputTimeUnitStr TimeUnit of value, expressed in Java's joda TimeUnit
+   * @param inputTimeUnit TimeUnit of value, expressed in Java's joda TimeUnit
    * @return truncated timeValue in same TimeUnit as the input
    */
   @ScalarFunction
-  public static long dateTrunc(String unit, long timeValue, String inputTimeUnitStr) {
-    TimeUnit inputTimeUnit = TimeUnit.valueOf(inputTimeUnitStr);
+  public static long dateTrunc(String unit, long timeValue, String inputTimeUnit) {
     return dateTrunc(unit, timeValue, inputTimeUnit, ISOChronology.getInstanceUTC(), inputTimeUnit);
+  }
+
+  @ScalarFunction
+  public static long[] dateTruncMV(String unit, long[] timeValue, String inputTimeUnit) {
+    long[] results = new long[timeValue.length];
+    for (int i = 0; i < timeValue.length; i++) {
+      results[i] = dateTrunc(unit, timeValue[i], inputTimeUnit);
+    }
+    return results;
   }
 
   /**
@@ -579,39 +1122,96 @@ public class DateTimeFunctions {
    *
    * @param unit truncate to unit (millisecond, second, minute, hour, day, week, month, quarter, year)
    * @param timeValue value to truncate
-   * @param inputTimeUnitStr TimeUnit of value, expressed in Java's joda TimeUnit
+   * @param inputTimeUnit TimeUnit of value, expressed in Java's joda TimeUnit
    * @param timeZone timezone of the input
    * @return truncated timeValue in same TimeUnit as the input
    */
   @ScalarFunction
-  public static long dateTrunc(String unit, long timeValue, String inputTimeUnitStr, String timeZone) {
-    TimeUnit inputTimeUnit = TimeUnit.valueOf(inputTimeUnitStr);
+  public static long dateTrunc(String unit, long timeValue, String inputTimeUnit, String timeZone) {
     return dateTrunc(unit, timeValue, inputTimeUnit, DateTimeUtils.getChronology(TimeZoneKey.getTimeZoneKey(timeZone)),
         inputTimeUnit);
   }
 
+  @ScalarFunction
+  public static long[] dateTruncMV(String unit, long[] timeValue, String inputTimeUnit, String timeZone) {
+    long[] results = new long[timeValue.length];
+    for (int i = 0; i < timeValue.length; i++) {
+      results[i] = dateTrunc(unit, timeValue[i], inputTimeUnit, timeZone);
+    }
+    return results;
+  }
+
   /**
    * The sql compatible date_trunc function for epoch time.
    *
    * @param unit truncate to unit (millisecond, second, minute, hour, day, week, month, quarter, year)
    * @param timeValue value to truncate
-   * @param inputTimeUnitStr TimeUnit of value, expressed in Java's joda TimeUnit
+   * @param inputTimeUnit TimeUnit of value, expressed in Java's joda TimeUnit
    * @param timeZone timezone of the input
-   * @param outputTimeUnitStr TimeUnit to convert the output to
+   * @param outputTimeUnit TimeUnit to convert the output to
    * @return truncated timeValue
    *
    */
   @ScalarFunction
-  public static long dateTrunc(String unit, long timeValue, String inputTimeUnitStr, String timeZone,
-      String outputTimeUnitStr) {
-    return dateTrunc(unit, timeValue, TimeUnit.valueOf(inputTimeUnitStr),
-        DateTimeUtils.getChronology(TimeZoneKey.getTimeZoneKey(timeZone)), TimeUnit.valueOf(outputTimeUnitStr));
+  public static long dateTrunc(String unit, long timeValue, String inputTimeUnit, String timeZone,
+      String outputTimeUnit) {
+    return dateTrunc(unit, timeValue, inputTimeUnit, DateTimeUtils.getChronology(TimeZoneKey.getTimeZoneKey(timeZone)),
+        outputTimeUnit);
   }
 
-  private static long dateTrunc(String unit, long timeValue, TimeUnit inputTimeUnit, ISOChronology chronology,
-      TimeUnit outputTimeUnit) {
-    return outputTimeUnit.convert(DateTimeUtils.getTimestampField(chronology, unit)
-        .roundFloor(TimeUnit.MILLISECONDS.convert(timeValue, inputTimeUnit)), TimeUnit.MILLISECONDS);
+  @ScalarFunction
+  public static long[] dateTruncMV(String unit, long[] timeValue, String inputTimeUnit, String timeZone,
+      String outputTimeUnit) {
+    long[] results = new long[timeValue.length];
+    for (int i = 0; i < timeValue.length; i++) {
+      results[i] = dateTrunc(unit, timeValue[i], inputTimeUnit, timeZone, outputTimeUnit);
+    }
+    return results;
+  }
+
+  private static long dateTrunc(String unit, long timeValue, String inputTimeUnit, ISOChronology chronology,
+      String outputTimeUnit) {
+    return TimeUnit.valueOf(outputTimeUnit.toUpperCase()).convert(DateTimeUtils.getTimestampField(chronology, unit)
+            .roundFloor(TimeUnit.MILLISECONDS.convert(timeValue, TimeUnit.valueOf(inputTimeUnit.toUpperCase()))),
+        TimeUnit.MILLISECONDS);
+  }
+
+  /**
+   * Aligns a given timestamp to the nearest bin defined by the specified duration string, starting from an origin
+   * timestamp.
+   *
+   * @param binWidthStr The width of each bin in Period format (e.g., "15m" for 15 minutes, "2d" for 2 days).
+   * @param sourceTimestamp The timestamp to be aligned.
+   * @param originTimestamp The origin timestamp from which binning starts.
+   * @return A java.sql.Timestamp aligned to the nearest bin.
+   */
+  @ScalarFunction
+  public static Timestamp dateBin(String binWidthStr, Timestamp sourceTimestamp, Timestamp originTimestamp) {
+    long originMillis = originTimestamp.getTime();
+    long sourceMillis = sourceTimestamp.getTime();
+
+    // Calculate the offset from the origin and adjust to the nearest bin
+    long binnedMillis = dateBin(binWidthStr, sourceMillis, originMillis);
+    return new Timestamp(binnedMillis);
+  }
+
+  /**
+   * Utility method to aligns a given timestamp in epoch Millis to the nearest bin defined by the specified
+   * duration string, starting from an origin timestamp in epoch Millis.
+   *
+   * @param binWidthStr The width of each bin as an ISO-8601 duration string (e.g., "PT15M" for 15 minutes).
+   * @param sourceMillisEpoch The source time in epoch millis to be aligned.
+   * @param originMillisEpoch The origin time in epoch millis from which binning starts.
+   * @return A java.sql.Timestamp aligned to the nearest bin.
+   */
+  public static long dateBin(String binWidthStr, long sourceMillisEpoch, long originMillisEpoch) {
+    long binWidthMillis = TimeUtils.convertPeriodToMillis(binWidthStr);
+    //long binWidthMillis = binWidth.toMillis();
+    long offsetFromOrigin = sourceMillisEpoch - originMillisEpoch;
+    long binCount = offsetFromOrigin / binWidthMillis;
+
+    // Calculate the start of the bin for the given timestamp
+    return originMillisEpoch + binWidthMillis * binCount;
   }
 
   /**
@@ -629,6 +1229,15 @@ public class DateTimeFunctions {
     return millis;
   }
 
+  @ScalarFunction(names = {"timestampAddMV", "dateAddMV"})
+  public static long[] timestampAddMV(String unit, long interval, long[] timestamp) {
+    long[] results = new long[timestamp.length];
+    for (int i = 0; i < timestamp.length; i++) {
+      results[i] = timestampAdd(unit, interval, timestamp[i]);
+    }
+    return results;
+  }
+
   /**
    * Get difference between two timestamps and return the result in the specified timeunit.
    * e.g. timestampDiff('days', ago('10D'), ago('2D')) will return 8 i.e. 8 days
@@ -641,5 +1250,28 @@ public class DateTimeFunctions {
   public static long timestampDiff(String unit, long timestamp1, long timestamp2) {
     ISOChronology chronology = ISOChronology.getInstanceUTC();
     return DateTimeUtils.getTimestampField(chronology, unit).getDifferenceAsLong(timestamp2, timestamp1);
+  }
+
+  @ScalarFunction(names = {"timestampDiffMV", "dateDiffMV"})
+  public static long[] timestampDiffMV(String unit, long[] timestamp1, long timestamp2) {
+    long[] results = new long[timestamp1.length];
+    for (int i = 0; i < timestamp1.length; i++) {
+      results[i] = timestampDiff(unit, timestamp1[i], timestamp2);
+    }
+    return results;
+  }
+
+  @ScalarFunction(names = {"timestampDiffMVReverse", "dateDiffMVReverse"})
+  public static long[] timestampDiffMVReverse(String unit, long timestamp1, long[] timestamp2) {
+    long[] results = new long[timestamp2.length];
+    for (int i = 0; i < timestamp2.length; i++) {
+      results[i] = timestampDiff(unit, timestamp1, timestamp2[i]);
+    }
+    return results;
+  }
+
+  @ScalarFunction
+  public static int extract(String interval, long timestamp) {
+    return DateTimeUtils.extract(DateTimeUtils.ExtractFieldType.valueOf(interval), timestamp);
   }
 }

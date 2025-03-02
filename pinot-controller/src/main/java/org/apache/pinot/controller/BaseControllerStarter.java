@@ -26,6 +26,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -34,11 +35,17 @@ import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
-import org.apache.commons.httpclient.HttpConnectionManager;
-import org.apache.commons.httpclient.MultiThreadedHttpConnectionManager;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.tuple.Pair;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
+import org.apache.hc.client5.http.io.HttpClientConnectionManager;
+import org.apache.hc.core5.http.io.SocketConfig;
+import org.apache.hc.core5.util.Timeout;
+import org.apache.helix.AccessOption;
 import org.apache.helix.HelixManager;
 import org.apache.helix.HelixManagerFactory;
 import org.apache.helix.InstanceType;
@@ -49,64 +56,92 @@ import org.apache.helix.model.ConstraintItem;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.helix.model.MasterSlaveSMD;
 import org.apache.helix.model.Message;
+import org.apache.helix.store.zk.ZkHelixPropertyStore;
 import org.apache.helix.task.TaskDriver;
+import org.apache.helix.zookeeper.datamodel.ZNRecord;
 import org.apache.pinot.common.Utils;
 import org.apache.pinot.common.config.TlsConfig;
 import org.apache.pinot.common.function.FunctionRegistry;
+import org.apache.pinot.common.http.PoolingHttpClientConnectionManagerHelper;
+import org.apache.pinot.common.metadata.ZKMetadataProvider;
 import org.apache.pinot.common.metrics.ControllerGauge;
 import org.apache.pinot.common.metrics.ControllerMeter;
 import org.apache.pinot.common.metrics.ControllerMetrics;
+import org.apache.pinot.common.metrics.ControllerTimer;
 import org.apache.pinot.common.metrics.ValidationMetrics;
 import org.apache.pinot.common.minion.InMemoryTaskManagerStatusCache;
 import org.apache.pinot.common.minion.TaskGeneratorMostRecentRunInfo;
 import org.apache.pinot.common.minion.TaskManagerStatusCache;
-import org.apache.pinot.common.utils.LoggerFileServer;
+import org.apache.pinot.common.utils.PinotAppConfigs;
+import org.apache.pinot.common.utils.SchemaUtils;
 import org.apache.pinot.common.utils.ServiceStartableUtils;
 import org.apache.pinot.common.utils.ServiceStatus;
-import org.apache.pinot.common.utils.TlsUtils;
 import org.apache.pinot.common.utils.fetcher.SegmentFetcherFactory;
 import org.apache.pinot.common.utils.helix.HelixHelper;
+import org.apache.pinot.common.utils.helix.IdealStateGroupCommit;
 import org.apache.pinot.common.utils.helix.LeadControllerUtils;
+import org.apache.pinot.common.utils.log.DummyLogFileServer;
+import org.apache.pinot.common.utils.log.LocalLogFileServer;
+import org.apache.pinot.common.utils.log.LogFileServer;
+import org.apache.pinot.common.utils.tls.PinotInsecureMode;
+import org.apache.pinot.common.utils.tls.TlsUtils;
 import org.apache.pinot.common.version.PinotVersion;
 import org.apache.pinot.controller.api.ControllerAdminApiApplication;
 import org.apache.pinot.controller.api.access.AccessControlFactory;
 import org.apache.pinot.controller.api.events.MetadataEventNotifierFactory;
 import org.apache.pinot.controller.api.resources.ControllerFilePathProvider;
 import org.apache.pinot.controller.api.resources.InvalidControllerConfigException;
+import org.apache.pinot.controller.cursors.ResponseStoreCleaner;
 import org.apache.pinot.controller.helix.RealtimeConsumerMonitor;
 import org.apache.pinot.controller.helix.SegmentStatusChecker;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
-import org.apache.pinot.controller.helix.core.minion.MinionInstancesCleanupTask;
+import org.apache.pinot.controller.helix.core.cleanup.StaleInstancesCleanupTask;
 import org.apache.pinot.controller.helix.core.minion.PinotHelixTaskResourceManager;
 import org.apache.pinot.controller.helix.core.minion.PinotTaskManager;
 import org.apache.pinot.controller.helix.core.minion.TaskMetricsEmitter;
 import org.apache.pinot.controller.helix.core.realtime.PinotLLCRealtimeSegmentManager;
-import org.apache.pinot.controller.helix.core.realtime.PinotRealtimeSegmentManager;
+import org.apache.pinot.controller.helix.core.realtime.SegmentCompletionConfig;
 import org.apache.pinot.controller.helix.core.realtime.SegmentCompletionManager;
+import org.apache.pinot.controller.helix.core.rebalance.RebalanceChecker;
+import org.apache.pinot.controller.helix.core.rebalance.tenant.DefaultTenantRebalancer;
+import org.apache.pinot.controller.helix.core.rebalance.tenant.TenantRebalancer;
 import org.apache.pinot.controller.helix.core.relocation.SegmentRelocator;
 import org.apache.pinot.controller.helix.core.retention.RetentionManager;
 import org.apache.pinot.controller.helix.core.statemodel.LeadControllerResourceMasterSlaveStateModelFactory;
 import org.apache.pinot.controller.helix.core.util.HelixSetupUtils;
 import org.apache.pinot.controller.helix.starter.HelixConfig;
 import org.apache.pinot.controller.tuner.TableConfigTunerRegistry;
+import org.apache.pinot.controller.util.TableSizeReader;
 import org.apache.pinot.controller.validation.BrokerResourceValidationManager;
+import org.apache.pinot.controller.validation.DiskUtilizationChecker;
 import org.apache.pinot.controller.validation.OfflineSegmentIntervalChecker;
 import org.apache.pinot.controller.validation.RealtimeSegmentValidationManager;
+import org.apache.pinot.controller.validation.ResourceUtilizationChecker;
+import org.apache.pinot.controller.validation.ResourceUtilizationManager;
+import org.apache.pinot.controller.validation.StorageQuotaChecker;
 import org.apache.pinot.core.periodictask.PeriodicTask;
 import org.apache.pinot.core.periodictask.PeriodicTaskScheduler;
 import org.apache.pinot.core.query.executor.sql.SqlQueryExecutor;
+import org.apache.pinot.core.segment.processing.lifecycle.PinotSegmentLifecycleEventListenerManager;
 import org.apache.pinot.core.transport.ListenerConfig;
 import org.apache.pinot.core.util.ListenerConfigUtil;
+import org.apache.pinot.segment.local.utils.TableConfigUtils;
+import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.crypt.PinotCrypterFactory;
+import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.filesystem.PinotFSFactory;
 import org.apache.pinot.spi.metrics.PinotMetricUtils;
 import org.apache.pinot.spi.metrics.PinotMetricsRegistry;
 import org.apache.pinot.spi.services.ServiceRole;
 import org.apache.pinot.spi.services.ServiceStartable;
+import org.apache.pinot.spi.stream.StreamConfig;
+import org.apache.pinot.spi.stream.StreamConfigProperties;
 import org.apache.pinot.spi.utils.CommonConstants;
+import org.apache.pinot.spi.utils.IngestionConfigUtils;
 import org.apache.pinot.spi.utils.InstanceTypeUtils;
 import org.apache.pinot.spi.utils.NetUtils;
+import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.apache.pinot.sql.parsers.rewriter.QueryRewriterFactory;
 import org.glassfish.hk2.utilities.binding.AbstractBinder;
 import org.slf4j.Logger;
@@ -146,6 +181,7 @@ public abstract class BaseControllerStarter implements ServiceStartable {
   protected HelixManager _helixParticipantManager;
   protected PinotMetricsRegistry _metricsRegistry;
   protected ControllerMetrics _controllerMetrics;
+  protected ValidationMetrics _validationMetrics;
   protected SqlQueryExecutor _sqlQueryExecutor;
   // Can only be constructed after resource manager getting started
   protected OfflineSegmentIntervalChecker _offlineSegmentIntervalChecker;
@@ -154,19 +190,25 @@ public abstract class BaseControllerStarter implements ServiceStartable {
   protected SegmentRelocator _segmentRelocator;
   protected RetentionManager _retentionManager;
   protected SegmentStatusChecker _segmentStatusChecker;
+  protected RebalanceChecker _rebalanceChecker;
   protected RealtimeConsumerMonitor _realtimeConsumerMonitor;
   protected PinotTaskManager _taskManager;
   protected TaskManagerStatusCache<TaskGeneratorMostRecentRunInfo> _taskManagerStatusCache;
   protected PeriodicTaskScheduler _periodicTaskScheduler;
   protected PinotHelixTaskResourceManager _helixTaskResourceManager;
-  protected PinotRealtimeSegmentManager _realtimeSegmentsManager;
   protected PinotLLCRealtimeSegmentManager _pinotLLCRealtimeSegmentManager;
   protected SegmentCompletionManager _segmentCompletionManager;
   protected LeadControllerManager _leadControllerManager;
   protected List<ServiceStatus.ServiceStatusCallback> _serviceStatusCallbackList;
-  protected MinionInstancesCleanupTask _minionInstancesCleanupTask;
+  protected StaleInstancesCleanupTask _staleInstancesCleanupTask;
   protected TaskMetricsEmitter _taskMetricsEmitter;
-  protected MultiThreadedHttpConnectionManager _connectionManager;
+  protected PoolingHttpClientConnectionManager _connectionManager;
+  protected TenantRebalancer _tenantRebalancer;
+  protected ExecutorService _tenantRebalanceExecutorService;
+  protected TableSizeReader _tableSizeReader;
+  protected StorageQuotaChecker _storageQuotaChecker;
+  protected DiskUtilizationChecker _diskUtilizationChecker;
+  protected ResourceUtilizationManager _resourceUtilizationManager;
 
   @Override
   public void init(PinotConfiguration pinotConfiguration)
@@ -176,7 +218,12 @@ public abstract class BaseControllerStarter implements ServiceStartable {
     _helixClusterName = _config.getHelixClusterName();
     ServiceStartableUtils.applyClusterConfig(_config, _helixZkURL, _helixClusterName, ServiceRole.CONTROLLER);
 
+    PinotInsecureMode.setPinotInInsecureMode(Boolean.valueOf(
+        _config.getProperty(CommonConstants.CONFIG_OF_PINOT_INSECURE_MODE,
+            CommonConstants.DEFAULT_PINOT_INSECURE_MODE)));
+
     setupHelixSystemProperties();
+    IdealStateGroupCommit.setMinNumCharsInISToTurnOnCompression(_config.getMinNumCharsInISToTurnOnCompression());
     _listenerConfigs = ListenerConfigUtil.buildControllerConfigs(_config);
     _controllerMode = _config.getControllerMode();
     inferHostnameIfNeeded(_config);
@@ -209,17 +256,29 @@ public abstract class BaseControllerStarter implements ServiceStartable {
       // Initialize FunctionRegistry before starting the admin application (PinotQueryResource requires it to compile
       // queries)
       FunctionRegistry.init();
-      _adminApp = new ControllerAdminApiApplication(_config);
+      _adminApp = createControllerAdminApp();
+      // This executor service is used to do async tasks from multiget util or table rebalancing.
+      _executorService = createExecutorService(_config.getControllerExecutorNumThreads(), "async-task-thread-%d");
       // Do not use this before the invocation of {@link PinotHelixResourceManager::start()}, which happens in {@link
       // ControllerStarter::start()}
-      _helixResourceManager = new PinotHelixResourceManager(_config);
-      // This executor service is used to do async tasks from multiget util or table rebalancing.
-      _executorService =
-          Executors.newCachedThreadPool(new ThreadFactoryBuilder().setNameFormat("async-task-thread-%d").build());
+      _helixResourceManager = createHelixResourceManager();
+      _tenantRebalanceExecutorService = createExecutorService(_config.getControllerExecutorRebalanceNumThreads(),
+          "tenant-rebalance-thread-%d");
+      _tenantRebalancer = new DefaultTenantRebalancer(_helixResourceManager, _tenantRebalanceExecutorService);
     }
 
     // Initialize the table config tuner registry.
     TableConfigTunerRegistry.init(_config.getTableConfigTunerPackages());
+
+    TableConfigUtils.setDisableGroovy(_config.isDisableIngestionGroovy());
+    TableConfigUtils.setEnforcePoolBasedAssignment(_config.isEnforcePoolBasedAssignmentEnabled());
+  }
+
+  // If thread pool size is not configured executor will use cached thread pool
+  private ExecutorService createExecutorService(int numThreadPool, String threadNameFormat) {
+    ThreadFactory threadFactory = new ThreadFactoryBuilder().setNameFormat(threadNameFormat).build();
+    return (numThreadPool <= 0) ? Executors.newCachedThreadPool(threadFactory)
+        : Executors.newFixedThreadPool(numThreadPool, threadFactory);
   }
 
   private void inferHostnameIfNeeded(ControllerConf config) {
@@ -240,24 +299,37 @@ public abstract class BaseControllerStarter implements ServiceStartable {
     // NOTE: Helix will disconnect the manager and disable the instance if it detects flapping (too frequent disconnect
     // from ZooKeeper). Setting flapping time window to a small value can avoid this from happening. Helix ignores the
     // non-positive value, so set the default value as 1.
-    System.setProperty(SystemPropertyKeys.FLAPPING_TIME_WINDOW, _config
-        .getProperty(CommonConstants.Helix.CONFIG_OF_CONTROLLER_FLAPPING_TIME_WINDOW_MS,
+    System.setProperty(SystemPropertyKeys.FLAPPING_TIME_WINDOW,
+        _config.getProperty(CommonConstants.Helix.CONFIG_OF_CONTROLLER_FLAPPING_TIME_WINDOW_MS,
             CommonConstants.Helix.DEFAULT_FLAPPING_TIME_WINDOW_MS));
   }
 
   private void setupHelixClusterConstraints() {
-    String maxStateTransitions = _config
-        .getProperty(CommonConstants.Helix.CONFIG_OF_HELIX_INSTANCE_MAX_STATE_TRANSITIONS,
+    String maxStateTransitions =
+        _config.getProperty(CommonConstants.Helix.CONFIG_OF_HELIX_INSTANCE_MAX_STATE_TRANSITIONS,
             CommonConstants.Helix.DEFAULT_HELIX_INSTANCE_MAX_STATE_TRANSITIONS);
     Map<ClusterConstraints.ConstraintAttribute, String> constraintAttributes = new HashMap<>();
     constraintAttributes.put(ClusterConstraints.ConstraintAttribute.INSTANCE, ".*");
-    constraintAttributes
-        .put(ClusterConstraints.ConstraintAttribute.MESSAGE_TYPE, Message.MessageType.STATE_TRANSITION.name());
+    constraintAttributes.put(ClusterConstraints.ConstraintAttribute.MESSAGE_TYPE,
+        Message.MessageType.STATE_TRANSITION.name());
     ConstraintItem constraintItem = new ConstraintItem(constraintAttributes, maxStateTransitions);
 
     _helixControllerManager.getClusterManagmentTool()
         .setConstraint(_helixClusterName, ClusterConstraints.ConstraintType.MESSAGE_CONSTRAINT,
             MAX_STATE_TRANSITIONS_PER_INSTANCE, constraintItem);
+  }
+
+  /**
+   * Creates an instance of PinotHelixResourceManager.
+   * <p>
+   * This method can be overridden by subclasses to instantiate the object
+   * with subclasses of PinotHelixResourceManager.
+   * By default, it returns a new PinotHelixResourceManager using the current configuration.
+   *
+   * @return A new instance of PinotHelixResourceManager.
+   */
+  protected PinotHelixResourceManager createHelixResourceManager() {
+    return new PinotHelixResourceManager(_config, _executorService);
   }
 
   public PinotHelixResourceManager getHelixResourceManager() {
@@ -295,8 +367,8 @@ public abstract class BaseControllerStarter implements ServiceStartable {
     return _taskManager;
   }
 
-  public MinionInstancesCleanupTask getMinionInstancesCleanupTask() {
-    return _minionInstancesCleanupTask;
+  public StaleInstancesCleanupTask getStaleInstancesCleanupTask() {
+    return _staleInstancesCleanupTask;
   }
 
   @Override
@@ -310,13 +382,15 @@ public abstract class BaseControllerStarter implements ServiceStartable {
   }
 
   @Override
-  public PinotConfiguration getConfig() {
+  public ControllerConf getConfig() {
     return _config;
   }
 
   @Override
   public void start() {
     LOGGER.info("Starting Pinot controller in mode: {}. (Version: {})", _controllerMode.name(), PinotVersion.VERSION);
+    LOGGER.info("Controller configs: {}", new PinotAppConfigs(getConfig()).toJSONString());
+    long startTimeMs = System.currentTimeMillis();
     Utils.logVersions();
 
     // Set up controller metrics
@@ -334,12 +408,14 @@ public abstract class BaseControllerStarter implements ServiceStartable {
         setUpHelixController();
         break;
       default:
-        LOGGER.error("Invalid mode: " + _controllerMode);
+        LOGGER.error("Invalid mode: {}", _controllerMode);
         break;
     }
 
     ServiceStatus.setServiceStatusCallback(_helixParticipantInstanceId,
         new ServiceStatus.MultipleCallbackServiceStatusCallback(_serviceStatusCallbackList));
+    _controllerMetrics.addTimedValue(ControllerTimer.STARTUP_SUCCESS_DURATION_MS,
+        System.currentTimeMillis() - startTimeMs, TimeUnit.MILLISECONDS);
   }
 
   private void setUpHelixController() {
@@ -365,15 +441,15 @@ public abstract class BaseControllerStarter implements ServiceStartable {
   private void setUpPinotController() {
     // install default SSL context if necessary (even if not force-enabled everywhere)
     TlsConfig tlsDefaults = TlsUtils.extractTlsConfig(_config, ControllerConf.CONTROLLER_TLS_PREFIX);
-    if (StringUtils.isNotBlank(tlsDefaults.getKeyStorePath()) || StringUtils
-        .isNotBlank(tlsDefaults.getTrustStorePath())) {
+    if (StringUtils.isNotBlank(tlsDefaults.getKeyStorePath()) || StringUtils.isNotBlank(
+        tlsDefaults.getTrustStorePath())) {
       LOGGER.info("Installing default SSL context for any client requests");
       TlsUtils.installDefaultSSLSocketFactory(tlsDefaults);
     }
 
     // Set up Pinot cluster in Helix if needed
     HelixSetupUtils.setupPinotCluster(_helixClusterName, _helixZkURL, _isUpdateStateModel, _enableBatchMessageMode,
-        _config.getLeadControllerResourceRebalanceStrategy());
+        _config);
 
     // Start all components
     initPinotFSFactory();
@@ -386,8 +462,9 @@ public abstract class BaseControllerStarter implements ServiceStartable {
         _config.getProperty(CommonConstants.Controller.CONFIG_OF_CONTROLLER_QUERY_REWRITER_CLASS_NAMES));
 
     LOGGER.info("Initializing Helix participant manager");
-    _helixParticipantManager = HelixManagerFactory
-        .getZKHelixManager(_helixClusterName, _helixParticipantInstanceId, InstanceType.PARTICIPANT, _helixZkURL);
+    _helixParticipantManager =
+        HelixManagerFactory.getZKHelixManager(_helixClusterName, _helixParticipantInstanceId, InstanceType.PARTICIPANT,
+            _helixZkURL);
 
     // LeadControllerManager needs to be initialized before registering as Helix participant.
     LOGGER.info("Initializing lead controller manager");
@@ -403,7 +480,10 @@ public abstract class BaseControllerStarter implements ServiceStartable {
     _leadControllerManager.start();
 
     LOGGER.info("Starting Pinot Helix resource manager and connecting to Zookeeper");
-    _helixResourceManager.start(_helixParticipantManager);
+    _helixResourceManager.start(_helixParticipantManager, _controllerMetrics);
+
+    // Initialize segment lifecycle event listeners
+    PinotSegmentLifecycleEventListenerManager.getInstance().init(_helixParticipantManager);
 
     LOGGER.info("Starting task resource manager");
     _helixTaskResourceManager =
@@ -412,26 +492,32 @@ public abstract class BaseControllerStarter implements ServiceStartable {
 
     // Helix resource manager must be started in order to create PinotLLCRealtimeSegmentManager
     LOGGER.info("Starting realtime segment manager");
-    _pinotLLCRealtimeSegmentManager =
-        new PinotLLCRealtimeSegmentManager(_helixResourceManager, _config, _controllerMetrics);
+    _pinotLLCRealtimeSegmentManager = createPinotLLCRealtimeSegmentManager();
     // TODO: Need to put this inside HelixResourceManager when HelixControllerLeadershipManager is removed.
     _helixResourceManager.registerPinotLLCRealtimeSegmentManager(_pinotLLCRealtimeSegmentManager);
+
+    SegmentCompletionConfig segmentCompletionConfig = new SegmentCompletionConfig(_config);
+
     _segmentCompletionManager =
         new SegmentCompletionManager(_helixParticipantManager, _pinotLLCRealtimeSegmentManager, _controllerMetrics,
-            _leadControllerManager, _config.getSegmentCommitTimeoutSeconds());
+            _leadControllerManager, _config.getSegmentCommitTimeoutSeconds(), segmentCompletionConfig);
 
-    if (_config.getHLCTablesAllowed()) {
-      LOGGER.info("Realtime tables with High Level consumers will be supported");
-      _realtimeSegmentsManager = new PinotRealtimeSegmentManager(_helixResourceManager, _leadControllerManager);
-      _realtimeSegmentsManager.start(_controllerMetrics);
-    } else {
-      LOGGER.info("Realtime tables with High Level consumers will NOT be supported");
-      _realtimeSegmentsManager = null;
-    }
     _sqlQueryExecutor = new SqlQueryExecutor(_config.generateVipUrl());
 
-    _connectionManager = new MultiThreadedHttpConnectionManager();
-    _connectionManager.getParams().setConnectionTimeout(_config.getServerAdminRequestTimeoutSeconds() * 1000);
+    _connectionManager = PoolingHttpClientConnectionManagerHelper.createWithSocketFactory();
+    _connectionManager.setDefaultSocketConfig(
+        SocketConfig.custom()
+            .setSoTimeout(Timeout.of(_config.getServerAdminRequestTimeoutSeconds() * 1000, TimeUnit.MILLISECONDS))
+            .build());
+    _tableSizeReader =
+        new TableSizeReader(_executorService, _connectionManager, _controllerMetrics, _helixResourceManager,
+            _leadControllerManager);
+    _helixResourceManager.registerTableSizeReader(_tableSizeReader);
+    _storageQuotaChecker = new StorageQuotaChecker(_tableSizeReader, _controllerMetrics, _leadControllerManager,
+        _helixResourceManager, _config);
+
+    _diskUtilizationChecker = new DiskUtilizationChecker(_helixResourceManager, _config);
+    _resourceUtilizationManager = new ResourceUtilizationManager(_config, _diskUtilizationChecker);
 
     // Setting up periodic tasks
     List<PeriodicTask> controllerPeriodicTasks = setupControllerPeriodicTasks();
@@ -456,11 +542,12 @@ public abstract class BaseControllerStarter implements ServiceStartable {
     }
 
     final MetadataEventNotifierFactory metadataEventNotifierFactory =
-        MetadataEventNotifierFactory.loadFactory(_config.subset(METADATA_EVENT_NOTIFIER_PREFIX));
+        MetadataEventNotifierFactory.loadFactory(_config.subset(METADATA_EVENT_NOTIFIER_PREFIX), _helixResourceManager);
 
     LOGGER.info("Controller download url base: {}", _config.generateVipUrl());
     LOGGER.info("Injecting configuration and resource managers to the API context");
     // register all the controller objects for injection to jersey resources
+    Instant controllerStartTime = Instant.now();
     _adminApp.registerBinder(new AbstractBinder() {
       @Override
       protected void configure() {
@@ -471,7 +558,7 @@ public abstract class BaseControllerStarter implements ServiceStartable {
         bind(_segmentCompletionManager).to(SegmentCompletionManager.class);
         bind(_taskManager).to(PinotTaskManager.class);
         bind(_taskManagerStatusCache).to(TaskManagerStatusCache.class);
-        bind(_connectionManager).to(HttpConnectionManager.class);
+        bind(_connectionManager).to(HttpClientConnectionManager.class);
         bind(_executorService).to(Executor.class);
         bind(_controllerMetrics).to(ControllerMetrics.class);
         bind(accessControlFactory).to(AccessControlFactory.class);
@@ -480,15 +567,47 @@ public abstract class BaseControllerStarter implements ServiceStartable {
         bind(_periodicTaskScheduler).to(PeriodicTaskScheduler.class);
         bind(_sqlQueryExecutor).to(SqlQueryExecutor.class);
         bind(_pinotLLCRealtimeSegmentManager).to(PinotLLCRealtimeSegmentManager.class);
+        bind(_tenantRebalancer).to(TenantRebalancer.class);
+        bind(_tableSizeReader).to(TableSizeReader.class);
+        bind(_storageQuotaChecker).to(StorageQuotaChecker.class);
+        bind(_diskUtilizationChecker).to(DiskUtilizationChecker.class);
+        bind(_resourceUtilizationManager).to(ResourceUtilizationManager.class);
+        bind(controllerStartTime).named(ControllerAdminApiApplication.START_TIME);
         String loggerRootDir = _config.getProperty(CommonConstants.Controller.CONFIG_OF_LOGGER_ROOT_DIR);
         if (loggerRootDir != null) {
-          bind(new LoggerFileServer(loggerRootDir)).to(LoggerFileServer.class);
+          bind(new LocalLogFileServer(loggerRootDir)).to(LogFileServer.class);
+        } else {
+          bind(new DummyLogFileServer()).to(LogFileServer.class);
         }
       }
     });
 
     LOGGER.info("Starting controller admin application on: {}", ListenerConfigUtil.toString(_listenerConfigs));
     _adminApp.start(_listenerConfigs);
+    List<String> existingHlcTables = new ArrayList<>();
+    _helixResourceManager.getAllRealtimeTables().forEach(rt -> {
+      TableConfig tableConfig = _helixResourceManager.getTableConfig(rt);
+      if (tableConfig != null) {
+        List<Map<String, String>> streamConfigMaps = IngestionConfigUtils.getStreamConfigMaps(tableConfig);
+        try {
+          for (Map<String, String> streamConfigMap : streamConfigMaps) {
+            StreamConfig.validateConsumerType(streamConfigMap.getOrDefault(StreamConfigProperties.STREAM_TYPE, "kafka"),
+                streamConfigMap);
+          }
+        } catch (Exception e) {
+          existingHlcTables.add(rt);
+        }
+      }
+    });
+    if (existingHlcTables.size() > 0) {
+      LOGGER.error("High Level Consumer (HLC) based realtime tables are no longer supported. Please delete the "
+          + "following HLC tables before proceeding: {}\n", existingHlcTables);
+      throw new RuntimeException("Unable to start controller due to existing HLC tables!");
+    }
+
+    // One time job to fix schema name in all tables
+    // This method can be removed after the next major release.
+    fixSchemaNameInTableConfig();
 
     _controllerMetrics.addCallbackGauge("dataDir.exists", () -> new File(_config.getDataDir()).exists() ? 1L : 0L);
     _controllerMetrics.addCallbackGauge("dataDir.fileOpLatencyMs", () -> {
@@ -512,6 +631,98 @@ public abstract class BaseControllerStarter implements ServiceStartable {
     });
 
     _serviceStatusCallbackList.add(generateServiceStatusCallback(_helixParticipantManager));
+  }
+
+  protected PinotLLCRealtimeSegmentManager createPinotLLCRealtimeSegmentManager() {
+    return new PinotLLCRealtimeSegmentManager(_helixResourceManager, _config, _controllerMetrics);
+  }
+
+  /**
+   * This method is used to fix table/schema names.
+   * TODO: in the next release, maybe 2.0.0, we can remove this method. Meanwhile we can delete the orphan schemas
+   * that has been existed longer than a certain time period.
+   *
+   */
+  @VisibleForTesting
+  public void fixSchemaNameInTableConfig() {
+    AtomicInteger misconfiguredTableCount = new AtomicInteger();
+    AtomicInteger tableWithoutSchemaCount = new AtomicInteger();
+    AtomicInteger fixedSchemaTableCount = new AtomicInteger();
+    AtomicInteger failedToCopySchemaCount = new AtomicInteger();
+    AtomicInteger failedToUpdateTableConfigCount = new AtomicInteger();
+    ZkHelixPropertyStore<ZNRecord> propertyStore = _helixResourceManager.getPropertyStore();
+
+    _helixResourceManager.getAllTables().forEach(tableNameWithType -> {
+      Pair<TableConfig, Integer> tableConfigWithVersion =
+          ZKMetadataProvider.getTableConfigWithVersion(propertyStore, tableNameWithType);
+      if (tableConfigWithVersion == null) {
+        // This might due to table deletion, just log it here.
+        LOGGER.warn("Failed to find table config for table: {}, the table likely already got deleted",
+            tableNameWithType);
+        return;
+      }
+      TableConfig tableConfig = tableConfigWithVersion.getLeft();
+      String rawTableName = TableNameBuilder.extractRawTableName(tableNameWithType);
+      String schemaPath = ZKMetadataProvider.constructPropertyStorePathForSchema(rawTableName);
+      boolean schemaExists = propertyStore.exists(schemaPath, AccessOption.PERSISTENT);
+      String existSchemaName = tableConfig.getValidationConfig().getSchemaName();
+      if (existSchemaName == null || existSchemaName.equals(rawTableName)) {
+        // Although the table config is valid, we still need to ensure the schema exists
+        if (!schemaExists) {
+          LOGGER.warn("Failed to find schema for table: {}", tableNameWithType);
+          tableWithoutSchemaCount.getAndIncrement();
+          return;
+        }
+        // Table config is already in good status
+        return;
+      }
+      misconfiguredTableCount.getAndIncrement();
+      if (schemaExists) {
+        // If a schema named `rawTableName` already exists, then likely this is a misconfiguration.
+        // Reset schema name in table config to null to let the table point to the existing schema.
+        LOGGER.warn("Schema: {} already exists, fix the schema name in table config from {} to null", rawTableName,
+            existSchemaName);
+      } else {
+        // Copy the schema current table referring to to `rawTableName` if it does not exist
+        Schema schema = _helixResourceManager.getSchema(existSchemaName);
+        if (schema == null) {
+          LOGGER.warn("Failed to find schema: {} for table: {}", existSchemaName, tableNameWithType);
+          tableWithoutSchemaCount.getAndIncrement();
+          return;
+        }
+        schema.setSchemaName(rawTableName);
+        if (propertyStore.create(schemaPath, SchemaUtils.toZNRecord(schema), AccessOption.PERSISTENT)) {
+          LOGGER.info("Copied schema: {} to {}", existSchemaName, rawTableName);
+        } else {
+          LOGGER.warn("Failed to copy schema: {} to {}", existSchemaName, rawTableName);
+          failedToCopySchemaCount.getAndIncrement();
+          return;
+        }
+      }
+      // Update table config to remove schema name
+      tableConfig.getValidationConfig().setSchemaName(null);
+      if (ZKMetadataProvider.setTableConfig(propertyStore, tableConfig, tableConfigWithVersion.getRight())) {
+        LOGGER.info("Removed schema name from table config for table: {}", tableNameWithType);
+        fixedSchemaTableCount.getAndIncrement();
+      } else {
+        LOGGER.warn("Failed to update table config for table: {}", tableNameWithType);
+        failedToUpdateTableConfigCount.getAndIncrement();
+      }
+    });
+    LOGGER.info(
+        "Found {} tables misconfigured, {} tables without schema. Successfully fixed schema for {} tables, failed to "
+            + "fix {} tables due to copy schema failure, failed to fix {} tables due to update table config failure.",
+        misconfiguredTableCount.get(), tableWithoutSchemaCount.get(), fixedSchemaTableCount.get(),
+        failedToCopySchemaCount.get(), failedToUpdateTableConfigCount.get());
+
+    _controllerMetrics.setValueOfGlobalGauge(ControllerGauge.MISCONFIGURED_SCHEMA_TABLE_COUNT,
+        misconfiguredTableCount.get());
+    _controllerMetrics.setValueOfGlobalGauge(ControllerGauge.TABLE_WITHOUT_SCHEMA_COUNT, tableWithoutSchemaCount.get());
+    _controllerMetrics.setValueOfGlobalGauge(ControllerGauge.FIXED_SCHEMA_TABLE_COUNT, fixedSchemaTableCount.get());
+    _controllerMetrics.setValueOfGlobalGauge(ControllerGauge.FAILED_TO_COPY_SCHEMA_COUNT,
+        failedToCopySchemaCount.get());
+    _controllerMetrics.setValueOfGlobalGauge(ControllerGauge.FAILED_TO_UPDATE_TABLE_CONFIG_COUNT,
+        failedToUpdateTableConfigCount.get());
   }
 
   private ServiceStatus.ServiceStatusCallback generateServiceStatusCallback(HelixManager helixManager) {
@@ -552,6 +763,8 @@ public abstract class BaseControllerStarter implements ServiceStartable {
     _controllerMetrics = new ControllerMetrics(_config.getMetricsPrefix(), _metricsRegistry);
     _controllerMetrics.initializeGlobalMeters();
     _controllerMetrics.setValueOfGlobalGauge(ControllerGauge.VERSION, PinotVersion.VERSION_METRIC_NAME, 1);
+    ControllerMetrics.register(_controllerMetrics);
+    _validationMetrics = new ValidationMetrics(_metricsRegistry);
   }
 
   private void initPinotFSFactory() {
@@ -660,7 +873,8 @@ public abstract class BaseControllerStarter implements ServiceStartable {
     _taskManagerStatusCache = getTaskManagerStatusCache();
     _taskManager =
         new PinotTaskManager(_helixTaskResourceManager, _helixResourceManager, _leadControllerManager, _config,
-            _controllerMetrics, _taskManagerStatusCache);
+            _controllerMetrics, _taskManagerStatusCache, _executorService, _connectionManager,
+            _resourceUtilizationManager);
     periodicTasks.add(_taskManager);
     _retentionManager =
         new RetentionManager(_helixResourceManager, _leadControllerManager, _config, _controllerMetrics);
@@ -671,28 +885,40 @@ public abstract class BaseControllerStarter implements ServiceStartable {
     periodicTasks.add(_offlineSegmentIntervalChecker);
     _realtimeSegmentValidationManager =
         new RealtimeSegmentValidationManager(_config, _helixResourceManager, _leadControllerManager,
-            _pinotLLCRealtimeSegmentManager, new ValidationMetrics(_metricsRegistry), _controllerMetrics);
+            _pinotLLCRealtimeSegmentManager, _validationMetrics, _controllerMetrics, _storageQuotaChecker,
+            _resourceUtilizationManager);
     periodicTasks.add(_realtimeSegmentValidationManager);
     _brokerResourceValidationManager =
         new BrokerResourceValidationManager(_config, _helixResourceManager, _leadControllerManager, _controllerMetrics);
     periodicTasks.add(_brokerResourceValidationManager);
     _segmentStatusChecker =
         new SegmentStatusChecker(_helixResourceManager, _leadControllerManager, _config, _controllerMetrics,
-            _executorService);
+            _tableSizeReader);
     periodicTasks.add(_segmentStatusChecker);
-    _realtimeConsumerMonitor = new RealtimeConsumerMonitor(_config, _helixResourceManager, _leadControllerManager,
-        _controllerMetrics, _executorService);
+    _rebalanceChecker = new RebalanceChecker(_helixResourceManager, _leadControllerManager, _config, _controllerMetrics,
+        _executorService);
+    periodicTasks.add(_rebalanceChecker);
+    _realtimeConsumerMonitor =
+        new RealtimeConsumerMonitor(_config, _helixResourceManager, _leadControllerManager, _controllerMetrics,
+            _executorService);
     periodicTasks.add(_realtimeConsumerMonitor);
     _segmentRelocator = new SegmentRelocator(_helixResourceManager, _leadControllerManager, _config, _controllerMetrics,
         _executorService, _connectionManager);
     periodicTasks.add(_segmentRelocator);
-    _minionInstancesCleanupTask =
-        new MinionInstancesCleanupTask(_helixResourceManager, _leadControllerManager, _config, _controllerMetrics);
-    periodicTasks.add(_minionInstancesCleanupTask);
+    _staleInstancesCleanupTask =
+        new StaleInstancesCleanupTask(_helixResourceManager, _leadControllerManager, _config, _controllerMetrics);
+    periodicTasks.add(_staleInstancesCleanupTask);
     _taskMetricsEmitter =
         new TaskMetricsEmitter(_helixResourceManager, _helixTaskResourceManager, _leadControllerManager, _config,
             _controllerMetrics);
     periodicTasks.add(_taskMetricsEmitter);
+    PeriodicTask responseStoreCleaner = new ResponseStoreCleaner(_config, _helixResourceManager, _leadControllerManager,
+        _controllerMetrics, _executorService, _connectionManager);
+    periodicTasks.add(responseStoreCleaner);
+    PeriodicTask resourceUtilizationChecker = new ResourceUtilizationChecker(_config, _connectionManager,
+        _controllerMetrics, _diskUtilizationChecker, _executorService, _helixResourceManager);
+    periodicTasks.add(resourceUtilizationChecker);
+
     return periodicTasks;
   }
 
@@ -744,11 +970,6 @@ public abstract class BaseControllerStarter implements ServiceStartable {
       LOGGER.info("Stopping Jersey admin API");
       _adminApp.stop();
 
-      if (_realtimeSegmentsManager != null) {
-        LOGGER.info("Stopping realtime segment manager");
-        _realtimeSegmentsManager.stop();
-      }
-
       LOGGER.info("Stopping resource manager");
       _helixResourceManager.stop();
 
@@ -756,11 +977,13 @@ public abstract class BaseControllerStarter implements ServiceStartable {
       _helixParticipantManager.disconnect();
 
       LOGGER.info("Shutting down http connection manager");
-      _connectionManager.shutdown();
+      _connectionManager.close();
 
       LOGGER.info("Shutting down executor service");
       _executorService.shutdownNow();
       _executorService.awaitTermination(10L, TimeUnit.SECONDS);
+      _tenantRebalanceExecutorService.shutdownNow();
+      _tenantRebalanceExecutorService.awaitTermination(10L, TimeUnit.SECONDS);
     } catch (final Exception e) {
       LOGGER.error("Caught exception while shutting down", e);
     }
@@ -773,5 +996,18 @@ public abstract class BaseControllerStarter implements ServiceStartable {
   @VisibleForTesting
   public ControllerMetrics getControllerMetrics() {
     return _controllerMetrics;
+  }
+
+  protected ControllerAdminApiApplication createControllerAdminApp() {
+    return new ControllerAdminApiApplication(_config);
+  }
+
+  /**
+   * Return the PeriodicTaskScheduler instance so that the periodic tasks can be tested.
+   * @return PeriodicTaskScheduler.
+   */
+  @VisibleForTesting
+  public PeriodicTaskScheduler getPeriodicTaskScheduler() {
+    return _periodicTaskScheduler;
   }
 }

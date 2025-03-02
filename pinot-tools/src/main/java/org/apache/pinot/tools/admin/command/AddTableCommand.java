@@ -23,17 +23,14 @@ import com.google.common.base.Preconditions;
 import java.io.File;
 import java.io.IOException;
 import java.util.concurrent.Callable;
-import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.config.TableConfigs;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.data.Schema;
-import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.spi.utils.NetUtils;
 import org.apache.pinot.spi.utils.builder.ControllerRequestURLBuilder;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
-import org.apache.pinot.tools.Command;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
@@ -43,8 +40,8 @@ import picocli.CommandLine;
  * Class to implement CreateResource command.
  *
  */
-@CommandLine.Command(name = "AddTable")
-public class AddTableCommand extends AbstractBaseAdminCommand implements Command {
+@CommandLine.Command(name = "AddTable", mixinStandardHelpOptions = true)
+public class AddTableCommand extends AbstractDatabaseBaseAdminCommand {
   private static final Logger LOGGER = LoggerFactory.getLogger(AddTableCommand.class);
 
   @CommandLine.Option(names = {"-tableConfigFile", "-tableConf", "-tableConfig", "-filePath"}, description = "Path to"
@@ -65,47 +62,15 @@ public class AddTableCommand extends AbstractBaseAdminCommand implements Command
       + " table schema file.")
   private String _schemaFile = null;
 
-  @CommandLine.Option(names = {"-controllerHost"}, required = false, description = "host name for controller.")
-  private String _controllerHost;
-
-  @CommandLine.Option(names = {"-controllerPort"}, required = false, description = "Port number to start the "
-      + "controller at.")
-  private String _controllerPort = DEFAULT_CONTROLLER_PORT;
-
-  @CommandLine.Option(names = {"-controllerProtocol"}, required = false, description = "protocol for controller.")
-  private String _controllerProtocol = CommonConstants.HTTP_PROTOCOL;
-
-  @CommandLine.Option(names = {"-update"}, required = false,
-      description = "Update the existing table instead of creating new one")
+  @CommandLine.Option(names = {"-update"}, required = false, description = "Update the existing table instead of "
+      + "creating new one")
   private boolean _update = false;
 
-  @CommandLine.Option(names = {"-exec"}, required = false, description = "Execute the command.")
-  private boolean _exec;
-
-  @CommandLine.Option(names = {"-user"}, required = false, description = "Username for basic auth.")
-  private String _user;
-
-  @CommandLine.Option(names = {"-password"}, required = false, description = "Password for basic auth.")
-  private String _password;
-
-  @CommandLine.Option(names = {"-authToken"}, required = false, description = "Http auth token.")
-  private String _authToken;
-
-  @CommandLine.Option(names = {"-authTokenUrl"}, required = false, description = "Http auth token url.")
-  private String _authTokenUrl;
-
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, help = true, description = "Print "
-      + "this message.")
-  private boolean _help = false;
+  @CommandLine.Option(names = {"-validationTypesToSkip"}, required = false, description =
+      "comma separated list of validation type(s) to skip. supported types: (ALL|TASK|UPSERT)")
+  private String _validationTypesToSkip = null;
 
   private String _controllerAddress;
-
-  private AuthProvider _authProvider;
-
-  @Override
-  public boolean getHelp() {
-    return _help;
-  }
 
   @Override
   public String getName() {
@@ -120,11 +85,11 @@ public class AddTableCommand extends AbstractBaseAdminCommand implements Command
   @Override
   public String toString() {
     String retString =
-        ("AddTable -tableConfigFile " + _tableConfigFile + " -offlineTableConfigFile " + _offlineTableConfigFile
-            + " -realtimeTableConfigFile" + _realtimeTableConfigFile + " -schemaFile " + _schemaFile
-            + " -controllerProtocol " + _controllerProtocol + " -controllerHost " + _controllerHost
-            + " -controllerPort " + _controllerPort + " -user " + _user + " -password " + "[hidden]");
-    return ((_exec) ? (retString + " -exec") : retString);
+        (getName() + " -tableConfigFile " + _tableConfigFile + " -offlineTableConfigFile " + _offlineTableConfigFile
+            + " -realtimeTableConfigFile " + _realtimeTableConfigFile + " -schemaFile " + _schemaFile
+            + super.toString());
+
+    return retString;
   }
 
   @Override
@@ -151,55 +116,37 @@ public class AddTableCommand extends AbstractBaseAdminCommand implements Command
     return this;
   }
 
-  public AddTableCommand setControllerHost(String controllerHost) {
-    _controllerHost = controllerHost;
-    return this;
+  public String getValidationTypesToSkip() {
+    return _validationTypesToSkip;
   }
 
-  public AddTableCommand setControllerPort(String controllerPort) {
-    _controllerPort = controllerPort;
-    return this;
-  }
-
-  public AddTableCommand setControllerProtocol(String controllerProtocol) {
-    _controllerProtocol = controllerProtocol;
-    return this;
-  }
-
-  public AddTableCommand setUser(String user) {
-    _user = user;
-    return this;
-  }
-
-  public AddTableCommand setPassword(String password) {
-    _password = password;
-    return this;
-  }
-
-  public AddTableCommand setExecute(boolean exec) {
-    _exec = exec;
-    return this;
-  }
-
-  public AddTableCommand setAuthProvider(AuthProvider authProvider) {
-    _authProvider = authProvider;
+  public AddTableCommand setValidationTypesToSkip(String validationTypesToSkip) {
+    _validationTypesToSkip = validationTypesToSkip;
     return this;
   }
 
   public boolean sendTableCreationRequest(JsonNode node)
       throws IOException {
     String res = AbstractBaseAdminCommand.sendRequest("POST",
-        ControllerRequestURLBuilder.baseUrl(_controllerAddress).forTableConfigsCreate(), node.toString(),
-        makeAuthHeaders(makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user, _password)));
+        getTableCreationRequestURL(), node.toString(), getHeaders(),
+        makeTrustAllSSLContext());
     LOGGER.info(res);
     return res.contains("successfully added");
+  }
+
+  private String getTableCreationRequestURL() {
+    String baseURL = ControllerRequestURLBuilder.baseUrl(_controllerAddress).forTableConfigsCreate();
+    if (_validationTypesToSkip != null) {
+      return String.format(baseURL + "?validationTypesToSkip=%s", _validationTypesToSkip);
+    }
+    return baseURL;
   }
 
   public boolean sendTableUpdateRequest(JsonNode node, String tableName)
       throws IOException {
     String res = AbstractBaseAdminCommand.sendRequest("PUT",
         ControllerRequestURLBuilder.baseUrl(_controllerAddress).forTableConfigsUpdate(tableName), node.toString(),
-        makeAuthHeaders(makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user, _password)));
+        getHeaders(), makeTrustAllSSLContext());
     LOGGER.info(res);
     return res.contains("TableConfigs updated");
   }
@@ -208,7 +155,7 @@ public class AddTableCommand extends AbstractBaseAdminCommand implements Command
   public boolean execute()
       throws Exception {
     if (!_exec) {
-      LOGGER.warn("Dry Running Command: " + toString());
+      LOGGER.warn("Dry Running Command: {}", toString());
       LOGGER.warn("Use the -exec option to actually execute the command.");
       return true;
     }
@@ -218,7 +165,7 @@ public class AddTableCommand extends AbstractBaseAdminCommand implements Command
     }
     _controllerAddress = _controllerProtocol + "://" + _controllerHost + ":" + _controllerPort;
 
-    LOGGER.info("Executing command: " + toString());
+    LOGGER.info("Executing command: {}", toString());
 
     String rawTableName = null;
     TableConfig offlineTableConfig = null;

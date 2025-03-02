@@ -21,6 +21,7 @@ package org.apache.pinot.spi.config.table;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import java.util.concurrent.TimeUnit;
 import org.apache.pinot.spi.config.BaseJsonConfig;
+import org.apache.pinot.spi.config.table.assignment.InstanceAssignmentConfig;
 import org.apache.pinot.spi.config.table.ingestion.IngestionConfig;
 import org.apache.pinot.spi.utils.TimeUtils;
 
@@ -35,27 +36,34 @@ public class SegmentsValidationAndRetentionConfig extends BaseJsonConfig {
   @Deprecated
   private String _segmentPushType;
   private String _replication;
-  // For high-level consumers, the number of replicas should be same as num server instances
+  @Deprecated // Use _replication instead
+  private String _replicasPerPartition;
+  @Deprecated // Schema name should be the same as raw table name
   private String _schemaName;
   private String _timeColumnName;
   private TimeUnit _timeType;
+  @Deprecated  // Use SegmentAssignmentConfig instead
   private String _segmentAssignmentStrategy;
+  @Deprecated  // Use SegmentAssignmentConfig instead
   private ReplicaGroupStrategyConfig _replicaGroupStrategyConfig;
   private CompletionConfig _completionConfig;
   private String _crypterClassName;
+  @Deprecated
   private boolean _minimizeDataMovement;
   // Possible values can be http or https. If this field is set, a Pinot server can download segments from peer servers
   // using the specified download scheme. Both realtime tables and offline tables can set this field.
   // For more usage of this field, please refer to this design doc: https://tinyurl.com/f63ru4sb
   private String _peerSegmentDownloadScheme;
 
-  // Number of replicas per partition of low-level consumers. This config is used for realtime tables only.
-  private String _replicasPerPartition;
-
+  /**
+   * @deprecated Use {@link InstanceAssignmentConfig} instead
+   */
+  @Deprecated
   public String getSegmentAssignmentStrategy() {
     return _segmentAssignmentStrategy;
   }
 
+  @Deprecated
   public void setSegmentAssignmentStrategy(String segmentAssignmentStrategy) {
     _segmentAssignmentStrategy = segmentAssignmentStrategy;
   }
@@ -105,10 +113,12 @@ public class SegmentsValidationAndRetentionConfig extends BaseJsonConfig {
   /**
    * @deprecated Use {@code segmentIngestionFrequency} from {@link IngestionConfig#getBatchIngestionConfig()}
    */
+  @Deprecated
   public String getSegmentPushFrequency() {
     return _segmentPushFrequency;
   }
 
+  @Deprecated
   public void setSegmentPushFrequency(String segmentPushFrequency) {
     _segmentPushFrequency = segmentPushFrequency;
   }
@@ -116,10 +126,12 @@ public class SegmentsValidationAndRetentionConfig extends BaseJsonConfig {
   /**
    * @deprecated Use {@code segmentIngestionType} from {@link IngestionConfig#getBatchIngestionConfig()}
    */
+  @Deprecated
   public String getSegmentPushType() {
     return _segmentPushType;
   }
 
+  @Deprecated
   public void setSegmentPushType(String segmentPushType) {
     _segmentPushType = segmentPushType;
   }
@@ -135,31 +147,49 @@ public class SegmentsValidationAndRetentionConfig extends BaseJsonConfig {
     _replication = replication;
   }
 
-  // Schema name should be the same as raw table name
+  /**
+   * Try to Use {@link TableConfig#getReplication()}
+   * @deprecated Use _replication instead
+   *
+   * Will be deleted in future version of Pinot
+   */
+  @Deprecated
+  public String getReplicasPerPartition() {
+    return _replicasPerPartition;
+  }
+
+  /**
+   * Try to Use {@link SegmentsValidationAndRetentionConfig#setReplication(String)}
+   *
+   * Will be deleted in future version of Pinot
+   */
+  @Deprecated
+  public void setReplicasPerPartition(String replicasPerPartition) {
+    _replicasPerPartition = replicasPerPartition;
+  }
+
+  /**
+   * @deprecated Schema name should be the same as raw table name
+   */
   @Deprecated
   public String getSchemaName() {
     return _schemaName;
   }
 
+  @Deprecated
   public void setSchemaName(String schemaName) {
     _schemaName = schemaName;
   }
 
   /**
-   * Try to Use {@link TableConfig#getReplication()}
+   * @deprecated Use {@link InstanceAssignmentConfig} instead.
    */
-  public String getReplicasPerPartition() {
-    return _replicasPerPartition;
-  }
-
-  public void setReplicasPerPartition(String replicasPerPartition) {
-    _replicasPerPartition = replicasPerPartition;
-  }
-
+  @Deprecated
   public ReplicaGroupStrategyConfig getReplicaGroupStrategyConfig() {
     return _replicaGroupStrategyConfig;
   }
 
+  @Deprecated
   public void setReplicaGroupStrategyConfig(ReplicaGroupStrategyConfig replicaGroupStrategyConfig) {
     _replicaGroupStrategyConfig = replicaGroupStrategyConfig;
   }
@@ -175,6 +205,7 @@ public class SegmentsValidationAndRetentionConfig extends BaseJsonConfig {
   /**
    * Try to Use {@link TableConfig#getReplication()}
    */
+  @Deprecated
   @JsonIgnore
   public int getReplicationNumber() {
     return Integer.parseInt(_replication);
@@ -182,7 +213,10 @@ public class SegmentsValidationAndRetentionConfig extends BaseJsonConfig {
 
   /**
    * Try to Use {@link TableConfig#getReplication()}
+   *
+   * Will be deleted in future version of Pinot
    */
+  @Deprecated
   @JsonIgnore
   public int getReplicasPerPartitionNumber() {
     return Integer.parseInt(_replicasPerPartition);
@@ -204,10 +238,15 @@ public class SegmentsValidationAndRetentionConfig extends BaseJsonConfig {
     _crypterClassName = crypterClassName;
   }
 
+  /**
+   * @deprecated Use {@link InstanceAssignmentConfig} instead
+   */
+  @Deprecated
   public boolean isMinimizeDataMovement() {
     return _minimizeDataMovement;
   }
 
+  @Deprecated
   public void setMinimizeDataMovement(boolean minimizeDataMovement) {
     _minimizeDataMovement = minimizeDataMovement;
   }

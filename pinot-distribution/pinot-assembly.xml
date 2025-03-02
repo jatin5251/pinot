@@ -48,18 +48,10 @@
     <!-- Start Include Pinot Stream Ingestion Plugins-->
     <file>
       <source>
-        ${pinot.root}/pinot-plugins/pinot-stream-ingestion/pinot-kafka-0.9/target/pinot-kafka-0.9-${project.version}-shaded.jar
+        ${pinot.root}/pinot-plugins/pinot-stream-ingestion/pinot-kafka-2.0/target/pinot-kafka-2.0-${project.version}-shaded.jar
       </source>
       <destName>
-        plugins/pinot-stream-ingestion/pinot-kafka-0.9/pinot-kafka-0.9-${project.version}-shaded.jar
-      </destName>
-    </file>
-    <file>
-      <source>
-        ${pinot.root}/pinot-plugins/pinot-stream-ingestion/pinot-kafka-${kafka.version}/target/pinot-kafka-${kafka.version}-${project.version}-shaded.jar
-      </source>
-      <destName>
-        plugins/pinot-stream-ingestion/pinot-kafka-${kafka.version}/pinot-kafka-${kafka.version}-${project.version}-shaded.jar
+        plugins/pinot-stream-ingestion/pinot-kafka-2.0/pinot-kafka-2.0-${project.version}-shaded.jar
       </destName>
     </file>
     <file>
@@ -68,12 +60,10 @@
       </source>
       <destName>plugins/pinot-stream-ingestion/pinot-kinesis/pinot-kinesis-${project.version}-shaded.jar</destName>
     </file>
-
     <file>
       <source>${pinot.root}/pinot-plugins/pinot-stream-ingestion/pinot-pulsar/target/pinot-pulsar-${project.version}-shaded.jar</source>
       <destName>plugins/pinot-stream-ingestion/pinot-pulsar/pinot-pulsar-${project.version}-shaded.jar</destName>
     </file>
-
     <!-- End Include Pinot Stream Ingestion Plugins-->
     <!-- Start Include Pinot Batch Ingestion Plugins-->
     <file>
@@ -102,10 +92,10 @@
     </file>
     <file>
       <source>
-        ${pinot.root}/pinot-plugins/pinot-batch-ingestion/pinot-batch-ingestion-spark-3.2/target/pinot-batch-ingestion-spark-3.2-${project.version}-shaded.jar
+        ${pinot.root}/pinot-plugins/pinot-batch-ingestion/pinot-batch-ingestion-spark-3/target/pinot-batch-ingestion-spark-3-${project.version}-shaded.jar
       </source>
       <destName>
-        plugins-external/pinot-batch-ingestion/pinot-batch-ingestion-spark-3.2/pinot-batch-ingestion-spark-3.2-${project.version}-shaded.jar
+        plugins-external/pinot-batch-ingestion/pinot-batch-ingestion-spark-3/pinot-batch-ingestion-spark-3-${project.version}-shaded.jar
       </destName>
     </file>
     <!-- End Include Pinot Batch Ingestion Plugins-->
@@ -148,6 +138,12 @@
     </file>
     <file>
       <source>
+        ${pinot.root}/pinot-plugins/pinot-input-format/pinot-clp-log/target/pinot-clp-log-${project.version}-shaded.jar
+      </source>
+      <destName>plugins/pinot-input-format/pinot-clp-log/pinot-clp-log-${project.version}-shaded.jar</destName>
+    </file>
+    <file>
+      <source>
         ${pinot.root}/pinot-plugins/pinot-input-format/pinot-confluent-avro/target/pinot-confluent-avro-${project.version}-shaded.jar
       </source>
       <destName>plugins/pinot-input-format/pinot-confluent-avro/pinot-confluent-avro-${project.version}-shaded.jar
@@ -186,6 +182,12 @@
         ${pinot.root}/pinot-plugins/pinot-input-format/pinot-protobuf/target/pinot-protobuf-${project.version}-shaded.jar
       </source>
       <destName>plugins/pinot-input-format/pinot-protobuf/pinot-protobuf-${project.version}-shaded.jar</destName>
+    </file>
+    <file>
+      <source>
+        ${pinot.root}/pinot-plugins/pinot-input-format/pinot-confluent-protobuf/target/pinot-confluent-protobuf-${project.version}-shaded.jar
+      </source>
+      <destName>plugins/pinot-input-format/pinot-confluent-protobuf/pinot-confluent-protobuf-${project.version}-shaded.jar</destName>
     </file>
     <!-- End Include Pinot Input Format Plugins-->
     <!-- Start Include Pinot Minion Tasks Plugins-->
@@ -231,6 +233,16 @@
       </destName>
     </file>
     <!-- End Include Pinot Segment Uploader Plugins-->
+    <!-- Start Include Pinot Time Series Plugins -->
+    <file>
+      <source>
+        ${pinot.root}/pinot-plugins/pinot-timeseries-lang/pinot-timeseries-m3ql/target/pinot-timeseries-m3ql-${project.version}-shaded.jar
+      </source>
+      <destName>
+        plugins/pinot-timeseries-lang/pinot-timeseries-m3ql/pinot-timeseries-m3ql-${project.version}-shaded.jar
+      </destName>
+    </file>
+    <!-- End Include Pinot Time Series Plugins -->
     <!-- End Include Pinot Plugins-->
   </files>
   <fileSets>
@@ -247,13 +259,13 @@
     </fileSet>
     <fileSet>
       <useDefaultExcludes>false</useDefaultExcludes>
-      <directory>${pinot.root}/pinot-tools/src/main/resources/examples/stream/meetupRsvp/kafka_${kafka.version}
+      <directory>${pinot.root}/pinot-tools/src/main/resources/examples/stream/meetupRsvp/kafka_2.0
       </directory>
       <outputDirectory>examples/stream/meetupRsvp/</outputDirectory>
     </fileSet>
     <fileSet>
       <useDefaultExcludes>false</useDefaultExcludes>
-      <directory>${pinot.root}/pinot-tools/src/main/resources/examples/stream/airlineStats/kafka_${kafka.version}
+      <directory>${pinot.root}/pinot-tools/src/main/resources/examples/stream/airlineStats/kafka_2.0
       </directory>
       <outputDirectory>examples/stream/airlineStats/</outputDirectory>
     </fileSet>

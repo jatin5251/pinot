@@ -25,8 +25,8 @@ import org.apache.pinot.spi.data.FieldSpec.DataType;
 
 public class StringDictionary extends BaseImmutableDictionary {
 
-  public StringDictionary(PinotDataBuffer dataBuffer, int length, int numBytesPerValue, byte paddingByte) {
-    super(dataBuffer, length, numBytesPerValue, paddingByte);
+  public StringDictionary(PinotDataBuffer dataBuffer, int length, int numBytesPerValue) {
+    super(dataBuffer, length, numBytesPerValue);
   }
 
   @Override
@@ -74,6 +74,17 @@ public class StringDictionary extends BaseImmutableDictionary {
     return getUnpaddedString(dictId, getBuffer());
   }
 
+  /** Same as getStringValue(int) but allows reusing buffer, instead of allocating on each call. */
+  public String getStringValue(int dictId, byte[] buffer) {
+    return getUnpaddedString(dictId, buffer);
+  }
+
+  /** Allocate buffer to use with getString(int, byte[]) method. */
+  @Override
+  public byte[] getBuffer() {
+    return super.getBuffer();
+  }
+
   @Override
   public byte[] getBytesValue(int dictId) {
     return getUnpaddedBytes(dictId, getBuffer());
@@ -81,6 +92,14 @@ public class StringDictionary extends BaseImmutableDictionary {
 
   @Override
   public void readIntValues(int[] dictIds, int length, int[] outValues) {
+    byte[] buffer = getBuffer();
+    for (int i = 0; i < length; i++) {
+      outValues[i] = Integer.parseInt(getUnpaddedString(dictIds[i], buffer));
+    }
+  }
+
+  @Override
+  public void readIntValues(int[] dictIds, int length, Integer[] outValues) {
     byte[] buffer = getBuffer();
     for (int i = 0; i < length; i++) {
       outValues[i] = Integer.parseInt(getUnpaddedString(dictIds[i], buffer));
@@ -96,6 +115,14 @@ public class StringDictionary extends BaseImmutableDictionary {
   }
 
   @Override
+  public void readLongValues(int[] dictIds, int length, Long[] outValues) {
+    byte[] buffer = getBuffer();
+    for (int i = 0; i < length; i++) {
+      outValues[i] = Long.parseLong(getUnpaddedString(dictIds[i], buffer));
+    }
+  }
+
+  @Override
   public void readFloatValues(int[] dictIds, int length, float[] outValues) {
     byte[] buffer = getBuffer();
     for (int i = 0; i < length; i++) {
@@ -104,7 +131,23 @@ public class StringDictionary extends BaseImmutableDictionary {
   }
 
   @Override
+  public void readFloatValues(int[] dictIds, int length, Float[] outValues) {
+    byte[] buffer = getBuffer();
+    for (int i = 0; i < length; i++) {
+      outValues[i] = Float.parseFloat(getUnpaddedString(dictIds[i], buffer));
+    }
+  }
+
+  @Override
   public void readDoubleValues(int[] dictIds, int length, double[] outValues) {
+    byte[] buffer = getBuffer();
+    for (int i = 0; i < length; i++) {
+      outValues[i] = Double.parseDouble(getUnpaddedString(dictIds[i], buffer));
+    }
+  }
+
+  @Override
+  public void readDoubleValues(int[] dictIds, int length, Double[] outValues) {
     byte[] buffer = getBuffer();
     for (int i = 0; i < length; i++) {
       outValues[i] = Double.parseDouble(getUnpaddedString(dictIds[i], buffer));

@@ -20,15 +20,18 @@ package org.apache.pinot.segment.local.segment.creator;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import javax.annotation.Nullable;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.pinot.segment.local.recordtransformer.ComplexTypeTransformer;
 import org.apache.pinot.segment.local.recordtransformer.CompositeTransformer;
-import org.apache.pinot.segment.local.recordtransformer.RecordTransformer;
 import org.apache.pinot.segment.local.utils.IngestionUtils;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.readers.GenericRow;
+import org.apache.pinot.spi.recordtransformer.RecordTransformer;
 
 
 /**
@@ -70,6 +73,16 @@ public class TransformPipeline {
     return new TransformPipeline(CompositeTransformer.getPassThroughTransformer(), null);
   }
 
+  public Collection<String> getInputColumns() {
+    if (_complexTypeTransformer == null) {
+      return _recordTransformer.getInputColumns();
+    } else {
+      Set<String> inputColumns = new HashSet<>(_recordTransformer.getInputColumns());
+      inputColumns.addAll(_complexTypeTransformer.getInputColumns());
+      return inputColumns;
+    }
+  }
+
   /**
    * Process and validate the decoded row against schema.
    * @param decodedRow the row data to pass in
@@ -83,12 +96,15 @@ public class TransformPipeline {
       // TODO: consolidate complex type transformer into composite type transformer
       decodedRow = _complexTypeTransformer.transform(decodedRow);
     }
+
     Collection<GenericRow> rows = (Collection<GenericRow>) decodedRow.getValue(GenericRow.MULTIPLE_RECORDS_KEY);
-    if (rows != null) {
+
+    if (CollectionUtils.isNotEmpty(rows)) {
       for (GenericRow row : rows) {
         processPlainRow(row, reusedResult);
       }
     } else {
+      decodedRow.removeValue(GenericRow.MULTIPLE_RECORDS_KEY);
       processPlainRow(decodedRow, reusedResult);
     }
   }
@@ -99,6 +115,9 @@ public class TransformPipeline {
       reusedResult.addTransformedRows(transformedRow);
       if (Boolean.TRUE.equals(transformedRow.getValue(GenericRow.INCOMPLETE_RECORD_KEY))) {
         reusedResult.incIncompleteRowCount();
+      }
+      if (Boolean.TRUE.equals(transformedRow.getValue(GenericRow.SANITIZED_RECORD_KEY))) {
+        reusedResult.incSanitizedRowCount();
       }
     } else {
       reusedResult.incSkippedRowCount();
@@ -112,6 +131,7 @@ public class TransformPipeline {
     private final List<GenericRow> _transformedRows = new ArrayList<>();
     private int _skippedRowCount = 0;
     private int _incompleteRowCount = 0;
+    private int _sanitizedRowCount = 0;
 
     public List<GenericRow> getTransformedRows() {
       return _transformedRows;
@@ -135,6 +155,14 @@ public class TransformPipeline {
 
     public void incIncompleteRowCount() {
       _incompleteRowCount++;
+    }
+
+    public void incSanitizedRowCount() {
+      _sanitizedRowCount++;
+    }
+
+    public int getSanitizedRowCount() {
+      return _sanitizedRowCount;
     }
 
     public void reset() {

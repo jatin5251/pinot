@@ -20,7 +20,7 @@ package org.apache.pinot.tools.admin.command;
 
 import java.util.ArrayList;
 import java.util.List;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.helix.PropertyPathBuilder;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
@@ -42,7 +42,7 @@ import picocli.CommandLine;
 /**
  * Pinot admin command to list all offline segments with invalid intervals, group by table name
  */
-@CommandLine.Command(name = "OfflineSegmentIntervalChecker")
+@CommandLine.Command(name = "OfflineSegmentIntervalChecker", mixinStandardHelpOptions = true)
 public class OfflineSegmentIntervalCheckerCommand extends AbstractBaseAdminCommand implements Command {
   private static final Logger LOGGER = LoggerFactory.getLogger(OfflineSegmentIntervalCheckerCommand.class);
 
@@ -57,14 +57,6 @@ public class OfflineSegmentIntervalCheckerCommand extends AbstractBaseAdminComma
   @CommandLine.Option(names = {"-tableNames"},
       description = "Comma separated list of tables to check for invalid segment intervals")
   private String _tableNames;
-
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, help = true, description = "Print this message.")
-  private boolean _help = false;
-
-  @Override
-  public boolean getHelp() {
-    return _help;
-  }
 
   @Override
   public String toString() {
@@ -88,7 +80,7 @@ public class OfflineSegmentIntervalCheckerCommand extends AbstractBaseAdminComma
   @Override
   public boolean execute()
       throws Exception {
-    LOGGER.info("Executing command: " + toString());
+    LOGGER.info("Executing command: {}", toString());
 
     ZKHelixAdmin helixAdmin = new ZKHelixAdmin.Builder().setZkAddress(_zkAddress).build();
     _propertyStore = new ZkHelixPropertyStore<>(_zkAddress, new ZNRecordSerializer(),

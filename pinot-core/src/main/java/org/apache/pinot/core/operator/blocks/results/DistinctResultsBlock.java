@@ -19,28 +19,24 @@
 package org.apache.pinot.core.operator.blocks.results;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 import org.apache.pinot.common.datatable.DataTable;
 import org.apache.pinot.common.utils.DataSchema;
-import org.apache.pinot.core.data.table.Record;
-import org.apache.pinot.core.query.aggregation.function.DistinctAggregationFunction;
-import org.apache.pinot.core.query.distinct.DistinctTable;
+import org.apache.pinot.core.query.distinct.table.DistinctTable;
 import org.apache.pinot.core.query.request.context.QueryContext;
-import org.apache.pinot.core.query.selection.SelectionOperatorUtils;
 
 
 /**
  * Results block for distinct queries.
  */
 public class DistinctResultsBlock extends BaseResultsBlock {
-  private final DistinctAggregationFunction _distinctFunction;
+  private final QueryContext _queryContext;
+
   private DistinctTable _distinctTable;
 
-  public DistinctResultsBlock(DistinctAggregationFunction distinctFunction, DistinctTable distinctTable) {
-    _distinctFunction = distinctFunction;
+  public DistinctResultsBlock(DistinctTable distinctTable, QueryContext queryContext) {
     _distinctTable = distinctTable;
+    _queryContext = queryContext;
   }
 
   public DistinctTable getDistinctTable() {
@@ -52,24 +48,28 @@ public class DistinctResultsBlock extends BaseResultsBlock {
   }
 
   @Override
-  public DataSchema getDataSchema(QueryContext queryContext) {
+  public int getNumRows() {
+    return _distinctTable.size();
+  }
+
+  @Override
+  public QueryContext getQueryContext() {
+    return _queryContext;
+  }
+
+  @Override
+  public DataSchema getDataSchema() {
     return _distinctTable.getDataSchema();
   }
 
   @Override
-  public Collection<Object[]> getRows(QueryContext queryContext) {
-    List<Object[]> rows = new ArrayList<>(_distinctTable.size());
-    for (Record record : _distinctTable.getRecords()) {
-      rows.add(record.getValues());
-    }
-    return rows;
+  public List<Object[]> getRows() {
+    return _distinctTable.getRows();
   }
 
   @Override
-  public DataTable getDataTable(QueryContext queryContext)
+  public DataTable getDataTable()
       throws IOException {
-    Collection<Object[]> rows = getRows(queryContext);
-    return SelectionOperatorUtils.getDataTableFromRows(rows, _distinctTable.getDataSchema(),
-        queryContext.isNullHandlingEnabled());
+    return _distinctTable.toDataTable();
   }
 }

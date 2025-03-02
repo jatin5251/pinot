@@ -26,11 +26,16 @@ import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import it.unimi.dsi.fastutil.objects.ObjectIterator;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.Iterator;
+import java.util.Map;
+import javax.annotation.Nullable;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.core.common.BlockValSet;
-import org.apache.pinot.core.operator.blocks.TransformBlock;
-import org.apache.pinot.core.operator.transform.TransformOperator;
+import org.apache.pinot.core.operator.BaseProjectOperator;
+import org.apache.pinot.core.operator.ColumnContext;
+import org.apache.pinot.core.operator.blocks.ValueBlock;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 
 
@@ -48,7 +53,7 @@ import org.apache.pinot.segment.spi.index.reader.Dictionary;
  *     integer raw keys and map them onto contiguous group ids. (INT_MAP_BASED)
  *   </li>
  *   <li>
- *     If the maximum number of possible group keys cannot fit into than integer, but still fit into long, generate long
+ *     If the maximum number of possible group keys cannot fit into integer, but still fit into long, generate long
  *     raw keys and map them onto contiguous group ids. (LONG_MAP_BASED)
  *   </li>
  *   <li>
@@ -97,10 +102,9 @@ public class DictionaryBasedGroupKeyGenerator implements GroupKeyGenerator {
   private final int _globalGroupIdUpperBound;
   private final RawKeyHolder _rawKeyHolder;
 
-  public DictionaryBasedGroupKeyGenerator(TransformOperator transformOperator, ExpressionContext[] groupByExpressions,
-      int numGroupsLimit, int arrayBasedThreshold) {
-    assert numGroupsLimit >= arrayBasedThreshold;
-
+  public DictionaryBasedGroupKeyGenerator(BaseProjectOperator<?> projectOperator,
+      ExpressionContext[] groupByExpressions, int numGroupsLimit, int arrayBasedThreshold,
+      @Nullable Map<ExpressionContext, Integer> groupByExpressionSizesFromPredicates) {
     _groupByExpressions = groupByExpressions;
     _numGroupByExpressions = groupByExpressions.length;
 
@@ -112,14 +116,17 @@ public class DictionaryBasedGroupKeyGenerator implements GroupKeyGenerator {
     // no need to intern dictionary values when there is only one group by expression because
     // only one call will be made to the dictionary to extract each raw value.
     _internedDictionaryValues = _numGroupByExpressions > 1 ? new Object[_numGroupByExpressions][] : null;
-
+    Map<ExpressionContext, Integer> cardinalityMap = new HashMap<>(_numGroupByExpressions);
     long cardinalityProduct = 1L;
     boolean longOverflow = false;
     for (int i = 0; i < _numGroupByExpressions; i++) {
       ExpressionContext groupByExpression = groupByExpressions[i];
-      _dictionaries[i] = transformOperator.getDictionary(groupByExpression);
+      ColumnContext columnContext = projectOperator.getResultColumnContext(groupByExpression);
+      _dictionaries[i] = columnContext.getDictionary();
+      assert _dictionaries[i] != null;
       int cardinality = _dictionaries[i].length();
       _cardinalities[i] = cardinality;
+      cardinalityMap.put(groupByExpression, cardinality);
       if (_internedDictionaryValues != null && cardinality < MAX_DICTIONARY_INTERN_TABLE_SIZE) {
         _internedDictionaryValues[i] = new Object[cardinality];
       }
@@ -130,8 +137,15 @@ public class DictionaryBasedGroupKeyGenerator implements GroupKeyGenerator {
           cardinalityProduct *= cardinality;
         }
       }
-
-      _isSingleValueColumn[i] = transformOperator.getResultMetadata(groupByExpression).isSingleValue();
+      _isSingleValueColumn[i] = columnContext.isSingleValue();
+    }
+    if (groupByExpressionSizesFromPredicates != null) {
+       Pair<Boolean, Long> optimizedCardinality = getOptimizedGroupByCardinality(groupByExpressionSizesFromPredicates,
+           cardinalityMap);
+       if (optimizedCardinality.getLeft() && optimizedCardinality.getRight() != null) {
+         longOverflow = false;
+         cardinalityProduct = Math.min(optimizedCardinality.getRight(), cardinalityProduct);
+       }
     }
     // TODO: Clear the holder after processing the query instead of before
     if (longOverflow) {
@@ -157,7 +171,9 @@ public class DictionaryBasedGroupKeyGenerator implements GroupKeyGenerator {
         _rawKeyHolder = new LongMapBasedHolder(groupIdMap);
       } else {
         _globalGroupIdUpperBound = Math.min((int) cardinalityProduct, numGroupsLimit);
-        if (cardinalityProduct > arrayBasedThreshold) {
+        // arrayBaseHolder fails with ArrayIndexOutOfBoundsException if numGroupsLimit < cardinalityProduct
+        // because array doesn't fit all (potentially unsorted) values
+        if (cardinalityProduct > arrayBasedThreshold || numGroupsLimit < cardinalityProduct) {
           // IntMapBasedHolder
           IntGroupIdMap groupIdMap = THREAD_LOCAL_INT_MAP.get();
           groupIdMap.clearAndTrim();
@@ -169,34 +185,49 @@ public class DictionaryBasedGroupKeyGenerator implements GroupKeyGenerator {
     }
   }
 
+  private Pair<Boolean, Long> getOptimizedGroupByCardinality(Map<ExpressionContext, Integer> groupByExpressionSizes,
+      Map<ExpressionContext, Integer> columnCardinalityMap) {
+    long maxInitialResultHolderCapacity = 1L;
+    for (Map.Entry<ExpressionContext, Integer> entry : columnCardinalityMap.entrySet()) {
+      Integer cardinality = entry.getValue();
+      Integer size = groupByExpressionSizes.get(entry.getKey());
+      int minSize = size != null ? Math.min(size, cardinality) : cardinality;
+      if (maxInitialResultHolderCapacity > Long.MAX_VALUE / minSize) {
+        return Pair.of(false, null);
+      } else {
+        maxInitialResultHolderCapacity *= minSize;
+      }
+    }
+    return Pair.of(true, maxInitialResultHolderCapacity);
+  }
+
   @Override
   public int getGlobalGroupKeyUpperBound() {
     return _globalGroupIdUpperBound;
   }
 
   @Override
-  public void generateKeysForBlock(TransformBlock transformBlock, int[] groupKeys) {
+  public void generateKeysForBlock(ValueBlock valueBlock, int[] groupKeys) {
     // Fetch dictionary ids in the given block for all group-by columns
     for (int i = 0; i < _numGroupByExpressions; i++) {
-      BlockValSet blockValueSet = transformBlock.getBlockValueSet(_groupByExpressions[i]);
+      BlockValSet blockValueSet = valueBlock.getBlockValueSet(_groupByExpressions[i]);
       _singleValueDictIds[i] = blockValueSet.getDictionaryIdsSV();
     }
-    _rawKeyHolder.processSingleValue(transformBlock.getNumDocs(), groupKeys);
+    _rawKeyHolder.processSingleValue(valueBlock.getNumDocs(), groupKeys);
   }
 
   @Override
-  public void generateKeysForBlock(TransformBlock transformBlock, int[][] groupKeys) {
+  public void generateKeysForBlock(ValueBlock valueBlock, int[][] groupKeys) {
     // Fetch dictionary ids in the given block for all group-by columns
     for (int i = 0; i < _numGroupByExpressions; i++) {
-      BlockValSet blockValueSet = transformBlock.getBlockValueSet(_groupByExpressions[i]);
+      BlockValSet blockValueSet = valueBlock.getBlockValueSet(_groupByExpressions[i]);
       if (_isSingleValueColumn[i]) {
         _singleValueDictIds[i] = blockValueSet.getDictionaryIdsSV();
       } else {
         _multiValueDictIds[i] = blockValueSet.getDictionaryIdsMV();
       }
     }
-
-    _rawKeyHolder.processMultiValue(transformBlock.getNumDocs(), groupKeys);
+    _rawKeyHolder.processMultiValue(valueBlock.getNumDocs(), groupKeys);
   }
 
   @Override
@@ -250,6 +281,7 @@ public class DictionaryBasedGroupKeyGenerator implements GroupKeyGenerator {
     int getNumKeys();
   }
 
+  // This holder works only if it can fit all results, otherwise it fails on AIOOBE or produces too many group keys
   private class ArrayBasedHolder implements RawKeyHolder {
     private final boolean[] _flags = new boolean[_globalGroupIdUpperBound];
     private int _numKeys = 0;

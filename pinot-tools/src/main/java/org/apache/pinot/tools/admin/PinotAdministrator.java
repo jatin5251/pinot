@@ -18,9 +18,11 @@
  */
 package org.apache.pinot.tools.admin;
 
+import com.google.common.annotations.VisibleForTesting;
 import java.util.HashMap;
 import java.util.Map;
 import org.apache.pinot.common.Utils;
+import org.apache.pinot.common.utils.tls.JvmDefaultSslContext;
 import org.apache.pinot.spi.plugin.PluginManager;
 import org.apache.pinot.tools.Command;
 import org.apache.pinot.tools.admin.command.AddSchemaCommand;
@@ -93,6 +95,7 @@ public class PinotAdministrator {
   private static final Map<String, Command> SUBCOMMAND_MAP = new HashMap<>();
 
   static {
+    JvmDefaultSslContext.initDefaultSslContext();
     SUBCOMMAND_MAP.put("QuickStart", new QuickStartCommand());
     SUBCOMMAND_MAP.put("OperateClusterConfig", new OperateClusterConfigCommand());
     SUBCOMMAND_MAP.put("GenerateData", new GenerateDataCommand());
@@ -187,13 +190,18 @@ public class PinotAdministrator {
     LOGGER.info("Usage: pinot-admin.sh <subCommand>");
     LOGGER.info("Valid subCommands are:");
     for (Map.Entry<String, Command> subCommand : this.getSubCommands().entrySet()) {
-      LOGGER.info("\t" + subCommand.getKey() + "\t<" + subCommand.getValue().description() + ">");
+      LOGGER.info("\t{}\t<{}>", subCommand.getKey(), subCommand.getValue().description());
     }
     LOGGER.info("For other crud operations, please refer to ${ControllerAddress}/help.");
   }
 
   public Map<String, Command> getSubCommands() {
     return SUBCOMMAND_MAP;
+  }
+
+  @VisibleForTesting
+  public int getStatus() {
+    return _status;
   }
 
   public static void main(String[] args) {

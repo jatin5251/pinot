@@ -142,6 +142,33 @@ public class ControllerConfTest {
   }
 
   @Test
+  public void validateSegmentRelocatorRebalanceDefaultConfigs() {
+    ControllerConf conf = new ControllerConf(Map.of());
+    Assert.assertFalse(conf.getSegmentRelocatorReassignInstances());
+    Assert.assertFalse(conf.getSegmentRelocatorBootstrap());
+    Assert.assertFalse(conf.getSegmentRelocatorDowntime());
+    Assert.assertEquals(conf.getSegmentRelocatorMinAvailableReplicas(), -1);
+    Assert.assertTrue(conf.getSegmentRelocatorBestEfforts());
+  }
+
+  @Test
+  public void validateSegmentRelocatorRebalanceConfigs() {
+    Map<String, Object> properties = new HashMap<>();
+    properties.put(SEGMENT_RELOCATOR_REASSIGN_INSTANCES, true);
+    properties.put(SEGMENT_RELOCATOR_BOOTSTRAP, false);
+    properties.put(SEGMENT_RELOCATOR_DOWNTIME, true);
+    properties.put(SEGMENT_RELOCATOR_MIN_AVAILABLE_REPLICAS, -2);
+    properties.put(SEGMENT_RELOCATOR_BEST_EFFORTS, true);
+
+    ControllerConf conf = new ControllerConf(properties);
+    Assert.assertTrue(conf.getSegmentRelocatorReassignInstances());
+    Assert.assertFalse(conf.getSegmentRelocatorBootstrap());
+    Assert.assertTrue(conf.getSegmentRelocatorDowntime());
+    Assert.assertEquals(conf.getSegmentRelocatorMinAvailableReplicas(), -2);
+    Assert.assertTrue(conf.getSegmentRelocatorBestEfforts());
+  }
+
+  @Test
   public void shouldBeAbleToDisableUsingNewConfig() {
     Map<String, Object> controllerConfig = new HashMap<>();
     ControllerConf conf = new ControllerConf(controllerConfig);
@@ -156,6 +183,29 @@ public class ControllerConfTest {
     controllerConfig.put(TASK_MANAGER_FREQUENCY_PERIOD, "-1s");
     conf = new ControllerConf(controllerConfig);
     Assert.assertEquals(conf.getTaskManagerFrequencyInSeconds(), -1);
+  }
+
+  @Test
+  public void shouldBeAbleToSetDataDir() {
+    Map<String, Object> controllerConfig = new HashMap<>();
+    ControllerConf conf = new ControllerConf(controllerConfig);
+    Assert.assertEquals(conf.getDataDir(), null);
+
+    // test for the dataDir s3 value with ending slash
+    conf.setDataDir("s3://<bucket_name>/controller/");
+    Assert.assertEquals(conf.getDataDir(), "s3://<bucket_name>/controller");
+
+    // test for the dataDir s3 value without ending slash
+    conf.setDataDir("s3://<bucket_name>/controller");
+    Assert.assertEquals(conf.getDataDir(), "s3://<bucket_name>/controller");
+
+    // test for the dataDir non-s3 value without ending slash
+    conf.setDataDir("/tmp/PinotController");
+    Assert.assertEquals(conf.getDataDir(), "/tmp/PinotController");
+
+    // test for the dataDir non-s3 value with ending slash
+    conf.setDataDir("/tmp/PinotController/");
+    Assert.assertEquals(conf.getDataDir(), "/tmp/PinotController");
   }
 
   private void assertOnDurations(ControllerConf conf, long expectedDuration, Map<String, Object> controllerConfig) {

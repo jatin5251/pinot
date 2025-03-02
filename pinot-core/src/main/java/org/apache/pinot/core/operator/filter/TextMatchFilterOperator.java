@@ -18,11 +18,13 @@
  */
 package org.apache.pinot.core.operator.filter;
 
+import com.google.common.base.CaseFormat;
 import java.util.Collections;
 import java.util.List;
 import org.apache.pinot.common.request.context.predicate.TextMatchPredicate;
+import org.apache.pinot.core.common.BlockDocIdSet;
 import org.apache.pinot.core.common.Operator;
-import org.apache.pinot.core.operator.blocks.FilterBlock;
+import org.apache.pinot.core.operator.ExplainAttributeBuilder;
 import org.apache.pinot.core.operator.docidsets.BitmapDocIdSet;
 import org.apache.pinot.segment.spi.index.reader.TextIndexReader;
 import org.apache.pinot.spi.trace.FilterType;
@@ -43,14 +45,15 @@ public class TextMatchFilterOperator extends BaseFilterOperator {
   private final TextMatchPredicate _predicate;
 
   public TextMatchFilterOperator(TextIndexReader textIndexReader, TextMatchPredicate predicate, int numDocs) {
+    super(numDocs, false);
     _textIndexReader = textIndexReader;
     _predicate = predicate;
     _numDocs = numDocs;
   }
 
   @Override
-  protected FilterBlock getNextBlock() {
-    return new FilterBlock(new BitmapDocIdSet(_textIndexReader.getDocIds(_predicate.getValue()), _numDocs));
+  protected BlockDocIdSet getTrues() {
+    return new BitmapDocIdSet(_textIndexReader.getDocIds(_predicate.getValue()), _numDocs);
   }
 
   @Override
@@ -86,6 +89,19 @@ public class TextMatchFilterOperator extends BaseFilterOperator {
     stringBuilder.append(",operator:").append(_predicate.getType());
     stringBuilder.append(",predicate:").append(_predicate.toString());
     return stringBuilder.append(')').toString();
+  }
+
+  @Override
+  protected String getExplainName() {
+    return CaseFormat.UPPER_UNDERSCORE.to(CaseFormat.UPPER_CAMEL, EXPLAIN_NAME);
+  }
+
+  @Override
+  protected void explainAttributes(ExplainAttributeBuilder attributeBuilder) {
+    super.explainAttributes(attributeBuilder);
+    attributeBuilder.putString("indexLookUp", "text_index");
+    attributeBuilder.putString("operator", _predicate.getType().name());
+    attributeBuilder.putString("predicate", _predicate.toString());
   }
 
   private void record(ImmutableRoaringBitmap matches) {

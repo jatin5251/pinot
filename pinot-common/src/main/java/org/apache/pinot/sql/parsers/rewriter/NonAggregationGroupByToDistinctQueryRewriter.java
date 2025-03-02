@@ -18,20 +18,20 @@
  */
 package org.apache.pinot.sql.parsers.rewriter;
 
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import org.apache.pinot.common.request.Expression;
 import org.apache.pinot.common.request.Function;
 import org.apache.pinot.common.request.PinotQuery;
 import org.apache.pinot.common.utils.request.RequestUtils;
 import org.apache.pinot.sql.parsers.CalciteSqlParser;
-import org.apache.pinot.sql.parsers.SqlCompilationException;
-
 
 /**
  * Rewrite non-aggregation group-by query to distinct query.
  * The query can be rewritten only if select expression set and group-by expression set are the same.
+ * If they are not, the original query is returned.
  *
  * E.g.
  * SELECT col1, col2 FROM foo GROUP BY col1, col2 --> SELECT DISTINCT col1, col2 FROM foo
@@ -40,7 +40,7 @@ import org.apache.pinot.sql.parsers.SqlCompilationException;
  * SELECT col1 AS c1 FROM foo GROUP BY col1 --> SELECT DISTINCT col1 AS c1 FROM foo
  * SELECT col1, col1 AS c1, col2 FROM foo GROUP BY col1, col2 --> SELECT DISTINCT col1, col1 AS ci, col2 FROM foo
  *
- * Unsupported queries:
+ * Not rewritten queries:
  * SELECT col1 FROM foo GROUP BY col1, col2 (not equivalent to SELECT DISTINCT col1 FROM foo)
  * SELECT col1 + col2 FROM foo GROUP BY col1, col2 (not equivalent to SELECT col1 + col2 FROM foo)
  */
@@ -75,16 +75,17 @@ public class NonAggregationGroupByToDistinctQueryRewriter implements QueryRewrit
       }
     }
     Set<Expression> groupByExpressions = new HashSet<>(pinotQuery.getGroupByList());
+    // If SELECT and GROUP BY set are equal, rewrite the query as DISTINCT
     if (selectExpressions.equals(groupByExpressions)) {
-      Expression distinct = RequestUtils.getFunctionExpression("distinct");
-      distinct.getFunctionCall().setOperands(pinotQuery.getSelectList());
-      pinotQuery.setSelectList(Collections.singletonList(distinct));
+      Expression distinct = RequestUtils.getFunctionExpression("distinct", pinotQuery.getSelectList());
+      // NOTE: Create an ArrayList because we might need to modify the list later
+      List<Expression> newSelectList = new ArrayList<>(1);
+      newSelectList.add(distinct);
+      pinotQuery.setSelectList(newSelectList);
       pinotQuery.setGroupByList(null);
       return pinotQuery;
     } else {
-      throw new SqlCompilationException(String.format(
-          "For non-aggregation group-by query, select expression set and group-by expression set should be the same. "
-              + "Found select: %s, group-by: %s", selectExpressions, groupByExpressions));
+      return pinotQuery;
     }
   }
 }

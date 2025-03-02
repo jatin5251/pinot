@@ -9,6 +9,14 @@
       "dataType": "STRING"
     },
     {
+      "name": "payload",
+      "dataType": "JSON"
+    },
+    {
+      "name": "payload_str",
+      "dataType": "STRING"
+    },
+    {
       "name": "payload.push_id",
       "dataType": "LONG"
     },
@@ -54,6 +62,14 @@
     },
     {
       "name": "payload.commits.url",
+      "dataType": "STRING"
+    },
+    {
+      "name": "commits_url",
+      "dataType": "STRING"
+    },
+    {
+      "name": "head_sha",
       "dataType": "STRING"
     }
   ],

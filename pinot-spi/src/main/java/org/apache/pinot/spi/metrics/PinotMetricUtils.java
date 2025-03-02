@@ -51,7 +51,8 @@ public class PinotMetricUtils {
   private static final Map<MetricsRegistryRegistrationListener, Boolean> METRICS_REGISTRY_REGISTRATION_LISTENERS_MAP =
       new ConcurrentHashMap<>();
 
-  private static PinotMetricsFactory _pinotMetricsFactory = null;
+  private static final PinotMetricsFactory NOOP_FACTORY = new PinotMetricsFactory.Noop();
+  private static PinotMetricsFactory _pinotMetricsFactory = NOOP_FACTORY;
 
   /**
    * Initialize the metricsFactory ad registers the metricsRegistry
@@ -98,12 +99,12 @@ public class PinotMetricUtils {
         }
     );
 
-    Preconditions.checkState(_pinotMetricsFactory != null,
+    Preconditions.checkState(_pinotMetricsFactory != NOOP_FACTORY,
         "Failed to initialize PinotMetricsFactory. Please check if any pinot-metrics related jar is actually added to"
             + " the classpath.");
   }
 
-  private static Set<Class<?>> getPinotMetricsFactoryClasses() {
+  public static Set<Class<?>> getPinotMetricsFactoryClasses() {
     return PinotReflectionUtils.getClassesThroughReflection(METRICS_PACKAGE_REGEX_PATTERN, MetricsFactory.class);
   }
 
@@ -129,8 +130,8 @@ public class PinotMetricUtils {
           LOGGER.info("Registering metricsRegistry to listener {}", listenerClassName);
           addMetricsRegistryRegistrationListener(listener);
         } catch (Exception e) {
-          LOGGER
-              .warn("Caught exception while initializing MetricsRegistryRegistrationListener " + listenerClassName, e);
+          LOGGER.warn("Caught exception while initializing MetricsRegistryRegistrationListener {}", listenerClassName,
+              e);
         }
       }
     }
@@ -190,12 +191,25 @@ public class PinotMetricUtils {
   }
 
   /**
+   * Cleans up previous emitted metrics
+   */
+  @VisibleForTesting
+  public static void cleanUp() {
+    if (_pinotMetricsFactory == null) {
+      _pinotMetricsFactory = NOOP_FACTORY;
+    } else if (_pinotMetricsFactory != NOOP_FACTORY) {
+      _pinotMetricsFactory.getPinotMetricsRegistry().shutdown();
+      _pinotMetricsFactory = NOOP_FACTORY;
+    }
+  }
+
+  /**
    * Returns the metricsRegistry from the initialised metricsFactory.
    * If the metricsFactory is null, first creates and initializes the metricsFactory and registers the metrics registry.
    * @param metricsConfiguration metrics configs
    */
   public static synchronized PinotMetricsRegistry getPinotMetricsRegistry(PinotConfiguration metricsConfiguration) {
-    if (_pinotMetricsFactory == null) {
+    if (_pinotMetricsFactory == null || _pinotMetricsFactory == NOOP_FACTORY) {
       init(metricsConfiguration);
     }
     return _pinotMetricsFactory.getPinotMetricsRegistry();

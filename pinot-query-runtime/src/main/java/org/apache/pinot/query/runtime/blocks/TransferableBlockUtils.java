@@ -26,21 +26,29 @@ import java.util.List;
 import java.util.Map;
 import org.apache.pinot.common.datablock.DataBlock;
 import org.apache.pinot.common.datablock.DataBlockUtils;
+import org.apache.pinot.common.datablock.MetadataBlock;
+import org.apache.pinot.common.utils.DataSchema;
+import org.apache.pinot.query.runtime.plan.MultiStageQueryStats;
 
 
 public final class TransferableBlockUtils {
   private static final int MEDIAN_COLUMN_SIZE_BYTES = 8;
+  private static final TransferableBlock EMPTY_EOS = new TransferableBlock(MetadataBlock.newEos());
 
   private TransferableBlockUtils() {
     // do not instantiate.
   }
 
   public static TransferableBlock getEndOfStreamTransferableBlock() {
-    return new TransferableBlock(DataBlockUtils.getEndOfStreamDataBlock());
+    return EMPTY_EOS;
   }
 
-  public static TransferableBlock getNoOpTransferableBlock() {
-    return new TransferableBlock(DataBlockUtils.getNoOpBlock());
+  public static TransferableBlock getEndOfStreamTransferableBlock(MultiStageQueryStats stats) {
+    return new TransferableBlock(stats);
+  }
+
+  public static TransferableBlock wrap(DataBlock dataBlock) {
+    return new TransferableBlock(dataBlock);
   }
 
   public static TransferableBlock getErrorTransferableBlock(Exception e) {
@@ -55,12 +63,7 @@ public final class TransferableBlockUtils {
     return transferableBlock.isEndOfStreamBlock();
   }
 
-  public static boolean isNoOpBlock(TransferableBlock transferableBlock) {
-    return transferableBlock.isNoOpBlock();
-  }
-
   /**
-   *
    *  Split a block into multiple block so that each block size is within maxBlockSize. Currently,
    *  <ul>
    *    <li>For row data block, we split for row type dataBlock.</li>
@@ -69,31 +72,33 @@ public final class TransferableBlockUtils {
    *  </ul>
    *
    * @param block the data block
-   * @param type type of block
    * @param maxBlockSize Each chunk of data is estimated to be less than maxBlockSize
    * @return a list of data block chunks
    */
-  public static Iterator<TransferableBlock> splitBlock(TransferableBlock block, DataBlock.Type type, int maxBlockSize) {
-    List<TransferableBlock> blockChunks = new ArrayList<>();
+  public static Iterator<TransferableBlock> splitBlock(TransferableBlock block, int maxBlockSize) {
+    DataBlock.Type type = block.getType();
     if (type == DataBlock.Type.ROW) {
       // Use estimated row size, this estimate is not accurate and is used to estimate numRowsPerChunk only.
-      int estimatedRowSizeInBytes = block.getDataSchema().getColumnNames().length * MEDIAN_COLUMN_SIZE_BYTES;
+      DataSchema dataSchema = block.getDataSchema();
+      assert dataSchema != null;
+      int estimatedRowSizeInBytes = dataSchema.getColumnNames().length * MEDIAN_COLUMN_SIZE_BYTES;
       int numRowsPerChunk = maxBlockSize / estimatedRowSizeInBytes;
       Preconditions.checkState(numRowsPerChunk > 0, "row size too large for query engine to handle, abort!");
 
-      int totalNumRows = block.getNumRows();
-      List<Object[]> allRows = block.getContainer();
-      int currentRow = 0;
-      while (currentRow < totalNumRows) {
-        List<Object[]> chunk = allRows.subList(currentRow, Math.min(currentRow + numRowsPerChunk, allRows.size()));
-        currentRow += numRowsPerChunk;
-        blockChunks.add(new TransferableBlock(chunk, block.getDataSchema(), block.getType()));
+      List<Object[]> rows = block.getContainer();
+      int numRows = rows.size();
+      int numChunks = (numRows + numRowsPerChunk - 1) / numRowsPerChunk;
+      if (numChunks == 1) {
+        return Iterators.singletonIterator(block);
+      }
+      List<TransferableBlock> blockChunks = new ArrayList<>(numChunks);
+      for (int fromIndex = 0; fromIndex < numRows; fromIndex += numRowsPerChunk) {
+        int toIndex = Math.min(fromIndex + numRowsPerChunk, numRows);
+        blockChunks.add(new TransferableBlock(rows.subList(fromIndex, toIndex), dataSchema, DataBlock.Type.ROW));
       }
       return blockChunks.iterator();
-    } else if (type == DataBlock.Type.METADATA) {
-      return Iterators.singletonIterator(block);
     } else {
-      throw new IllegalArgumentException("Unsupported data block type: " + type);
+      return Iterators.singletonIterator(block);
     }
   }
 }

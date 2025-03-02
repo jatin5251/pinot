@@ -19,8 +19,13 @@
 package org.apache.pinot.tools.admin.command;
 
 import java.net.URI;
-import org.apache.commons.httpclient.HttpClient;
-import org.apache.commons.httpclient.methods.GetMethod;
+import org.apache.hc.client5.http.classic.methods.HttpGet;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
+import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
+import org.apache.hc.core5.http.HttpException;
+import org.apache.hc.core5.http.io.entity.EntityUtils;
+import org.apache.pinot.common.auth.AuthProviderUtils;
 import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.NetUtils;
@@ -30,7 +35,7 @@ import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
 
 
-@CommandLine.Command(name = "ChangeTableState")
+@CommandLine.Command(name = "ChangeTableState", mixinStandardHelpOptions = true)
 public class ChangeTableState extends AbstractBaseAdminCommand implements Command {
   private static final Logger LOGGER = LoggerFactory.getLogger(ChangeTableState.class);
 
@@ -61,10 +66,6 @@ public class ChangeTableState extends AbstractBaseAdminCommand implements Comman
   @CommandLine.Option(names = {"-authTokenUrl"}, required = false, description = "Http auth token url.")
   private String _authTokenUrl;
 
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, help = true,
-      description = "Print this message.")
-  private boolean _help = false;
-
   private AuthProvider _authProvider;
 
   public ChangeTableState setAuthProvider(AuthProvider authProvider) {
@@ -84,17 +85,22 @@ public class ChangeTableState extends AbstractBaseAdminCommand implements Comman
       throw new IllegalArgumentException(
           "Invalid value for state: " + _state + "\n Value must be one of enable|disable|drop");
     }
-    HttpClient httpClient = new HttpClient();
-    URI uri = new URI(_controllerProtocol, null, _controllerHost, Integer.parseInt(_controllerPort),
-        URI_TABLES_PATH + _tableName, "state=" + stateValue, null);
+    try (CloseableHttpClient httpClient = HttpClientBuilder.create().build()) {
+      URI uri = new URI(_controllerProtocol, null, _controllerHost, Integer.parseInt(_controllerPort),
+          URI_TABLES_PATH + _tableName, "state=" + stateValue, null);
 
-    GetMethod httpGet = new GetMethod(uri.toString());
-    makeAuthHeaders(makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user, _password))
-        .forEach(header -> httpGet.addRequestHeader(header.getName(), header.getValue()));
+      HttpGet httpGet = new HttpGet(uri);
+      AuthProviderUtils.makeAuthHeaders(
+              AuthProviderUtils.makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user, _password))
+          .forEach(header -> httpGet.addHeader(header.getName(), header.getValue()));
 
-    int status = httpClient.executeMethod(httpGet);
-    if (status != 200) {
-      throw new RuntimeException("Failed to change table state, error: " + httpGet.getResponseBodyAsString());
+      try (CloseableHttpResponse response = httpClient.execute(httpGet)) {
+        int status = response.getCode();
+        if (status != 200) {
+          String responseString = EntityUtils.toString(response.getEntity());
+          throw new HttpException("Failed to change table state, error: " + responseString);
+        }
+      }
     }
     return true;
   }
@@ -102,10 +108,6 @@ public class ChangeTableState extends AbstractBaseAdminCommand implements Comman
   @Override
   public String description() {
     return "Change the state (enable|disable|drop) of Pinot table";
-  }
-
-  public boolean getHelp() {
-    return _help;
   }
 
   @Override

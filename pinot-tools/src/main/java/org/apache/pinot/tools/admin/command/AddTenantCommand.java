@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.tools.admin.command;
 
+import org.apache.pinot.common.auth.AuthProviderUtils;
 import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.config.tenant.Tenant;
 import org.apache.pinot.spi.config.tenant.TenantRole;
@@ -30,18 +31,17 @@ import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
 
 
-@CommandLine.Command(name = "AddTenant")
+@CommandLine.Command(name = "AddTenant", mixinStandardHelpOptions = true)
 public class AddTenantCommand extends AbstractBaseAdminCommand implements Command {
   private static final Logger LOGGER = LoggerFactory.getLogger(AddTenantCommand.class);
 
-  @CommandLine.Option(names = {"-controllerHost"}, required = false, description = "host name for controller.")
+  @CommandLine.Option(names = {"-controllerHost"}, required = false, description = "Host name for controller.")
   private String _controllerHost;
 
-  @CommandLine.Option(names = {"-controllerPort"}, required = false,
-      description = "Port number to start the controller at.")
+  @CommandLine.Option(names = {"-controllerPort"}, required = false, description = "Port number for controller.")
   private String _controllerPort = DEFAULT_CONTROLLER_PORT;
 
-  @CommandLine.Option(names = {"-controllerProtocol"}, required = false, description = "protocol for controller.")
+  @CommandLine.Option(names = {"-controllerProtocol"}, required = false, description = "Protocol for controller.")
   private String _controllerProtocol = CommonConstants.HTTP_PROTOCOL;
 
   @CommandLine.Option(names = {"-name"}, required = true, description = "Name of the tenant to be created")
@@ -53,12 +53,13 @@ public class AddTenantCommand extends AbstractBaseAdminCommand implements Comman
   @CommandLine.Option(names = {"-instanceCount"}, required = true, description = "Number of instances.")
   private int _instanceCount;
 
-  @CommandLine.Option(names = {"-offlineInstanceCount"}, required = true, description = "Number of offline instances.")
-  private int _offlineInstanceCount;
+  @CommandLine.Option(names = {"-offlineInstanceCount"}, required = false,
+      description = "Number of offline instances.")
+  private Integer _offlineInstanceCount;
 
-  @CommandLine.Option(names = {"-realTimeInstanceCount"}, required = true,
+  @CommandLine.Option(names = {"-realTimeInstanceCount"}, required = false,
       description = "Number of realtime instances.")
-  private int _realtimeInstanceCount;
+  private Integer _realtimeInstanceCount;
 
   @CommandLine.Option(names = {"-exec"}, required = false, description = "Execute the command.")
   private boolean _exec;
@@ -74,10 +75,6 @@ public class AddTenantCommand extends AbstractBaseAdminCommand implements Comman
 
   @CommandLine.Option(names = {"-authTokenUrl"}, required = false, description = "Http auth token url.")
   private String _authTokenUrl;
-
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, help = true,
-      description = "Print this message.")
-  private boolean _help = false;
 
   private String _controllerAddress;
 
@@ -144,16 +141,25 @@ public class AddTenantCommand extends AbstractBaseAdminCommand implements Comman
     }
 
     if (!_exec) {
-      LOGGER.warn("Dry Running Command: " + toString());
+      LOGGER.warn("Dry Running Command: {}", toString());
       LOGGER.warn("Use the -exec option to actually execute the command.");
       return true;
     }
 
-    LOGGER.info("Executing command: " + toString());
+    LOGGER.info("Executing command: {}", toString());
+
+    if (_role == TenantRole.SERVER) {
+      if (_offlineInstanceCount == null || _realtimeInstanceCount == null) {
+        throw new IllegalArgumentException("-offlineInstanceCount and -realTimeInstanceCount should be set when "
+            + "creating a server tenant.");
+      }
+    }
+
     Tenant tenant = new Tenant(_role, _name, _instanceCount, _offlineInstanceCount, _realtimeInstanceCount);
     String res = AbstractBaseAdminCommand
         .sendRequest("POST", ControllerRequestURLBuilder.baseUrl(_controllerAddress).forTenantCreate(),
-            tenant.toJsonString(), makeAuthHeaders(makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user,
+            tenant.toJsonString(), AuthProviderUtils.makeAuthHeaders(
+                AuthProviderUtils.makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user,
                 _password)));
 
     LOGGER.info(res);
@@ -164,11 +170,6 @@ public class AddTenantCommand extends AbstractBaseAdminCommand implements Comman
   @Override
   public String getName() {
     return "AddTenant";
-  }
-
-  @Override
-  public boolean getHelp() {
-    return _help;
   }
 
   @Override

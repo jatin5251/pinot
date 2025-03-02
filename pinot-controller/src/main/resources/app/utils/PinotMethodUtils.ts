@@ -17,8 +17,9 @@
  * under the License.
  */
 
-import { get, map, each, isEqual, isArray, keys, union } from 'lodash';
-import { DataTable, SQLResult } from 'Models';
+import jwtDecode from "jwt-decode";
+import { get, each, isEqual, isArray, keys, union } from 'lodash';
+import { DataTable, InstanceType, SchemaInfo, SegmentMetadata, SqlException, SQLResult } from 'Models';
 import moment from 'moment';
 import {
   getTenants,
@@ -32,13 +33,13 @@ import {
   getTaskTypes,
   getTaskTypeDebug,
   getTables,
-  getTaskTypeTasks,
+  getTaskTypeTasksCount,
   getTaskTypeState,
   stopTasks,
   resumeTasks,
   cleanupTasks,
   deleteTasks,
-  sheduleTask,
+  scheduleTask,
   executeTask,
   getJobDetail,
   getMinionMeta,
@@ -93,10 +94,13 @@ import {
   requestUpdateUser,
   getTaskProgress,
   getSegmentReloadStatus,
-  getTaskRuntimeConfig
+  getTaskRuntimeConfig,
+  getSchemaInfo,
+  getSegmentsStatus,
+  getServerToSegmentsCount
 } from '../requests';
 import { baseApi } from './axios-config';
-import Utils, { getDisplaySegmentStatus } from './Utils';
+import Utils from './Utils';
 import { matchPath } from 'react-router';
 import RouterData from '../router';
 const JSONbig = require('json-bigint')({'storeAsString': true})
@@ -142,19 +146,22 @@ const getTenantsData = () => {
 
 // This method is used to fetch all instances on cluster manager home page
 // API: /instances
-// Expected Output: {Controller: ['Controller1', 'Controller2'], Broker: ['Broker1', 'Broker2']}
+// Expected Output: {CONTROLLER: ['Controller1', 'Controller2'], BROKER: ['Broker1', 'Broker2']}
 const getAllInstances = () => {
   return getInstances().then(({ data }) => {
-    const initialVal: DataTable = {};
-    // It will create instances list array like
-    // {Controller: ['Controller1', 'Controller2'], Broker: ['Broker1', 'Broker2']}
-    const groupedData = data.instances.reduce((r, a) => {
-      const y = a.split('_');
-      const key = y[0].trim();
-      r[key] = [...(r[key] || []), a];
-      return r;
-    }, initialVal);
-    return {'Controller': groupedData.Controller, ...groupedData};
+    const instanceTypeToInstancesMap: DataTable = {
+      [InstanceType.CONTROLLER]: [],
+      [InstanceType.BROKER]: [],
+      [InstanceType.SERVER]: [],
+      [InstanceType.MINION]: []
+    };
+    
+    data.instances.forEach((instance) => {
+      const instanceType =  instance.split('_')[0].toUpperCase();
+      instanceTypeToInstancesMap[instanceType].push(instance);
+    });
+
+    return instanceTypeToInstancesMap;
   });
 };
 
@@ -192,10 +199,23 @@ const getClusterName = () => {
 // This method is used to fetch array of live instances name
 // API: /zk/ls?path=:ClusterName/LIVEINSTANCES
 // Expected Output: []
-const getLiveInstance = (clusterName) => {
+const getLiveInstance = (clusterName: string) => {
   const params = encodeURIComponent(`/${clusterName}/LIVEINSTANCES`);
   return zookeeperGetList(params).then((data) => {
     return data;
+  });
+};
+
+const getLiveInstances = () => {
+  let localclusterName: string | null = localStorage.getItem('pinot_ui:clusterName');
+  let clusterNameRes: Promise<string>;
+  if(!localclusterName || localclusterName === ''){
+    clusterNameRes = getClusterName();
+  } else {
+    clusterNameRes = Promise.resolve(localclusterName);
+  }
+  return clusterNameRes.then((clusterName) => {
+    return getLiveInstance(clusterName);
   });
 };
 
@@ -266,21 +286,27 @@ const getQueryResults = (params) => {
   return getQueryResult(params).then(({ data }) => {
     let queryResponse = getAsObject(data);
 
-    let errorStr = '';
+    let exceptions: SqlException[] = [];
     let dataArray = [];
     let columnList = [];
     // if sql api throws error, handle here
     if(typeof queryResponse === 'string'){
-      errorStr = queryResponse;
-    } else if (queryResponse && queryResponse.exceptions && queryResponse.exceptions.length) {
-      errorStr = JSON.stringify(queryResponse.exceptions, null, 2);
-    } else
-    {
-      if (queryResponse.resultTable?.dataSchema?.columnNames?.length)
-      {
-        columnList = queryResponse.resultTable.dataSchema.columnNames;
-        dataArray = queryResponse.resultTable.rows;
+      exceptions.push({errorCode: null, message: queryResponse});
+    }
+    // if sql api returns a structured error with a `code`, handle here
+    if (queryResponse && queryResponse.code) {
+      if (queryResponse.error) {
+        exceptions.push({errorCode: null, message: "Query failed with error code: " + queryResponse.code + " and error: " + queryResponse.error});
+      } else {
+        exceptions.push({errorCode: null, message: "Query failed with error code: " + queryResponse.code + " but no logs. Please see controller logs for error."});
       }
+    }
+    if (queryResponse && queryResponse.exceptions && queryResponse.exceptions.length) {
+      exceptions = queryResponse.exceptions as SqlException[];
+    } 
+    if (queryResponse.resultTable?.dataSchema?.columnNames?.length) {
+      columnList = queryResponse.resultTable.dataSchema.columnNames;
+      dataArray = queryResponse.resultTable.rows;
     }
 
     const columnStats = ['timeUsedMs',
@@ -308,7 +334,7 @@ const getQueryResults = (params) => {
     ];
 
     return {
-      error: errorStr,
+      exceptions: exceptions,
       result: {
         columns: columnList,
         records: dataArray,
@@ -345,7 +371,6 @@ const getTenantTableData = (tenantName) => {
 const getSchemaObject = async (schemaName) =>{
   let schemaObj:Array<any> = [];
     let {data} = await getSchema(schemaName);
-    console.log(data);
       schemaObj.push(data.schemaName);
       schemaObj.push(data.dimensionFieldSpecs ? data.dimensionFieldSpecs.length : 0);
       schemaObj.push(data.dateTimeFieldSpecs ? data.dateTimeFieldSpecs.length : 0);
@@ -370,22 +395,24 @@ const getListingSchemaList = () => {
   })
 };
 
-const allSchemaDetailsColumnHeader = ["Schema Name", "Dimension Columns", "Date-Time Columns", "Metrics Columns", "Total Columns"];
+const allSchemaDetailsColumnHeader = ["Schema Name", "Dimension Columns", "Date-Time Columns", "Metrics Columns", "Complex Columns", "Total Columns"];
 
 const getAllSchemaDetails = async (schemaList) => {
   let schemaDetails:Array<any> = [];
-  let promiseArr = [];
-  promiseArr = schemaList.map(async (o)=>{
-    return await getSchema(o);
-  });
-  const results = await Promise.all(promiseArr);
+  const results:SchemaInfo[] = await getSchemaDataInfo();
   schemaDetails = results.map((obj)=>{
     let schemaObj = [];
-    schemaObj.push(obj.data.schemaName);
-    schemaObj.push(obj.data.dimensionFieldSpecs ? obj.data.dimensionFieldSpecs.length : 0);
-    schemaObj.push(obj.data.dateTimeFieldSpecs ? obj.data.dateTimeFieldSpecs.length : 0);
-    schemaObj.push(obj.data.metricFieldSpecs ? obj.data.metricFieldSpecs.length : 0);
-    schemaObj.push(schemaObj[1] + schemaObj[2] + schemaObj[3]);
+    const { numDimensionFields, numDateTimeFields, numComplexFields, numMetricFields, schemaName} = obj;
+
+    schemaObj.push(schemaName);
+    schemaObj.push(numDimensionFields);
+    schemaObj.push(numDateTimeFields);
+    schemaObj.push(numMetricFields);
+    schemaObj.push(numComplexFields)
+
+    const totalColumns = numDimensionFields + numMetricFields + numDateTimeFields + numComplexFields;
+    schemaObj.push(totalColumns);
+
     return schemaObj;
   })
   return {
@@ -401,6 +428,30 @@ const allTableDetailsColumnHeader = [
   'Number of Segments',
   'Status',
 ];
+
+const getTableSizes = (tableName: string) => {
+  return getTableSize(tableName).then(result => {
+    return {
+      reported_size: Utils.formatBytes(result.data.reportedSizeInBytes),
+      estimated_size: Utils.formatBytes(result.data.estimatedSizeInBytes),
+    };
+  })
+}
+
+const getSegmentCountAndStatus = (tableName: string) => {
+  return getIdealState(tableName).then(result => {
+    const idealState = result.data.OFFLINE || result.data.REALTIME || {};
+    return getExternalView(tableName).then(result => {
+      const externalView = result.data.OFFLINE || result.data.REALTIME || {};
+      const externalSegmentCount = Object.keys(externalView).length;
+      const idealSegmentCount = Object.keys(idealState).length;
+      return {
+        segment_count: `${externalSegmentCount} / ${idealSegmentCount}`,
+        segment_status: Utils.getSegmentStatus(idealState, externalView)
+      };
+    });
+  });
+}
 
 const getAllTableDetails = (tablesList) => {
   if (tablesList.length) {
@@ -457,10 +508,10 @@ const getAllTableDetails = (tablesList) => {
       };
     });
   }
-  return {
+  return Promise.resolve({
     columns: allTableDetailsColumnHeader,
     records: []
-  };
+  });
 };
 
 // This method is used to display summary of a particular tenant table
@@ -476,28 +527,38 @@ const getTableSummaryData = (tableName) => {
   });
 };
 
-// This method is used to display segment list of a particular tenant table
-// API: /tables/:tableName/idealstate
-//      /tables/:tableName/externalview
-// Expected Output: {columns: [], records: [], externalViewObject: {}}
-const getSegmentList = (tableName) => {
-  const promiseArr = [];
-  promiseArr.push(getIdealState(tableName));
-  promiseArr.push(getExternalView(tableName));
+// This method is used to display segment list of a particular table with segment name and it's status
+// API: /tables/${name}/segmentsStatus
+// Expected Output: {columns: [], records: []}
+  const getSegmentList = (tableName) => {
+    return getSegmentsStatus(tableName).then((results) => {
+      const segmentsArray = results.data; // assuming the array is inside `segments` property
+      return {
+        columns: ['Segment Name', 'Status'],
+        records: segmentsArray.map((segment) => [
+          segment.segmentName,
+          segment.segmentStatus
+        ])
+      };
+    });
+  };
 
-  return Promise.all(promiseArr).then((results) => {
-    const idealStateObj = results[0].data.OFFLINE || results[0].data.REALTIME;
-    const externalViewObj = results[1].data.OFFLINE || results[1].data.REALTIME;
+const getExternalViewObj = (tableName) => {
+  return getExternalView(tableName).then((result) => {
+    return result.data.OFFLINE || result.data.REALTIME;
+  });
+}; 
 
+const fetchServerToSegmentsCountData = (tableName, tableType) => {
+  return getServerToSegmentsCount(tableName, tableType).then((results) => {
+    const segmentsArray = results.data; 
     return {
-      columns: ['Segment Name', 'Status'],
-      records: Object.keys(idealStateObj).map((key) => {
-        return [
-          key,
-          getDisplaySegmentStatus(idealStateObj[key], externalViewObj[key])
-        ];
-      }),
-      externalViewObj
+      records: segmentsArray.flatMap((server) =>
+        Object.entries(server.serverToSegmentsCountMap).map(([serverName, segmentsCount]) => [ 
+          serverName,       
+          segmentsCount    
+        ])
+      )
     };
   });
 };
@@ -549,7 +610,7 @@ const getSegmentDetails = (tableName, segmentName) => {
 
   return Promise.all(promiseArr).then((results) => {
     const obj = results[0].data.OFFLINE || results[0].data.REALTIME;
-    const segmentMetaData = results[1].data;
+    const segmentMetaData: SegmentMetadata = results[1].data;
     const debugObj = results[2].data;
     let debugInfoObj = {};
 
@@ -562,7 +623,6 @@ const getSegmentDetails = (tableName, segmentName) => {
         });
       }
     }
-    console.log(debugInfoObj);
 
     const result = [];
     for (const prop in obj[segmentName]) {
@@ -575,6 +635,7 @@ const getSegmentDetails = (tableName, segmentName) => {
     const segmentMetaDataJson = { ...segmentMetaData }
     delete segmentMetaDataJson.indexes
     delete segmentMetaDataJson.columns
+    const indexes = get(segmentMetaData, 'indexes', {})
 
     return {
       replicaSet: {
@@ -583,7 +644,7 @@ const getSegmentDetails = (tableName, segmentName) => {
       },
       indexes: {
         columns: ['Field Name', 'Bloom Filter', 'Dictionary', 'Forward Index', 'Sorted', 'Inverted Index', 'JSON Index', 'Null Value Vector Reader', 'Range Index'],
-        records: Object.keys(segmentMetaData.indexes).map(fieldName => [
+        records: Object.keys(indexes).map(fieldName => [
           fieldName,
           segmentMetaData.indexes[fieldName]["bloom-filter"] === "YES",
           segmentMetaData.indexes[fieldName]["dictionary"] === "YES",
@@ -711,13 +772,13 @@ const deleteNode = (path) => {
   });
 };
 
-const getBrokerOfTenant = (tenantName) => {
+const getBrokerOfTenant = (tenantName: string) => {
   return getBrokerListOfTenant(tenantName).then((response)=>{
     return !response.data.error ? response.data : [];
   });
 };
 
-const getServerOfTenant = (tenantName) => {
+const getServerOfTenant = (tenantName: string) => {
   return getServerListOfTenant(tenantName).then((response)=>{
     return !response.data.error ? response.data.ServerInstances : [];
   });
@@ -776,10 +837,15 @@ const getAllTaskTypes = async () => {
 };
 
 const getTaskInfo = async (taskType) => {
-  const tasksRes = await getTaskTypeTasks(taskType);
+  const tasksResLength = await getTaskTypeTasksCount(taskType);
   const stateRes = await getTaskTypeState(taskType);
-  const state = get(stateRes, 'data', '');
-  return [tasksRes?.data?.length || 0, state];
+
+  let state = get(stateRes, 'data', '');
+  // response contains error
+  if(typeof state !== "string") {
+    state = "";
+  }
+  return [tasksResLength.data || 0, state];
 };
 
 const stopAllTasks = (taskType) => {
@@ -893,8 +959,8 @@ const deleteSegmentOp = (tableName, segmentName) => {
   });
 };
 
-const fetchTableJobs = async (tableName: string) => {
-  const response = await getTableJobs(tableName);
+const fetchTableJobs = async (tableName: string, jobTypes?: string) => {
+  const response = await getTableJobs(tableName, jobTypes);
   
   return response.data;
 }
@@ -917,8 +983,8 @@ const updateSchema = (schemaName: string, schema: string, reload?: boolean) => {
   })
 };
 
-const deleteTableOp = (tableName) => {
-  return deleteTable(tableName).then((response)=>{
+const deleteTableOp = (tableName: string, retention?: string) => {
+  return deleteTable(tableName, retention).then((response)=>{
     return response.data;
   });
 };
@@ -972,6 +1038,12 @@ const getSchemaData = (schemaName) => {
   });
 };
 
+const getSchemaDataInfo = () => {
+  return getSchemaInfo().then((response)=>{
+    return response.data.schemasInfo;
+  });
+};
+
 const getTableState = (tableName, tableType) => {
   return getState(tableName, tableType).then((response)=>{
     return response.data;
@@ -1000,7 +1072,9 @@ const verifyAuth = (authToken) => {
 
 const getAccessTokenFromHashParams = () => {
   let accessToken = '';
-  const urlSearchParams = new URLSearchParams(location.hash.substr(1));
+  const hashParam = removeAllLeadingForwardSlash(location.hash.substring(1));
+  
+  const urlSearchParams = new URLSearchParams(hashParam);
   if (urlSearchParams.has('access_token')) {
     accessToken = urlSearchParams.get('access_token') as string;
   }
@@ -1008,6 +1082,13 @@ const getAccessTokenFromHashParams = () => {
   return accessToken;
 };
 
+const removeAllLeadingForwardSlash = (string: string) => {
+  if(!string) {
+    return "";
+  }
+
+  return string.replace(new RegExp("^/+", "g"), "");
+}
 
 // validates app redirect path with known routes
 const validateRedirectPath = (path: string): boolean => {
@@ -1101,7 +1182,7 @@ const getTableData = (params)=>{
 };
 
 const scheduleTaskAction = (tableName, taskType)=>{
-  return sheduleTask(tableName, taskType).then(response=>{
+  return scheduleTask(tableName, taskType).then(response=>{
     return response.data;
   })
 };
@@ -1142,6 +1223,52 @@ const updateUser = (userObject, passwordChanged) =>{
   })
 }
 
+const getAuthUserNameFromAccessToken = (
+  accessToken: string
+): string => {
+  if (!accessToken) {
+      return "";
+  }
+
+  let decoded;
+  try {
+      decoded = jwtDecode(accessToken);
+  } catch (e) {
+      return "";
+  }
+
+  if (!decoded) {
+      return "";
+  }
+
+  const name = get(decoded, "name") || "";
+  return name;
+};
+
+const getAuthUserEmailFromAccessToken = (
+  accessToken: string
+): string => {
+  if (!accessToken) {
+      return "";
+  }
+
+  let decoded;
+  try {
+      decoded = jwtDecode(accessToken);
+  } catch (e) {
+      return "";
+  }
+
+  if (!decoded) {
+      return "";
+  }
+
+  const email =
+      get(decoded, "email") || "";
+
+  return email;
+};
+
 export default {
   getTenantsData,
   getAllInstances,
@@ -1156,11 +1283,14 @@ export default {
   getAllTableDetails,
   getTableSummaryData,
   getSegmentList,
+  getExternalViewObj,
   getSegmentStatus,
   getTableDetails,
   getSegmentDetails,
+  getSegmentCountAndStatus,
   getClusterName,
   getLiveInstance,
+  getLiveInstances,
   getLiveInstanceConfig,
   getInstanceConfig,
   getInstanceDetails,
@@ -1181,6 +1311,7 @@ export default {
   fetchSegmentReloadStatus,
   getTaskTypeDebugData,
   getTableData,
+  getTableSizes,
   getTaskRuntimeConfigData,
   getTaskInfo,
   stopAllTasks,
@@ -1224,5 +1355,8 @@ export default {
   getUserList,
   addUser,
   deleteUser,
-  updateUser
+  updateUser,
+  getAuthUserNameFromAccessToken,
+  getAuthUserEmailFromAccessToken,
+  fetchServerToSegmentsCountData
 };

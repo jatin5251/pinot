@@ -19,12 +19,12 @@
 package org.apache.pinot.core.transport;
 
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeoutException;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.pinot.common.config.NettyConfig;
 import org.apache.pinot.common.config.TlsConfig;
 import org.apache.pinot.common.datatable.DataTable;
@@ -33,6 +33,8 @@ import org.apache.pinot.common.metrics.BrokerMeter;
 import org.apache.pinot.common.metrics.BrokerMetrics;
 import org.apache.pinot.common.request.BrokerRequest;
 import org.apache.pinot.common.request.InstanceRequest;
+import org.apache.pinot.common.utils.config.QueryOptionsUtils;
+import org.apache.pinot.core.routing.ServerRouteInfo;
 import org.apache.pinot.core.transport.server.routing.stats.ServerRoutingStatsManager;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.utils.CommonConstants;
@@ -85,19 +87,23 @@ public class QueryRouter {
   }
 
   public AsyncQueryResponse submitQuery(long requestId, String rawTableName,
-      @Nullable BrokerRequest offlineBrokerRequest, @Nullable Map<ServerInstance, List<String>> offlineRoutingTable,
-      @Nullable BrokerRequest realtimeBrokerRequest, @Nullable Map<ServerInstance, List<String>> realtimeRoutingTable,
-      long timeoutMs) {
+      @Nullable BrokerRequest offlineBrokerRequest,
+      @Nullable Map<ServerInstance, ServerRouteInfo> offlineRoutingTable,
+      @Nullable BrokerRequest realtimeBrokerRequest,
+      @Nullable Map<ServerInstance, ServerRouteInfo> realtimeRoutingTable, long timeoutMs) {
     assert offlineBrokerRequest != null || realtimeBrokerRequest != null;
 
     // can prefer but not require TLS until all servers guaranteed to be on TLS
     boolean preferTls = _serverChannelsTls != null;
 
+    // skip unavailable servers if the query option is set
+    boolean skipUnavailableServers = isSkipUnavailableServers(offlineBrokerRequest, realtimeBrokerRequest);
+
     // Build map from server to request based on the routing table
     Map<ServerRoutingInstance, InstanceRequest> requestMap = new HashMap<>();
     if (offlineBrokerRequest != null) {
       assert offlineRoutingTable != null;
-      for (Map.Entry<ServerInstance, List<String>> entry : offlineRoutingTable.entrySet()) {
+      for (Map.Entry<ServerInstance, ServerRouteInfo> entry : offlineRoutingTable.entrySet()) {
         ServerRoutingInstance serverRoutingInstance =
             entry.getKey().toServerRoutingInstance(TableType.OFFLINE, preferTls);
         InstanceRequest instanceRequest = getInstanceRequest(requestId, offlineBrokerRequest, entry.getValue());
@@ -106,7 +112,7 @@ public class QueryRouter {
     }
     if (realtimeBrokerRequest != null) {
       assert realtimeRoutingTable != null;
-      for (Map.Entry<ServerInstance, List<String>> entry : realtimeRoutingTable.entrySet()) {
+      for (Map.Entry<ServerInstance, ServerRouteInfo> entry : realtimeRoutingTable.entrySet()) {
         ServerRoutingInstance serverRoutingInstance =
             entry.getKey().toServerRoutingInstance(TableType.REALTIME, preferTls);
         InstanceRequest instanceRequest = getInstanceRequest(requestId, realtimeBrokerRequest, entry.getValue());
@@ -123,10 +129,6 @@ public class QueryRouter {
       ServerRoutingInstance serverRoutingInstance = entry.getKey();
       ServerChannels serverChannels = serverRoutingInstance.isTlsEnabled() ? _serverChannelsTls : _serverChannels;
       try {
-        // Record stats related to query submission just before sending the request. Otherwise, if the response is
-        // received immediately, there's a possibility of updating query response stats before updating query
-        // submission stats.
-        _serverRoutingStatsManager.recordStatsAfterQuerySubmission(requestId, serverRoutingInstance.getInstanceId());
         serverChannels.sendRequest(rawTableName, asyncQueryResponse, serverRoutingInstance, entry.getValue(),
             timeoutMs);
         asyncQueryResponse.markRequestSubmitted(serverRoutingInstance);
@@ -138,12 +140,26 @@ public class QueryRouter {
         break;
       } catch (Exception e) {
         _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.REQUEST_SEND_EXCEPTIONS, 1);
-        markQueryFailed(requestId, serverRoutingInstance, asyncQueryResponse, e);
-        break;
+        if (skipUnavailableServers) {
+          asyncQueryResponse.skipServerResponse();
+        } else {
+          markQueryFailed(requestId, serverRoutingInstance, asyncQueryResponse, e);
+          break;
+        }
       }
     }
 
     return asyncQueryResponse;
+  }
+
+  private boolean isSkipUnavailableServers(@Nullable BrokerRequest offlineBrokerRequest,
+      @Nullable BrokerRequest realtimeBrokerRequest) {
+    if (offlineBrokerRequest != null && QueryOptionsUtils.isSkipUnavailableServers(
+        offlineBrokerRequest.getPinotQuery().getQueryOptions())) {
+      return true;
+    }
+    return realtimeBrokerRequest != null && QueryOptionsUtils.isSkipUnavailableServers(
+        realtimeBrokerRequest.getPinotQuery().getQueryOptions());
   }
 
   private void markQueryFailed(long requestId, ServerRoutingInstance serverRoutingInstance,
@@ -151,6 +167,14 @@ public class QueryRouter {
     LOGGER.error("Caught exception while sending request {} to server: {}, marking query failed", requestId,
         serverRoutingInstance, e);
     asyncQueryResponse.markQueryFailed(serverRoutingInstance, e);
+  }
+
+  public boolean hasChannel(ServerInstance serverInstance) {
+    if (_serverChannelsTls != null) {
+      return _serverChannelsTls.hasChannel(serverInstance.toServerRoutingInstance(TableType.OFFLINE, true));
+    } else {
+      return _serverChannels.hasChannel(serverInstance.toServerRoutingInstance(TableType.OFFLINE, false));
+    }
   }
 
   /**
@@ -195,7 +219,8 @@ public class QueryRouter {
     _asyncQueryResponseMap.remove(requestId);
   }
 
-  private InstanceRequest getInstanceRequest(long requestId, BrokerRequest brokerRequest, List<String> segments) {
+  private InstanceRequest getInstanceRequest(long requestId, BrokerRequest brokerRequest,
+      ServerRouteInfo segments) {
     InstanceRequest instanceRequest = new InstanceRequest();
     instanceRequest.setRequestId(requestId);
     instanceRequest.setQuery(brokerRequest);
@@ -203,8 +228,14 @@ public class QueryRouter {
     if (queryOptions != null) {
       instanceRequest.setEnableTrace(Boolean.parseBoolean(queryOptions.get(CommonConstants.Broker.Request.TRACE)));
     }
-    instanceRequest.setSearchSegments(segments);
+    instanceRequest.setSearchSegments(segments.getSegments());
     instanceRequest.setBrokerId(_brokerId);
+    if (CollectionUtils.isNotEmpty(segments.getOptionalSegments())) {
+      // Don't set this field, i.e. leave it as null, if there is no optional segment at all, to be more backward
+      // compatible, as there are places like in multi-stage query engine where this field is not set today when
+      // creating the InstanceRequest.
+      instanceRequest.setOptionalSegments(segments.getOptionalSegments());
+    }
     return instanceRequest;
   }
 }

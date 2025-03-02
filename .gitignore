@@ -2,9 +2,12 @@ cscope.*
 .classpath
 .project
 .svn
+.java-version
 .externalToolBuilders/
 maven-eclipse.xml
 target/
+/examples/
+/logs/
 bin/
 */bin/
 .idea
@@ -25,7 +28,6 @@ docs/_build
 **/.docker/
 **/.env
 **/.factorypath
-.mvn/
 
 # Misc
 .envrc
@@ -44,10 +46,14 @@ yarn-error.log*
 quickstart*
 
 #build symlink directory
-build*
+build
+build/*
 
 #helm related files
 kubernetes/helm/**/charts/
 kubernetes/helm/**/requirements.lock
 kubernetes/helm/**/Chart.lock
 
+#Develocity
+.mvn/.gradle-enterprise/
+.mvn/.develocity/

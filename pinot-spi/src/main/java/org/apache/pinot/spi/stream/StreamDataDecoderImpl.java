@@ -30,9 +30,17 @@ public class StreamDataDecoderImpl implements StreamDataDecoder {
   public static final String KEY = "__key";
   public static final String HEADER_KEY_PREFIX = "__header$";
   public static final String METADATA_KEY_PREFIX = "__metadata$";
+  public static final String RECORD_SERIALIZED_VALUE_SIZE_KEY = METADATA_KEY_PREFIX + "recordSerializedValueSize";
 
   private final StreamMessageDecoder _valueDecoder;
   private final GenericRow _reuse = new GenericRow();
+
+  /**
+   * @return Whether the given key is one of the special types of keys (__key, __header$, etc.)
+   */
+  public static boolean isSpecialKeyType(String key) {
+    return key.equals(KEY) || key.startsWith(HEADER_KEY_PREFIX) || key.startsWith(METADATA_KEY_PREFIX);
+  }
 
   public StreamDataDecoderImpl(StreamMessageDecoder valueDecoder) {
     _valueDecoder = valueDecoder;
@@ -49,13 +57,16 @@ public class StreamDataDecoderImpl implements StreamDataDecoder {
         if (message.getKey() != null) {
           row.putValue(KEY, new String(message.getKey(), StandardCharsets.UTF_8));
         }
-        RowMetadata metadata = message.getMetadata();
-        if (metadata != null && metadata.getHeaders() != null) {
-          metadata.getHeaders().getFieldToValueMap()
-              .forEach((key, value) -> row.putValue(HEADER_KEY_PREFIX + key, value));
-
-          metadata.getRecordMetadata()
-                  .forEach((key, value) -> row.putValue(METADATA_KEY_PREFIX + key, value));
+        StreamMessageMetadata metadata = message.getMetadata();
+        if (metadata != null) {
+          if (metadata.getHeaders() != null) {
+            metadata.getHeaders().getFieldToValueMap()
+                .forEach((key, value) -> row.putValue(HEADER_KEY_PREFIX + key, value));
+          }
+          if (metadata.getRecordMetadata() != null) {
+            metadata.getRecordMetadata().forEach((key, value) -> row.putValue(METADATA_KEY_PREFIX + key, value));
+          }
+          row.putValue(RECORD_SERIALIZED_VALUE_SIZE_KEY, message.getLength());
         }
         return new StreamDataDecoderResult(row, null);
       } else {

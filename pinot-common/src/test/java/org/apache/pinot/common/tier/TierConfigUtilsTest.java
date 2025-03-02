@@ -24,6 +24,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import org.apache.pinot.common.utils.config.TierConfigUtils;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
@@ -107,6 +108,14 @@ public class TierConfigUtilsTest {
     Assert.assertEquals(tier.getStorage().getType(), TierFactory.PINOT_SERVER_STORAGE_TYPE);
     Assert.assertEquals(((PinotServerTierStorage) tier.getStorage()).getServerTag(), "tier1_tag_OFFLINE");
 
+    // With provided segments, the time base selector is overwritten by a fixed selector.
+    tier = TierFactory.getTier(tierConfig, null, Set.of("segment1", "segment2"));
+    Assert.assertEquals(tier.getName(), "tier1");
+    Assert.assertTrue(tier.getSegmentSelector() instanceof FixedTierSegmentSelector);
+    Assert.assertEquals(tier.getSegmentSelector().getType(), TierFactory.FIXED_SEGMENT_SELECTOR_TYPE);
+    Assert.assertEquals(((FixedTierSegmentSelector) tier.getSegmentSelector()).getSegmentsToSelect(),
+        Sets.newHashSet("segment1", "segment2"));
+
     tierConfig = new TierConfig("tier1", TierFactory.FIXED_SEGMENT_SELECTOR_TYPE, null,
         Lists.newArrayList("segment1", "segment2", "segment3"), TierFactory.PINOT_SERVER_STORAGE_TYPE,
         "tier1_tag_OFFLINE", null, null);
@@ -117,9 +126,16 @@ public class TierConfigUtilsTest {
     Assert.assertEquals(((FixedTierSegmentSelector) tier.getSegmentSelector()).getSegmentsToSelect(),
         Sets.newHashSet("segment1", "segment2", "segment3"));
 
-    tierConfig = new TierConfig("tier1", TierFactory.FIXED_SEGMENT_SELECTOR_TYPE, null,
-        null, TierFactory.PINOT_SERVER_STORAGE_TYPE,
-        "tier1_tag_OFFLINE", null, null);
+    // With provided segments, the fixed selector can be overwritten with different set of segments.
+    tier = TierFactory.getTier(tierConfig, null, Set.of("segment1a", "segment2b"));
+    Assert.assertEquals(tier.getName(), "tier1");
+    Assert.assertTrue(tier.getSegmentSelector() instanceof FixedTierSegmentSelector);
+    Assert.assertEquals(tier.getSegmentSelector().getType(), TierFactory.FIXED_SEGMENT_SELECTOR_TYPE);
+    Assert.assertEquals(((FixedTierSegmentSelector) tier.getSegmentSelector()).getSegmentsToSelect(),
+        Sets.newHashSet("segment1a", "segment2b"));
+
+    tierConfig = new TierConfig("tier1", TierFactory.FIXED_SEGMENT_SELECTOR_TYPE, null, null,
+        TierFactory.PINOT_SERVER_STORAGE_TYPE, "tier1_tag_OFFLINE", null, null);
     tier = TierFactory.getTier(tierConfig, null);
     Assert.assertEquals(tier.getName(), "tier1");
     Assert.assertTrue(tier.getSegmentSelector() instanceof FixedTierSegmentSelector);
@@ -192,30 +208,21 @@ public class TierConfigUtilsTest {
   @Test
   public void testGetDataDirForTier() {
     TableConfig tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName("myTable").build();
-    try {
-      TierConfigUtils.getDataDirForTier(tableConfig, "tier1");
-    } catch (Exception e) {
-      Assert.assertEquals(e.getMessage(), "No dataDir for tier: tier1 for table: myTable_OFFLINE");
-    }
+    String dataDir = TierConfigUtils.getDataDirForTier(tableConfig, "tier1");
+    Assert.assertNull(dataDir);
     tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName("myTable").setTierConfigList(Lists
         .newArrayList(new TierConfig("myTier", TierFactory.TIME_SEGMENT_SELECTOR_TYPE, "10d", null,
             TierFactory.PINOT_SERVER_STORAGE_TYPE, "tag_OFFLINE", null, null))).build();
-    try {
-      TierConfigUtils.getDataDirForTier(tableConfig, "tier1");
-    } catch (Exception e) {
-      Assert.assertEquals(e.getMessage(), "No dataDir for tier: tier1 for table: myTable_OFFLINE");
-    }
-    try {
-      TierConfigUtils.getDataDirForTier(tableConfig, "myTier");
-    } catch (Exception e) {
-      Assert.assertEquals(e.getMessage(), "No dataDir for tier: myTier for table: myTable_OFFLINE");
-    }
+    dataDir = TierConfigUtils.getDataDirForTier(tableConfig, "tier1");
+    Assert.assertNull(dataDir);
+    dataDir = TierConfigUtils.getDataDirForTier(tableConfig, "myTier");
+    Assert.assertNull(dataDir);
     // Provide instance tierConfigs for the tier.
     Map<String, Map<String, String>> instanceTierConfigs = new HashMap<>();
     Map<String, String> tierCfgMap = new HashMap<>();
     tierCfgMap.put("datadir", "/abc/xyz");
     instanceTierConfigs.put("myTier", tierCfgMap);
-    String dataDir = TierConfigUtils.getDataDirForTier(tableConfig, "myTier", instanceTierConfigs);
+    dataDir = TierConfigUtils.getDataDirForTier(tableConfig, "myTier", instanceTierConfigs);
     Assert.assertEquals(dataDir, "/abc/xyz");
     // Table tierConfigs overwrite those from instance tierConfigs.
     tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName("myTable").setTierConfigList(Lists

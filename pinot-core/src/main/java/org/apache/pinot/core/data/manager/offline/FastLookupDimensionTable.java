@@ -18,18 +18,17 @@
  */
 package org.apache.pinot.core.data.manager.offline;
 
-import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import javax.annotation.Nullable;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.readers.GenericRow;
 import org.apache.pinot.spi.data.readers.PrimaryKey;
 
 
-class FastLookupDimensionTable implements DimensionTable {
-
-  private Map<PrimaryKey, GenericRow> _lookupTable;
+public class FastLookupDimensionTable implements DimensionTable {
+  private final Map<PrimaryKey, GenericRow> _lookupTable;
   private final Schema _tableSchema;
   private final List<String> _primaryKeyColumns;
 
@@ -45,9 +44,10 @@ class FastLookupDimensionTable implements DimensionTable {
     return _primaryKeyColumns;
   }
 
+  @Nullable
   @Override
-  public GenericRow get(PrimaryKey pk) {
-    return _lookupTable.get(pk);
+  public FieldSpec getFieldSpecFor(String columnName) {
+    return _tableSchema.getFieldSpecFor(columnName);
   }
 
   @Override
@@ -56,12 +56,39 @@ class FastLookupDimensionTable implements DimensionTable {
   }
 
   @Override
-  public FieldSpec getFieldSpecFor(String columnName) {
-    return _tableSchema.getFieldSpecFor(columnName);
+  public boolean containsKey(PrimaryKey pk) {
+    return _lookupTable.containsKey(pk);
+  }
+
+  @Nullable
+  @Override
+  public GenericRow getRow(PrimaryKey pk) {
+    return _lookupTable.get(pk);
+  }
+
+  @Nullable
+  @Override
+  public Object getValue(PrimaryKey pk, String columnName) {
+    GenericRow row = _lookupTable.get(pk);
+    return row != null ? row.getValue(columnName) : null;
+  }
+
+  @Nullable
+  @Override
+  public Object[] getValues(PrimaryKey pk, String[] columnNames) {
+    GenericRow row = _lookupTable.get(pk);
+    if (row == null) {
+      return null;
+    }
+    int numColumns = columnNames.length;
+    Object[] values = new Object[numColumns];
+    for (int i = 0; i < numColumns; i++) {
+      values[i] = row.getValue(columnNames[i]);
+    }
+    return values;
   }
 
   @Override
-  public void close()
-      throws IOException {
+  public void close() {
   }
 }

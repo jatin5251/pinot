@@ -26,6 +26,7 @@ import org.apache.pinot.spi.data.DateTimeFormatSpec;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.readers.GenericRow;
+import org.apache.pinot.spi.recordtransformer.RecordTransformer;
 import org.apache.pinot.spi.utils.TimeUtils;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
@@ -103,6 +104,7 @@ public class TimeValidationTransformer implements RecordTransformer {
       if (_continueOnError) {
         LOGGER.debug(errorMessage);
         record.putValue(_timeColumnName, null);
+        record.putValue(GenericRow.INCOMPLETE_RECORD_KEY, true);
         return record;
       } else {
         throw new IllegalStateException(errorMessage);

@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeoutException;
 import org.apache.pinot.spi.annotations.InterfaceAudience;
 import org.apache.pinot.spi.annotations.InterfaceStability;
@@ -42,6 +43,13 @@ public interface StreamMetadataProvider extends Closeable {
    * @return number of partitions
    */
   int fetchPartitionCount(long timeoutMillis);
+
+  /**
+   * Fetches the partition ids for a topic given the stream configs.
+   */
+  default Set<Integer> fetchPartitionIds(long timeoutMillis) {
+    throw new UnsupportedOperationException();
+  }
 
   /**
    * Fetches the offset for a given partition and offset criteria
@@ -73,7 +81,7 @@ public interface StreamMetadataProvider extends Closeable {
     // If partition group is still in progress, this value will be null
     for (PartitionGroupConsumptionStatus currentPartitionGroupConsumptionStatus : partitionGroupConsumptionStatuses) {
       newPartitionGroupMetadataList.add(
-          new PartitionGroupMetadata(currentPartitionGroupConsumptionStatus.getPartitionGroupId(),
+          new PartitionGroupMetadata(currentPartitionGroupConsumptionStatus.getStreamPartitionGroupId(),
               currentPartitionGroupConsumptionStatus.getEndOffset()));
     }
     // Add PartitionGroupMetadata for new partitions
@@ -98,5 +106,22 @@ public interface StreamMetadataProvider extends Closeable {
     return result;
   }
 
-  class UnknownLagState extends PartitionLagState { }
+  /**
+   * Fetches the list of available topics/streams
+   *
+   * @return List of topics
+   */
+  default List<TopicMetadata> getTopics() {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Represents the metadata of a topic. This can be used to represent the topic name and other metadata in the future.
+   */
+  interface TopicMetadata {
+    String getName();
+  }
+
+  class UnknownLagState extends PartitionLagState {
+  }
 }

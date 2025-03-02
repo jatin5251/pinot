@@ -18,8 +18,14 @@
  */
 package org.apache.pinot.query.runtime.blocks;
 
-import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import javax.annotation.Nullable;
 import org.apache.pinot.common.datablock.ColumnarDataBlock;
 import org.apache.pinot.common.datablock.DataBlock;
 import org.apache.pinot.common.datablock.DataBlockUtils;
@@ -27,11 +33,11 @@ import org.apache.pinot.common.datablock.MetadataBlock;
 import org.apache.pinot.common.datablock.RowDataBlock;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.core.common.Block;
-import org.apache.pinot.core.common.BlockDocIdSet;
-import org.apache.pinot.core.common.BlockDocIdValueSet;
-import org.apache.pinot.core.common.BlockMetadata;
-import org.apache.pinot.core.common.BlockValSet;
 import org.apache.pinot.core.common.datablock.DataBlockBuilder;
+import org.apache.pinot.core.util.DataBlockExtractUtils;
+import org.apache.pinot.query.runtime.plan.MultiStageQueryStats;
+import org.apache.pinot.segment.spi.memory.DataBuffer;
+
 
 
 /**
@@ -39,25 +45,28 @@ import org.apache.pinot.core.common.datablock.DataBlockBuilder;
  * {@link org.apache.pinot.common.proto.Mailbox}.
  */
 public class TransferableBlock implements Block {
-
   private final DataBlock.Type _type;
+  @Nullable
   private final DataSchema _dataSchema;
   private final int _numRows;
 
-  private DataBlock _dataBlock;
   private List<Object[]> _container;
+  private DataBlock _dataBlock;
+  private Map<Integer, String> _errCodeToExceptionMap;
+  @Nullable
+  private final MultiStageQueryStats _queryStats;
 
-  public TransferableBlock(List<Object[]> container, DataSchema dataSchema, DataBlock.Type containerType) {
-    this(container, dataSchema, containerType, false);
-  }
-
-  @VisibleForTesting
-  TransferableBlock(List<Object[]> container, DataSchema dataSchema, DataBlock.Type containerType,
-      boolean isErrorBlock) {
+  public TransferableBlock(List<Object[]> container, DataSchema dataSchema, DataBlock.Type type) {
     _container = container;
     _dataSchema = dataSchema;
-    _type = containerType;
+    Preconditions.checkArgument(type == DataBlock.Type.ROW || type == DataBlock.Type.COLUMNAR,
+        "Container cannot be used to construct block of type: %s", type);
+    _type = type;
     _numRows = _container.size();
+    // NOTE: Use assert to avoid breaking production code.
+    assert _numRows > 0 : "Container should not be empty";
+    _errCodeToExceptionMap = new HashMap<>();
+    _queryStats = null;
   }
 
   public TransferableBlock(DataBlock dataBlock) {
@@ -66,14 +75,59 @@ public class TransferableBlock implements Block {
     _type = dataBlock instanceof ColumnarDataBlock ? DataBlock.Type.COLUMNAR
         : dataBlock instanceof RowDataBlock ? DataBlock.Type.ROW : DataBlock.Type.METADATA;
     _numRows = _dataBlock.getNumberOfRows();
+    _errCodeToExceptionMap = null;
+    _queryStats = null;
+  }
+
+  public TransferableBlock(MultiStageQueryStats stats) {
+    _queryStats = stats;
+    _type = DataBlock.Type.METADATA;
+    _numRows = 0;
+    _dataSchema = null;
+    _errCodeToExceptionMap = null;
+  }
+
+  public List<DataBuffer> getSerializedStatsByStage() {
+    if (isSuccessfulEndOfStreamBlock()) {
+      List<DataBuffer> statsByStage;
+      if (_dataBlock instanceof MetadataBlock) {
+        statsByStage = ((MetadataBlock) _dataBlock).getStatsByStage();
+        if (statsByStage == null) {
+          return new ArrayList<>();
+        }
+      } else {
+        Preconditions.checkArgument(_queryStats != null, "QueryStats is null for a successful EOS block");
+        try {
+          statsByStage = _queryStats.serialize();
+        } catch (IOException e) {
+          throw new UncheckedIOException(e);
+        }
+      }
+
+      return statsByStage;
+    }
+    return new ArrayList<>();
+  }
+
+  @Nullable
+  public MultiStageQueryStats getQueryStats() {
+    return _queryStats;
   }
 
   public int getNumRows() {
     return _numRows;
   }
 
+  @Nullable
   public DataSchema getDataSchema() {
     return _dataSchema;
+  }
+
+  /**
+   * Returns whether the container is already constructed.
+   */
+  public boolean isContainerConstructed() {
+    return _container != null;
   }
 
   /**
@@ -81,13 +135,21 @@ public class TransferableBlock implements Block {
    * If not already constructed. It will use {@link DataBlockUtils} to extract the row/columnar data from the
    * binary-packed format.
    *
+   * TODO: This method should never been called by operators, as it allocates a lot for no reason.
+   *   Instead, an iterable should be returned.
+   *   That iterable can materialize rows one by one, without allocating all of them at once.
+   *   In fact transformations and filters could be implemented in zero allocate fashion by having a special type of
+   *   block that wraps the child block and decorates it with a transformation/predicate.
+   *   By doing so only operators that actually require to keep multi-stage results in memory will allocate memory.
+   *   PS: the term _allocate memory_ here means _keep alive an amount of memory proportional to the number of rows_.
+   *
    * @return data container.
    */
   public List<Object[]> getContainer() {
     if (_container == null) {
       switch (_type) {
         case ROW:
-          _container = DataBlockUtils.extractRows(_dataBlock);
+          _container = DataBlockExtractUtils.extractRows(_dataBlock);
           break;
         case COLUMNAR:
         case METADATA:
@@ -116,15 +178,24 @@ public class TransferableBlock implements Block {
             _dataBlock = DataBlockBuilder.buildFromColumns(_container, _dataSchema);
             break;
           case METADATA:
-            throw new UnsupportedOperationException("Metadata block cannot be constructed from container");
+            _dataBlock = new MetadataBlock(getSerializedStatsByStage());
+            break;
           default:
-            throw new UnsupportedOperationException("Unable to build from container with type: " + _type);
+            throw new UnsupportedOperationException("Unable to construct block with type: " + _type);
+        }
+        if (_errCodeToExceptionMap != null) {
+          _dataBlock.getExceptions().putAll(_errCodeToExceptionMap);
+          _errCodeToExceptionMap = null;
         }
       } catch (Exception e) {
         throw new RuntimeException("Unable to create DataBlock", e);
       }
     }
     return _dataBlock;
+  }
+
+  public Map<Integer, String> getExceptions() {
+    return _dataBlock != null ? _dataBlock.getExceptions() : _errCodeToExceptionMap;
   }
 
   /**
@@ -151,10 +222,14 @@ public class TransferableBlock implements Block {
   }
 
   /**
-   * @return whether this block represents a NOOP block
+   * @return true when the block is a real end of stream block instead of error block.
    */
-  public boolean isNoOpBlock() {
-    return isType(MetadataBlock.MetadataBlockType.NOOP);
+  public boolean isSuccessfulEndOfStreamBlock() {
+    return isType(MetadataBlock.MetadataBlockType.EOS);
+  }
+
+  public boolean isDataBlock() {
+    return _type != DataBlock.Type.METADATA;
   }
 
   /**
@@ -171,27 +246,16 @@ public class TransferableBlock implements Block {
       return false;
     }
 
+    if (_queryStats != null) {
+      return MetadataBlock.MetadataBlockType.EOS == type;
+    }
     MetadataBlock metadata = (MetadataBlock) _dataBlock;
     return metadata.getType() == type;
   }
 
   @Override
-  public BlockValSet getBlockValueSet() {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
-  public BlockDocIdValueSet getBlockDocIdValueSet() {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
-  public BlockDocIdSet getBlockDocIdSet() {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
-  public BlockMetadata getMetadata() {
-    throw new UnsupportedOperationException();
+  public String toString() {
+    String blockType = isErrorBlock() ? "error" : isSuccessfulEndOfStreamBlock() ? "eos" : "data";
+    return "TransferableBlock{blockType=" + blockType + ", _numRows=" + _numRows + '}';
   }
 }

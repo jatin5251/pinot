@@ -21,15 +21,14 @@ package org.apache.pinot.core.geospatial.transform.function;
 import com.google.common.base.Preconditions;
 import java.util.List;
 import java.util.Map;
-import org.apache.pinot.core.operator.blocks.ProjectionBlock;
+import org.apache.pinot.core.operator.ColumnContext;
+import org.apache.pinot.core.operator.blocks.ValueBlock;
 import org.apache.pinot.core.operator.transform.TransformResultMetadata;
 import org.apache.pinot.core.operator.transform.function.BaseTransformFunction;
 import org.apache.pinot.core.operator.transform.function.LiteralTransformFunction;
 import org.apache.pinot.core.operator.transform.function.TransformFunction;
-import org.apache.pinot.core.plan.DocIdSetPlanNode;
 import org.apache.pinot.segment.local.utils.GeometrySerializer;
 import org.apache.pinot.segment.local.utils.GeometryUtils;
-import org.apache.pinot.segment.spi.datasource.DataSource;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.locationtech.jts.geom.Geometry;
 import org.locationtech.jts.geom.LineString;
@@ -49,7 +48,6 @@ import static java.lang.Math.toRadians;
 public class StAreaFunction extends BaseTransformFunction {
   private TransformFunction _transformFunction;
   public static final String FUNCTION_NAME = "ST_Area";
-  private double[] _results;
 
   @Override
   public String getName() {
@@ -57,7 +55,8 @@ public class StAreaFunction extends BaseTransformFunction {
   }
 
   @Override
-  public void init(List<TransformFunction> arguments, Map<String, DataSource> dataSourceMap) {
+  public void init(List<TransformFunction> arguments, Map<String, ColumnContext> columnContextMap) {
+    super.init(arguments, columnContextMap);
     Preconditions
         .checkArgument(arguments.size() == 1, "Exactly 1 argument is required for transform function: %s", getName());
     TransformFunction transformFunction = arguments.get(0);
@@ -76,18 +75,16 @@ public class StAreaFunction extends BaseTransformFunction {
   }
 
   @Override
-  public double[] transformToDoubleValuesSV(ProjectionBlock projectionBlock) {
-    if (_results == null) {
-      _results = new double[DocIdSetPlanNode.MAX_DOC_PER_CALL];
-    }
+  public double[] transformToDoubleValuesSV(ValueBlock valueBlock) {
+    int numDocs = valueBlock.getNumDocs();
+    initDoubleValuesSV(numDocs);
+    byte[][] values = _transformFunction.transformToBytesValuesSV(valueBlock);
 
-    byte[][] values = _transformFunction.transformToBytesValuesSV(projectionBlock);
-    int numDocs = projectionBlock.getNumDocs();
     for (int i = 0; i < numDocs; i++) {
       Geometry geometry = GeometrySerializer.deserialize(values[i]);
-      _results[i] = GeometryUtils.isGeography(geometry) ? calculateGeographyArea(geometry) : geometry.getArea();
+      _doubleValuesSV[i] = GeometryUtils.isGeography(geometry) ? calculateGeographyArea(geometry) : geometry.getArea();
     }
-    return _results;
+    return _doubleValuesSV;
   }
 
   private double calculateGeographyArea(Geometry geometry) {

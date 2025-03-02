@@ -26,4 +26,8 @@ public class RetriableOperationException extends AttemptFailureException {
   public RetriableOperationException(Throwable cause) {
     super(cause);
   }
+
+  public RetriableOperationException(Throwable cause, int attempts) {
+    super(cause, attempts);
+  }
 }

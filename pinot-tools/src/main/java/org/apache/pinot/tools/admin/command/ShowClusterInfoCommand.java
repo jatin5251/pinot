@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.tools.admin.command;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -41,14 +42,13 @@ import org.apache.helix.zookeeper.impl.client.ZkClient;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.apache.pinot.tools.Command;
-import org.codehaus.jackson.annotate.JsonProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yaml.snakeyaml.Yaml;
 import picocli.CommandLine;
 
 
-@CommandLine.Command(name = "ShowClusterInfo")
+@CommandLine.Command(name = "ShowClusterInfo", mixinStandardHelpOptions = true)
 public class ShowClusterInfoCommand extends AbstractBaseAdminCommand implements Command {
   private static final Logger LOGGER = LoggerFactory.getLogger(ShowClusterInfoCommand.class.getName());
 
@@ -63,10 +63,6 @@ public class ShowClusterInfoCommand extends AbstractBaseAdminCommand implements 
 
   @CommandLine.Option(names = {"-tags"}, required = false, description = "Commaa separated tag names.")
   private String _tags = "";
-
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, help = true,
-      description = "Print this message.")
-  private boolean _help = false;
 
   @Override
   public boolean execute()
@@ -103,7 +99,7 @@ public class ShowClusterInfoCommand extends AbstractBaseAdminCommand implements 
     ZkClient zkClient = new ZkClient(_zkAddress);
     zkClient.setZkSerializer(new ZNRecordStreamingSerializer());
     LOGGER.info("Connecting to Zookeeper at: {}", _zkAddress);
-    zkClient.waitUntilConnected(CommonConstants.Helix.ZkClient.DEFAULT_CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS);
+    zkClient.waitUntilConnected(CommonConstants.Helix.ZkClient.DEFAULT_CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     ZkBaseDataAccessor<ZNRecord> baseDataAccessor = new ZkBaseDataAccessor<>(zkClient);
     ZKHelixDataAccessor zkHelixDataAccessor = new ZKHelixDataAccessor(_clusterName, baseDataAccessor);
     PropertyKey property = zkHelixDataAccessor.keyBuilder().liveInstances();
@@ -190,11 +186,6 @@ public class ShowClusterInfoCommand extends AbstractBaseAdminCommand implements 
   @Override
   public String description() {
     return "Show Pinot Cluster information.";
-  }
-
-  @Override
-  public boolean getHelp() {
-    return _help;
   }
 
   @Override

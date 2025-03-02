@@ -21,6 +21,7 @@ package org.apache.pinot.segment.local.upsert;
 import java.io.Closeable;
 import java.util.List;
 import javax.annotation.concurrent.ThreadSafe;
+import org.apache.pinot.segment.local.segment.index.loader.IndexLoadingConfig;
 import org.apache.pinot.segment.spi.ImmutableSegment;
 import org.apache.pinot.segment.spi.IndexSegment;
 import org.apache.pinot.segment.spi.MutableSegment;
@@ -65,9 +66,25 @@ public interface PartitionUpsertMetadataManager extends Closeable {
   void addSegment(ImmutableSegment segment);
 
   /**
+   * Preload segments for the table partition. Segments can be added differently during preloading.
+   * TODO: Revisit this and see if we can use the same IndexLoadingConfig for all segments. Tier info might be different
+   *       for different segments.
+   */
+  void preloadSegments(IndexLoadingConfig indexLoadingConfig);
+
+  boolean isPreloading();
+
+  /**
+   * Different from adding a segment, when preloading a segment, the upsert metadata may be updated more efficiently.
+   * Basically the upsert metadata can be directly updated for each primary key, without doing the more costly
+   * read-compare-update.
+   */
+  void preloadSegment(ImmutableSegment segment);
+
+  /**
    * Updates the upsert metadata for a new consumed record in the given consuming segment.
    */
-  void addRecord(MutableSegment segment, RecordInfo recordInfo);
+  boolean addRecord(MutableSegment segment, RecordInfo recordInfo);
 
   /**
    * Replaces the upsert metadata for the old segment with the new immutable segment.
@@ -83,4 +100,40 @@ public interface PartitionUpsertMetadataManager extends Closeable {
    * Returns the merged record when partial-upsert is enabled.
    */
   GenericRow updateRecord(GenericRow record, RecordInfo recordInfo);
+
+  /**
+   * Takes snapshot for all the tracked immutable segments when snapshot is enabled. This method should be invoked
+   * before a new consuming segment starts consuming.
+   */
+  void takeSnapshot();
+
+  /**
+   * Remove the expired primary keys from the metadata when TTL is enabled.
+   */
+  void removeExpiredPrimaryKeys();
+
+  /**
+   * Stops the metadata manager. After invoking this method, no access to the metadata will be accepted.
+   */
+  void stop();
+
+  /**
+   * Track segments for upsert view, and this method must be called before registering segment to the table manager,
+   * so that the segment is included in the upsert view before it becomes visible to the query.
+   */
+  void trackSegmentForUpsertView(IndexSegment segment);
+
+  /**
+   * Untrack segments for upsert view, and this method must be called when segment is to be destroyed, when the
+   * segment is not used by any queries. Untrack segment after unregistering the segment is not safe, as there may be
+   * ongoing queries that are still accessing the segment.
+   */
+  void untrackSegmentForUpsertView(IndexSegment segment);
+
+  /**
+   * Track newly added segments to get them included in the list of selected segments for queries to get a more
+   * complete upsert data view, e.g. the newly created consuming segment or newly uploaded immutable segments. Such
+   * segments can be processed by the server even before they get included in the broker's routing table.
+   */
+  void trackNewlyAddedSegment(String segmentName);
 }

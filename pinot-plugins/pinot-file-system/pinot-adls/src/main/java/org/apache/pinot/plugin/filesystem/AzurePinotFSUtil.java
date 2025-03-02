@@ -18,11 +18,10 @@
  */
 package org.apache.pinot.plugin.filesystem;
 
-import com.azure.storage.common.Utility;
 import java.io.File;
-import java.io.IOException;
 import java.net.URI;
 import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 
 
 /**
@@ -41,34 +40,17 @@ public class AzurePinotFSUtil {
    *
    * @param uri a uri path
    * @return path in Azure Data Lake Gen2 format
-   * @throws IOException
    */
-  public static String convertUriToAzureStylePath(URI uri)
-      throws IOException {
+  public static String convertUriToAzureStylePath(URI uri) {
     // Pinot side code uses `URLEncoder` when building uri
-    String path = URLDecoder.decode(uri.getRawPath(), "UTF-8");
+    String path = URLDecoder.decode(uri.getRawPath(), StandardCharsets.UTF_8);
     if (path.startsWith(DIRECTORY_DELIMITER)) {
       path = path.substring(1);
     }
     if (path.endsWith(DIRECTORY_DELIMITER)) {
       path = path.substring(0, path.length() - 1);
     }
-    // We need to use azure's url encoder to be compatible
     return path;
-  }
-
-  /**
-   * Extract 'url encoded' Azure Data Lake Gen2 style path from uri
-   *
-   * NOTE: returning path 'should be' url encoded. (e.g. should return 'a%2Fsegment' instead of 'a/segment')
-   *
-   * @param uri a uri path
-   * @return url encoded path in Azure Data Lake Gen2 format
-   * @throws IOException
-   */
-  public static String convertUriToUrlEncodedAzureStylePath(URI uri)
-      throws IOException {
-    return Utility.urlEncode(convertUriToAzureStylePath(uri));
   }
 
   /**

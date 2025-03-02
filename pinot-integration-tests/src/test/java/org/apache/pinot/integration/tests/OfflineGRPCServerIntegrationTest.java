@@ -20,17 +20,29 @@ package org.apache.pinot.integration.tests;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.common.datatable.DataTable;
 import org.apache.pinot.common.datatable.DataTable.MetadataKey;
 import org.apache.pinot.common.datatable.DataTableFactory;
+import org.apache.pinot.common.metrics.BrokerMetrics;
 import org.apache.pinot.common.proto.Server;
 import org.apache.pinot.common.request.BrokerRequest;
-import org.apache.pinot.common.utils.grpc.GrpcQueryClient;
-import org.apache.pinot.common.utils.grpc.GrpcRequestBuilder;
+import org.apache.pinot.common.response.broker.BrokerResponseNative;
+import org.apache.pinot.common.utils.DataSchema;
+import org.apache.pinot.common.utils.grpc.ServerGrpcQueryClient;
+import org.apache.pinot.common.utils.grpc.ServerGrpcRequestBuilder;
+import org.apache.pinot.core.query.reduce.DataTableReducer;
+import org.apache.pinot.core.query.reduce.DataTableReducerContext;
+import org.apache.pinot.core.query.reduce.ResultReducerFactory;
+import org.apache.pinot.core.query.request.context.QueryContext;
+import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
+import org.apache.pinot.core.transport.ServerRoutingInstance;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.utils.CommonConstants;
@@ -41,10 +53,14 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+import static org.mockito.Mockito.mock;
 import static org.testng.Assert.*;
 
 
 public class OfflineGRPCServerIntegrationTest extends BaseClusterIntegrationTest {
+  private static final ExecutorService EXECUTOR_SERVICE = Executors.newFixedThreadPool(2);
+  private static final DataTableReducerContext DATATABLE_REDUCER_CONTEXT =
+      new DataTableReducerContext(EXECUTOR_SERVICE, 2, 10000, 10000, 5000, 128);
 
   @BeforeClass
   public void setUp()
@@ -80,19 +96,19 @@ public class OfflineGRPCServerIntegrationTest extends BaseClusterIntegrationTest
     waitForAllDocsLoaded(600_000L);
   }
 
-  public GrpcQueryClient getGrpcQueryClient() {
-    return new GrpcQueryClient("localhost", CommonConstants.Server.DEFAULT_GRPC_PORT);
+  public ServerGrpcQueryClient getGrpcQueryClient() {
+    return new ServerGrpcQueryClient("localhost", getServerGrpcPort());
   }
 
   @Test
   public void testGrpcQueryServer()
       throws Exception {
-    GrpcQueryClient queryClient = getGrpcQueryClient();
+    ServerGrpcQueryClient queryClient = getGrpcQueryClient();
     String sql = "SELECT * FROM mytable_OFFLINE LIMIT 1000000 OPTION(timeoutMs=30000)";
     BrokerRequest brokerRequest = CalciteSqlCompiler.compileToBrokerRequest(sql);
-    List<String> segments = _helixResourceManager.getSegmentsFor("mytable_OFFLINE", false);
+    List<String> segments = _helixResourceManager.getSegmentsFor("mytable_OFFLINE", true);
 
-    GrpcRequestBuilder requestBuilder = new GrpcRequestBuilder().setSegments(segments);
+    ServerGrpcRequestBuilder requestBuilder = new ServerGrpcRequestBuilder().setSegments(segments);
     testNonStreamingRequest(queryClient.submit(requestBuilder.setSql(sql).build()));
     testNonStreamingRequest(queryClient.submit(requestBuilder.setBrokerRequest(brokerRequest).build()));
 
@@ -105,15 +121,12 @@ public class OfflineGRPCServerIntegrationTest extends BaseClusterIntegrationTest
   @Test(dataProvider = "provideSqlTestCases")
   public void testQueryingGrpcServer(String sql)
       throws Exception {
-    GrpcQueryClient queryClient = getGrpcQueryClient();
-    List<String> segments = _helixResourceManager.getSegmentsFor("mytable_OFFLINE", false);
-
-    GrpcRequestBuilder requestBuilder = new GrpcRequestBuilder().setSegments(segments);
-    DataTable dataTable = collectNonStreamingRequestResult(queryClient.submit(requestBuilder.setSql(sql).build()));
-
-    requestBuilder.setEnableStreaming(true);
-    collectAndCompareResult(queryClient.submit(requestBuilder.setSql(sql).build()), dataTable);
-    queryClient.close();
+    try (ServerGrpcQueryClient queryClient = getGrpcQueryClient()) {
+      List<String> segments = _helixResourceManager.getSegmentsFor("mytable_OFFLINE", true);
+      ServerGrpcRequestBuilder requestBuilder = new ServerGrpcRequestBuilder().setSql(sql).setSegments(segments);
+      DataTable dataTable = collectNonStreamingRequestResult(queryClient.submit(requestBuilder.build()));
+      collectAndCompareResult(sql, queryClient.submit(requestBuilder.setEnableStreaming(true).build()), dataTable);
+    }
   }
 
   @DataProvider(name = "provideSqlTestCases")
@@ -127,17 +140,28 @@ public class OfflineGRPCServerIntegrationTest extends BaseClusterIntegrationTest
         "SELECT timeConvert(DaysSinceEpoch,'DAYS','SECONDS') FROM mytable_OFFLINE LIMIT 10000000"
     });
 
+    // select only with early termination
+    entries.add(new Object[]{"SELECT * FROM mytable_OFFLINE LIMIT 10"});
+
     // aggregate
     entries.add(new Object[]{"SELECT count(*) FROM mytable_OFFLINE"});
-    entries.add(new Object[]{"SELECT count(*) FROM mytable_OFFLINE GROUP BY arrayLength(DivAirports)"});
+    entries.add(new Object[]{"SELECT SUM(ArrTime) FROM mytable_OFFLINE"});
 
-    // distinct count
+    // group-by
+    entries.add(new Object[]{"SELECT count(*) FROM mytable_OFFLINE GROUP BY arrayLength(DivAirports)"});
     entries.add(new Object[]{"SELECT DISTINCTCOUNT(AirlineID) FROM mytable_OFFLINE GROUP BY Carrier"});
+    entries.add(new Object[]{"SELECT count(*), sum(ArrTime) FROM mytable_OFFLINE GROUP BY AirlineID"});
+
+    // distinct
+    entries.add(new Object[]{"SELECT DISTINCT(AirlineID) FROM mytable_OFFLINE LIMIT 1000000"});
+    entries.add(new Object[]{
+        "SELECT AirlineID, ArrTime FROM mytable_OFFLINE GROUP BY AirlineID, ArrTime LIMIT 1000000"
+    });
 
     // order by
     entries.add(new Object[]{
-        "SELECT DaysSinceEpoch, timeConvert(DaysSinceEpoch,'DAYS','SECONDS') "
-            + "FROM mytable_OFFLINE ORDER BY DaysSinceEpoch limit 10000"
+        "SELECT DaysSinceEpoch, timeConvert(DaysSinceEpoch,'DAYS','SECONDS') FROM mytable_OFFLINE "
+            + "ORDER BY DaysSinceEpoch limit 1000000"
     });
 
     return entries.toArray(new Object[entries.size()][]);
@@ -154,10 +178,11 @@ public class OfflineGRPCServerIntegrationTest extends BaseClusterIntegrationTest
     return dataTable;
   }
 
-  private void collectAndCompareResult(Iterator<Server.ServerResponse> streamingResponses,
+  private void collectAndCompareResult(String sql, Iterator<Server.ServerResponse> streamingResponses,
       DataTable nonStreamResultDataTable)
       throws Exception {
-    int numTotalDocs = 0;
+    Map<ServerRoutingInstance, DataTable> dataTableMap = new HashMap<>();
+    DataSchema cachedDataSchema = null;
     while (streamingResponses.hasNext()) {
       Server.ServerResponse streamingResponse = streamingResponses.next();
       DataTable dataTable = DataTableFactory.getDataTable(streamingResponse.getPayload().asReadOnlyByteBuffer());
@@ -169,11 +194,27 @@ public class OfflineGRPCServerIntegrationTest extends BaseClusterIntegrationTest
         Map<String, String> metadata = dataTable.getMetadata();
         assertTrue(metadata.containsKey(DataTable.MetadataKey.RESPONSE_SER_CPU_TIME_NS.getName()));
         assertNotNull(dataTable.getDataSchema());
-        numTotalDocs += dataTable.getNumberOfRows();
+        cachedDataSchema = dataTable.getDataSchema();
+        // adding them to a fake dataTableMap for reduce
+        dataTableMap.put(mock(ServerRoutingInstance.class), dataTable);
       } else {
+        // compare result dataTable against nonStreamingResultDataTable
+        // Process server response.
+        QueryContext queryContext = QueryContextConverterUtils.getQueryContext(sql);
+        DataTableReducer reducer = ResultReducerFactory.getResultReducer(queryContext);
+        BrokerResponseNative streamingBrokerResponse = new BrokerResponseNative();
+        reducer.reduceAndSetResults("mytable_OFFLINE", cachedDataSchema, dataTableMap, streamingBrokerResponse,
+            DATATABLE_REDUCER_CONTEXT, mock(BrokerMetrics.class));
+        BrokerResponseNative nonStreamBrokerResponse = new BrokerResponseNative();
+        reducer.reduceAndSetResults("mytable_OFFLINE", nonStreamResultDataTable.getDataSchema(),
+            Map.of(mock(ServerRoutingInstance.class), nonStreamResultDataTable), nonStreamBrokerResponse,
+            DATATABLE_REDUCER_CONTEXT, mock(BrokerMetrics.class));
+        assertEquals(streamingBrokerResponse.getResultTable().getRows().size(),
+            nonStreamBrokerResponse.getResultTable().getRows().size());
+
+        // validate final metadata return
         assertEquals(responseType, CommonConstants.Query.Response.ResponseType.METADATA);
         assertFalse(streamingResponses.hasNext());
-        assertEquals(numTotalDocs, nonStreamResultDataTable.getNumberOfRows());
         assertNull(dataTable.getDataSchema());
         assertEquals(dataTable.getNumberOfRows(), 0);
         assertEquals(dataTable.getMetadata().get(DataTable.MetadataKey.NUM_DOCS_SCANNED.getName()),

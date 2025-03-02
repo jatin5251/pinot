@@ -19,14 +19,12 @@
     under the License.
 
 -->
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <parent>
     <artifactId>pinot</artifactId>
     <groupId>org.apache.pinot</groupId>
-    <version>0.12.0-SNAPSHOT</version>
-    <relativePath>..</relativePath>
+    <version>1.4.0-SNAPSHOT</version>
   </parent>
   <artifactId>pinot-common</artifactId>
   <name>Pinot Common</name>
@@ -42,133 +40,58 @@
         <filtering>true</filtering>
       </resource>
     </resources>
-    <!-- Antlr stuff -->
+
     <plugins>
       <plugin>
-        <artifactId>maven-jar-plugin</artifactId>
-        <executions>
-          <execution>
-            <goals>
-              <goal>test-jar</goal>
-            </goals>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
-        <groupId>org.antlr</groupId>
-        <artifactId>antlr4-maven-plugin</artifactId>
-        <version>${antlr.version}</version>
-        <executions>
-          <execution>
-            <id>antlr</id>
-            <goals>
-              <goal>antlr4</goal>
-            </goals>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
         <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-enforcer-plugin</artifactId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration  combine.children="override">
+          <forkCount>1</forkCount>
+          <reuseForks>true</reuseForks>
+          <properties>
+            <property>
+              <name>usedefaultlisteners</name>
+              <value>false</value>  <!-- This will disable all default listeners -->
+            </property>
+          </properties>
+          <!--Disabling tests as Pinot currently uses Yammer and these tests fail for DropwizardMetricsFactory-->
+          <excludes>
+            <exclude>**/DropwizardBrokerPrometheusMetricsTest.java</exclude>
+            <exclude>**/DropwizardServerPrometheusMetricsTest.java</exclude>
+            <exclude>**/DropwizardMinionPrometheusMetricsTest.java</exclude>
+            <exclude>**/DropwizardControllerPrometheusMetricsTest.java</exclude>
+          </excludes>
+        </configuration>
       </plugin>
+
       <plugin>
         <groupId>org.xolstice.maven.plugins</groupId>
         <artifactId>protobuf-maven-plugin</artifactId>
-      </plugin>
-      <plugin>
-        <groupId>com.diffplug.spotless</groupId>
-        <artifactId>spotless-maven-plugin</artifactId>
-        <version>2.28.0</version>
+        <configuration>
+          <checkStaleness>true</checkStaleness>
+        </configuration>
         <executions>
           <execution>
-            <phase>verify</phase>
             <goals>
-              <goal>check</goal>
+              <goal>compile</goal>
             </goals>
           </execution>
         </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
         <configuration>
           <java>
-            <includes>
-              <include>src/main/java/**/*.java</include>
-              <include>src/test/java/**/*.java</include>
-            </includes>
             <excludes>
               <exclude>src/main/java/org/apache/pinot/common/request/*.java</exclude>
               <exclude>src/main/java/org/apache/pinot/common/response/ProcessingException.java</exclude>
             </excludes>
-            <importOrder>
-              <order>,\#</order>
-            </importOrder>
-            <removeUnusedImports/>
           </java>
         </configuration>
       </plugin>
-      <plugin>
-        <!-- Extract parser grammar template from calcite-core.jar and put
-             it under ${project.build.directory} where all freemarker templates are. -->
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-dependency-plugin</artifactId>
-        <executions>
-          <execution>
-            <id>unpack-parser-template</id>
-            <phase>initialize</phase>
-            <goals>
-              <goal>unpack</goal>
-            </goals>
-            <configuration>
-              <artifactItems>
-                <artifactItem>
-                  <groupId>org.apache.calcite</groupId>
-                  <artifactId>calcite-core</artifactId>
-                  <type>jar</type>
-                  <overWrite>true</overWrite>
-                  <outputDirectory>${project.build.directory}/</outputDirectory>
-                  <includes>**/Parser.jj,**/default_config.fmpp</includes>
-                </artifactItem>
-              </artifactItems>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
-        <groupId>org.apache.pinot</groupId>
-        <artifactId>pinot-fmpp-maven-plugin</artifactId>
-        <version>${project.version}</version>
-        <executions>
-          <execution>
-            <id>generate-fmpp-sources</id>
-            <phase>generate-sources</phase>
-            <goals>
-              <goal>generate</goal>
-            </goals>
-            <configuration>
-              <config>${project.basedir}/src/main/codegen/config.fmpp</config>
-              <output>${project.build.directory}/generated-sources/fmpp</output>
-              <templates>${project.build.directory}/codegen/templates</templates>
-              <data>tdd(${project.basedir}/src/main/codegen/config.fmpp), default:tdd(${project.build.directory}/codegen/default_config.fmpp)</data>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>build-helper-maven-plugin</artifactId>
-        <executions>
-          <execution>
-            <id>add-generated-sources</id>
-            <phase>process-sources</phase>
-            <goals>
-              <goal>add-source</goal>
-            </goals>
-            <configuration>
-              <sources>
-                <source>${project.build.directory}/generated-sources/javacc</source>
-              </sources>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
+      <!-- Creates a Java class for the custom parser from Parser.jj -->
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>javacc-maven-plugin</artifactId>
@@ -180,13 +103,12 @@
               <goal>javacc</goal>
             </goals>
             <configuration>
-              <sourceDirectory>${project.build.directory}/generated-sources/fmpp</sourceDirectory>
+              <sourceDirectory>${project.build.directory}/generated-sources/javacc/</sourceDirectory>
               <includes>
-                <include>**/Parser.jj</include>
+                <include>Parser.jj</include>
               </includes>
               <lookAhead>2</lookAhead>
               <isStatic>false</isStatic>
-              <outputDirectory>${project.build.directory}/generated-sources/javacc</outputDirectory>
             </configuration>
           </execution>
         </executions>
@@ -195,8 +117,8 @@
   </build>
   <dependencies>
     <dependency>
-      <groupId>org.apache.pinot</groupId>
-      <artifactId>pinot-spi</artifactId>
+      <groupId>io.prometheus.jmx</groupId>
+      <artifactId>jmx_prometheus_javaagent</artifactId>
     </dependency>
     <dependency>
       <groupId>org.apache.pinot</groupId>
@@ -204,60 +126,60 @@
     </dependency>
     <dependency>
       <groupId>org.apache.pinot</groupId>
-      <artifactId>pinot-yammer</artifactId>
-      <scope>test</scope>
+      <artifactId>pinot-timeseries-spi</artifactId>
     </dependency>
+
     <dependency>
-      <groupId>org.apache.httpcomponents</groupId>
-      <artifactId>httpmime</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.httpcomponents</groupId>
-      <artifactId>httpclient</artifactId>
-      <exclusions>
-        <exclusion>
-          <groupId>commons-logging</groupId>
-          <artifactId>commons-logging</artifactId>
-        </exclusion>
-      </exclusions>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.httpcomponents</groupId>
-      <artifactId>httpcore</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.antlr</groupId>
-      <artifactId>antlr4-runtime</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.calcite</groupId>
-      <artifactId>calcite-core</artifactId>
-      <exclusions>
-        <exclusion>
-          <groupId>com.google.protobuf</groupId>
-          <artifactId>protobuf-java</artifactId>
-        </exclusion>
-      </exclusions>
+      <groupId>org.apache.httpcomponents.client5</groupId>
+      <artifactId>httpclient5</artifactId>
     </dependency>
     <dependency>
       <groupId>org.apache.calcite</groupId>
       <artifactId>calcite-babel</artifactId>
-      <exclusions>
-        <exclusion>
-          <groupId>com.google.protobuf</groupId>
-          <artifactId>protobuf-java</artifactId>
-        </exclusion>
-      </exclusions>
     </dependency>
     <dependency>
-      <groupId>org.testng</groupId>
-      <artifactId>testng</artifactId>
-      <scope>test</scope>
+      <groupId>org.immutables</groupId>
+      <artifactId>value-annotations</artifactId>
+    </dependency>
+
+    <!-- Jersey Libraries -->
+    <dependency>
+      <groupId>org.glassfish.jersey.core</groupId>
+      <artifactId>jersey-server</artifactId>
     </dependency>
     <dependency>
-      <groupId>com.google.guava</groupId>
-      <artifactId>guava</artifactId>
+      <groupId>org.glassfish.jersey.containers</groupId>
+      <artifactId>jersey-container-grizzly2-http</artifactId>
     </dependency>
+    <dependency>
+      <groupId>org.glassfish.jersey.media</groupId>
+      <artifactId>jersey-media-multipart</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.glassfish.jersey.media</groupId>
+      <artifactId>jersey-media-json-jackson</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.glassfish.jersey.inject</groupId>
+      <artifactId>jersey-hk2</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.glassfish.hk2</groupId>
+      <artifactId>hk2-metadata-generator</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.swagger</groupId>
+      <artifactId>swagger-jersey2-jaxrs</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.webjars</groupId>
+      <artifactId>swagger-ui</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>jakarta.servlet</groupId>
+      <artifactId>jakarta.servlet-api</artifactId>
+    </dependency>
+
     <dependency>
       <groupId>org.apache.thrift</groupId>
       <artifactId>libthrift</artifactId>
@@ -275,145 +197,24 @@
       <artifactId>lz4-java</artifactId>
     </dependency>
     <dependency>
-      <groupId>org.apache.logging.log4j</groupId>
-      <artifactId>log4j-slf4j-impl</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.logging.log4j</groupId>
-      <artifactId>log4j-1.2-api</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.lmax</groupId>
-      <artifactId>disruptor</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>joda-time</groupId>
-      <artifactId>joda-time</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>commons-configuration</groupId>
-      <artifactId>commons-configuration</artifactId>
-      <exclusions>
-        <exclusion>
-          <groupId>commons-logging</groupId>
-          <artifactId>commons-logging</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>commons-lang</groupId>
-          <artifactId>commons-lang</artifactId>
-        </exclusion>
-      </exclusions>
-    </dependency>
-    <dependency>
-      <groupId>commons-httpclient</groupId>
-      <artifactId>commons-httpclient</artifactId>
-      <exclusions>
-        <exclusion>
-          <groupId>commons-logging</groupId>
-          <artifactId>commons-logging</artifactId>
-        </exclusion>
-      </exclusions>
-    </dependency>
-    <dependency>
-      <groupId>commons-io</groupId>
-      <artifactId>commons-io</artifactId>
-    </dependency>
-    <dependency>
       <groupId>org.apache.commons</groupId>
       <artifactId>commons-compress</artifactId>
     </dependency>
     <dependency>
       <groupId>org.apache.helix</groupId>
       <artifactId>helix-core</artifactId>
-      <exclusions>
-        <exclusion>
-          <groupId>io.netty</groupId>
-          <artifactId>netty</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>javax.xml.bind</groupId>
-          <artifactId>jaxb-api</artifactId>
-        </exclusion>
-      </exclusions>
-    </dependency>
-    <dependency>
-      <groupId>it.unimi.dsi</groupId>
-      <artifactId>fastutil</artifactId>
     </dependency>
     <dependency>
       <groupId>net.sf.jopt-simple</groupId>
       <artifactId>jopt-simple</artifactId>
     </dependency>
     <dependency>
-      <groupId>nl.jqno.equalsverifier</groupId>
-      <artifactId>equalsverifier</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.webjars</groupId>
-      <artifactId>swagger-ui</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.google.code.findbugs</groupId>
-      <artifactId>jsr305</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.fasterxml.jackson.core</groupId>
-      <artifactId>jackson-annotations</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.fasterxml.jackson.core</groupId>
-      <artifactId>jackson-databind</artifactId>
-    </dependency>
-    <dependency>
       <groupId>com.jayway.jsonpath</groupId>
       <artifactId>json-path</artifactId>
     </dependency>
     <dependency>
-      <groupId>org.mockito</groupId>
-      <!--
-      NOTE: use `mockito-inline` here instead of `mockito-core`, as mockito-core does not support mocking static function:
-      ```
-      org.mockito.exceptions.base.MockitoException:
-      The used MockMaker SubclassByteBuddyMockMaker does not support the creation of static mocks
-
-      Mockito's inline mock maker supports static mocks based on the Instrumentation API.
-      You can simply enable this mock mode, by placing the 'mockito-inline' artifact where you are currently using 'mockito-core'.
-      Note that Mockito's inline mock maker is not supported on Android.
-      ```
-      -->
-      <artifactId>mockito-inline</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.commons</groupId>
-      <artifactId>commons-math3</artifactId>
-      <scope>provided</scope>
-    </dependency>
-    <dependency>
-      <groupId>commons-logging</groupId>
-      <artifactId>commons-logging</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>commons-lang</groupId>
-      <artifactId>commons-lang</artifactId>
-    </dependency>
-    <dependency>
       <groupId>org.apache.zookeeper</groupId>
       <artifactId>zookeeper</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>javax.servlet</groupId>
-      <artifactId>javax.servlet-api</artifactId>
-      <scope>compile</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.glassfish.jersey.core</groupId>
-      <artifactId>jersey-server</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.reflections</groupId>
-      <artifactId>reflections</artifactId>
     </dependency>
     <dependency>
       <groupId>com.google.protobuf</groupId>
@@ -426,12 +227,6 @@
     <dependency>
       <groupId>io.grpc</groupId>
       <artifactId>grpc-protobuf</artifactId>
-      <exclusions>
-        <exclusion>
-          <groupId>com.google.protobuf</groupId>
-          <artifactId>protobuf-java</artifactId>
-        </exclusion>
-      </exclusions>
     </dependency>
     <dependency>
       <groupId>io.grpc</groupId>
@@ -444,51 +239,60 @@
     <dependency>
       <groupId>org.mindrot</groupId>
       <artifactId>jbcrypt</artifactId>
-      <version>0.4</version>
     </dependency>
     <dependency>
       <groupId>com.github.seancfoley</groupId>
       <artifactId>ipaddress</artifactId>
     </dependency>
+    <dependency>
+      <groupId>com.yscope.clp</groupId>
+      <artifactId>clp-ffi</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.github.hakky54</groupId>
+      <artifactId>sslcontext-kickstart-for-netty</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.google.re2j</groupId>
+      <artifactId>re2j</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.google.auto.service</groupId>
+      <artifactId>auto-service-annotations</artifactId>
+    </dependency>
+
+    <!-- Test -->
+    <dependency>
+      <groupId>org.apache.pinot</groupId>
+      <artifactId>pinot-yammer</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testng</groupId>
+      <artifactId>testng</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>nl.jqno.equalsverifier</groupId>
+      <artifactId>equalsverifier</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.pinot</groupId>
+      <artifactId>pinot-dropwizard</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>net.sourceforge.fmpp</groupId>
+      <artifactId>fmpp</artifactId>
+    </dependency>
   </dependencies>
   <profiles>
-    <profile>
-      <id>build-shaded-jar</id>
-      <activation>
-        <activeByDefault>true</activeByDefault>
-      </activation>
-      <build>
-        <plugins>
-          <plugin>
-            <artifactId>maven-shade-plugin</artifactId>
-            <executions>
-              <execution>
-                <phase>package</phase>
-                <goals>
-                  <goal>shade</goal>
-                </goals>
-                <configuration>
-                  <relocations>
-                    <relocation>
-                      <pattern>com.google.common.base</pattern>
-                      <shadedPattern>${shade.prefix}.com.google.common.base</shadedPattern>
-                    </relocation>
-                    <relocation>
-                      <pattern>com.google.common.cache</pattern>
-                      <shadedPattern>${shade.prefix}.com.google.common.cache</shadedPattern>
-                    </relocation>
-                    <relocation>
-                      <pattern>org.apache.http</pattern>
-                      <shadedPattern>${shade.prefix}.org.apache.http</shadedPattern>
-                    </relocation>
-                  </relocations>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
-        </plugins>
-      </build>
-    </profile>
     <profile>
       <id>profile-buildthrift</id>
       <activation>
@@ -509,40 +313,107 @@
                 <id>generate-sources</id>
                 <phase>generate-sources</phase>
                 <configuration>
-                  <tasks>
-                    <delete dir="target/generated-sources/gen-javabean"/>
-                    <mkdir dir="target/generated-sources"/>
+                  <target>
+                    <delete dir="target/generated-sources/gen-javabean" />
+                    <mkdir dir="target/generated-sources" />
                     <exec executable="/usr/local/bin/thrift">
-                      <arg value="--gen"/>
-                      <arg value="java:beans"/>
-                      <arg value="-o"/>
-                      <arg value="target/generated-sources"/>
-                      <arg value="src/thrift/query.thrift"/>
+                      <arg value="--gen" />
+                      <arg value="java:beans" />
+                      <arg value="-o" />
+                      <arg value="target/generated-sources" />
+                      <arg value="src/thrift/query.thrift" />
                     </exec>
                     <exec executable="/usr/local/bin/thrift">
-                      <arg value="--gen"/>
-                      <arg value="java:beans"/>
-                      <arg value="-o"/>
-                      <arg value="target/generated-sources"/>
-                      <arg value="src/thrift/request.thrift"/>
+                      <arg value="--gen" />
+                      <arg value="java:beans" />
+                      <arg value="-o" />
+                      <arg value="target/generated-sources" />
+                      <arg value="src/thrift/request.thrift" />
                     </exec>
                     <exec executable="/usr/local/bin/thrift">
-                      <arg value="--gen"/>
-                      <arg value="java:beans"/>
-                      <arg value="-o"/>
-                      <arg value="target/generated-sources"/>
-                      <arg value="src/thrift/response.thrift"/>
+                      <arg value="--gen" />
+                      <arg value="java:beans" />
+                      <arg value="-o" />
+                      <arg value="target/generated-sources" />
+                      <arg value="src/thrift/response.thrift" />
                     </exec>
-                    <copy todir="src/main/java/">
-                      <fileset dir="target/generated-sources/gen-javabean"/>
-                    </copy>
-                  </tasks>
+                    <move todir="src/main/java/">
+                      <fileset dir="target/generated-sources/gen-javabean" />
+                    </move>
+                    <delete dir="target/generated-sources/gen-javabean" />
+                  </target>
                 </configuration>
                 <goals>
                   <goal>run</goal>
                 </goals>
               </execution>
             </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <profile>
+      <id>build-shaded-jar</id>
+      <activation>
+        <activeByDefault>true</activeByDefault>
+      </activation>
+      <properties>
+        <shade.phase.prop>package</shade.phase.prop>
+      </properties>
+    </profile>
+    <profile>
+      <id>pinot-fastdev</id>
+      <properties>
+        <shade.phase.prop>none</shade.phase.prop>
+      </properties>
+    </profile>
+    <profile>
+      <!-- The Ant task doesn't care about unchanged (re)sources and will always generate.
+      This causes the maven-compiler-plugin to detect changes and always recompile the Java sources.
+
+      If there are changes in src/main/codegen, either enforcer activation of this profile by using -Psqlparser or by
+      removing the generated-sources/javacc directory
+
+      NOTICE: In Maven the profile activation is decided BEFORE plugin execution.
+      When running clean+verify, the profile will not be activated (because the file still exists),
+        clean will remove it and compiler-plugin will fail because of a missing class.
+        Either run 'mvn clean && mvn verify' or 'mvn verify -Psqlparser'
+       -->
+      <id>sqlparser</id>
+      <activation>
+        <file>
+          <missing>${project.build.directory}/generated-sources/javacc/Parser.jj</missing>
+        </file>
+      </activation>
+      <build>
+        <plugins>
+          <!-- "Plugs in" the Calcite's Parser.jj with the variables present in config.fmpp. These contain the custom rules
+     as well as the class to which the custom implementation will get generated -->
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-antrun-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>generate-fmpp-sources</id>
+                <phase>generate-sources</phase>
+                <goals>
+                  <goal>run</goal>
+                </goals>
+                <configuration>
+                  <target name="generate-code">
+                    <taskdef name="fmpp" classname="fmpp.tools.AntTask" classpathref="maven.compile.classpath"/>
+                    <fmpp configuration="src/main/codegen/config.fmpp"
+                        sourceRoot="src/main/codegen/templates"
+                        outputRoot="${project.build.directory}/generated-sources/"/>
+                  </target>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin> <!-- Enforce javacc-maven-plugin executions after fmpp-maven-plugin -->
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>javacc-maven-plugin</artifactId>
           </plugin>
         </plugins>
       </build>

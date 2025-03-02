@@ -19,6 +19,7 @@
 package org.apache.pinot.core.data.table;
 
 import java.util.HashMap;
+import java.util.concurrent.ExecutorService;
 import javax.annotation.concurrent.NotThreadSafe;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.core.query.request.context.QueryContext;
@@ -30,9 +31,10 @@ import org.apache.pinot.core.query.request.context.QueryContext;
 @NotThreadSafe
 public class SimpleIndexedTable extends IndexedTable {
 
-  public SimpleIndexedTable(DataSchema dataSchema, QueryContext queryContext, int resultSize, int trimSize,
-      int trimThreshold) {
-    super(dataSchema, queryContext, resultSize, trimSize, trimThreshold, new HashMap<>());
+  public SimpleIndexedTable(DataSchema dataSchema, boolean hasFinalInput, QueryContext queryContext, int resultSize,
+      int trimSize, int trimThreshold, int initialCapacity, ExecutorService executorService) {
+    super(dataSchema, hasFinalInput, queryContext, resultSize, trimSize, trimThreshold, new HashMap<>(initialCapacity),
+        executorService);
   }
 
   /**

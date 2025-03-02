@@ -47,11 +47,21 @@ public class DoubleColumnPreIndexStatsCollector extends AbstractColumnStatistics
 
       _maxNumberOfMultiValues = Math.max(_maxNumberOfMultiValues, values.length);
       updateTotalNumberOfEntries(values);
+    } else if (entry instanceof double[]) {
+      double[] values = (double[]) entry;
+      for (double value : values) {
+        _values.add(value);
+      }
+
+      _maxNumberOfMultiValues = Math.max(_maxNumberOfMultiValues, values.length);
+      updateTotalNumberOfEntries(values.length);
     } else {
       double value = (double) entry;
       addressSorted(value);
       if (_values.add(value)) {
-        updatePartition(value);
+        if (isPartitionEnabled()) {
+          updatePartition(Double.toString(value));
+        }
       }
 
       _totalNumberOfEntries++;
@@ -91,10 +101,7 @@ public class DoubleColumnPreIndexStatsCollector extends AbstractColumnStatistics
 
   @Override
   public int getCardinality() {
-    if (_sealed) {
-      return _sortedValues.length;
-    }
-    throw new IllegalStateException("you must seal the collector first before asking for cardinality");
+    return _sealed ? _sortedValues.length : _values.size();
   }
 
   @Override

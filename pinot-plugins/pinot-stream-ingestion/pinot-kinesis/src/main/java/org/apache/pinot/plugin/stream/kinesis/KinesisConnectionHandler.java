@@ -19,8 +19,10 @@
 package org.apache.pinot.plugin.stream.kinesis;
 
 import com.google.common.annotations.VisibleForTesting;
+import java.io.Closeable;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.ArrayList;
 import java.util.List;
 import org.apache.commons.lang3.StringUtils;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
@@ -33,6 +35,8 @@ import software.amazon.awssdk.services.kinesis.KinesisClient;
 import software.amazon.awssdk.services.kinesis.KinesisClientBuilder;
 import software.amazon.awssdk.services.kinesis.model.ListShardsRequest;
 import software.amazon.awssdk.services.kinesis.model.ListShardsResponse;
+import software.amazon.awssdk.services.kinesis.model.ListStreamsRequest;
+import software.amazon.awssdk.services.kinesis.model.ListStreamsResponse;
 import software.amazon.awssdk.services.kinesis.model.Shard;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.auth.StsAssumeRoleCredentialsProvider;
@@ -42,34 +46,67 @@ import software.amazon.awssdk.services.sts.model.AssumeRoleRequest;
 /**
  * Manages the Kinesis stream connection, given the stream name and aws region
  */
-public class KinesisConnectionHandler {
-  protected KinesisClient _kinesisClient;
-  private final String _stream;
-  private final String _region;
-  private final String _accessKey;
-  private final String _secretKey;
-  private final String _endpoint;
-  private final KinesisConfig _kinesisConfig;
+public class KinesisConnectionHandler implements Closeable {
+  protected final KinesisConfig _config;
+  protected final KinesisClient _kinesisClient;
 
-  public KinesisConnectionHandler(KinesisConfig kinesisConfig) {
-    _stream = kinesisConfig.getStreamTopicName();
-    _region = kinesisConfig.getAwsRegion();
-    _accessKey = kinesisConfig.getAccessKey();
-    _secretKey = kinesisConfig.getSecretKey();
-    _endpoint = kinesisConfig.getEndpoint();
-    _kinesisConfig = kinesisConfig;
-    createConnection();
+  public KinesisConnectionHandler(KinesisConfig config) {
+    _config = config;
+    _kinesisClient = createClient();
   }
 
   @VisibleForTesting
-  public KinesisConnectionHandler(KinesisConfig kinesisConfig, KinesisClient kinesisClient) {
-    _stream = kinesisConfig.getStreamTopicName();
-    _region = kinesisConfig.getAwsRegion();
-    _accessKey = kinesisConfig.getAccessKey();
-    _secretKey = kinesisConfig.getSecretKey();
-    _endpoint = kinesisConfig.getEndpoint();
-    _kinesisConfig = kinesisConfig;
+  public KinesisConnectionHandler(KinesisConfig config, KinesisClient kinesisClient) {
+    _config = config;
     _kinesisClient = kinesisClient;
+  }
+
+  private KinesisClient createClient() {
+    KinesisClientBuilder kinesisClientBuilder;
+
+    AwsCredentialsProvider awsCredentialsProvider;
+    String accessKey = _config.getAccessKey();
+    String secretKey = _config.getSecretKey();
+    if (StringUtils.isNotBlank(accessKey) && StringUtils.isNotBlank(secretKey)) {
+      AwsBasicCredentials awsBasicCredentials = AwsBasicCredentials.create(accessKey, secretKey);
+      awsCredentialsProvider = StaticCredentialsProvider.create(awsBasicCredentials);
+    } else {
+      awsCredentialsProvider = DefaultCredentialsProvider.builder().build();
+    }
+
+    if (_config.isIamRoleBasedAccess()) {
+      AssumeRoleRequest.Builder assumeRoleRequestBuilder =
+          AssumeRoleRequest.builder().roleArn(_config.getRoleArn()).roleSessionName(_config.getRoleSessionName())
+              .durationSeconds(_config.getSessionDurationSeconds());
+      AssumeRoleRequest assumeRoleRequest;
+      String externalId = _config.getExternalId();
+      if (StringUtils.isNotBlank(externalId)) {
+        assumeRoleRequest = assumeRoleRequestBuilder.externalId(externalId).build();
+      } else {
+        assumeRoleRequest = assumeRoleRequestBuilder.build();
+      }
+      StsClient stsClient =
+          StsClient.builder().region(Region.of(_config.getAwsRegion())).credentialsProvider(awsCredentialsProvider)
+              .build();
+      awsCredentialsProvider =
+          StsAssumeRoleCredentialsProvider.builder().stsClient(stsClient).refreshRequest(assumeRoleRequest)
+              .asyncCredentialUpdateEnabled(_config.isAsyncSessionUpdateEnabled()).build();
+    }
+
+    kinesisClientBuilder =
+        KinesisClient.builder().region(Region.of(_config.getAwsRegion())).credentialsProvider(awsCredentialsProvider)
+            .httpClientBuilder(new ApacheSdkHttpService().createHttpClientBuilder());
+
+    String endpoint = _config.getEndpoint();
+    if (StringUtils.isNotBlank(endpoint)) {
+      try {
+        kinesisClientBuilder = kinesisClientBuilder.endpointOverride(new URI(endpoint));
+      } catch (URISyntaxException e) {
+        throw new IllegalArgumentException("URI syntax is not correctly specified for endpoint: " + endpoint, e);
+      }
+    }
+
+    return kinesisClientBuilder.build();
   }
 
   /**
@@ -77,77 +114,45 @@ public class KinesisConnectionHandler {
    */
   public List<Shard> getShards() {
     ListShardsResponse listShardsResponse =
-        _kinesisClient.listShards(ListShardsRequest.builder().streamName(_stream).build());
+        _kinesisClient.listShards(ListShardsRequest.builder().streamName(_config.getStreamTopicName()).build());
     return listShardsResponse.shards();
   }
 
-  /**
-   * Creates a Kinesis client for the stream
-   */
-  public void createConnection() {
-    if (_kinesisClient == null) {
-      KinesisClientBuilder kinesisClientBuilder;
+  public List<String> getStreamNames() {
+    final int limit = 1000; // default value for the API is 100
+    try {
+      List<String> allStreamNames = new ArrayList<>();
+      ListStreamsResponse response = _kinesisClient.listStreams(ListStreamsRequest.builder().limit(limit).build());
 
-      AwsCredentialsProvider awsCredentialsProvider;
-      if (StringUtils.isNotBlank(_accessKey) && StringUtils.isNotBlank(_secretKey)) {
-        AwsBasicCredentials awsBasicCredentials = AwsBasicCredentials.create(_accessKey, _secretKey);
-        awsCredentialsProvider = StaticCredentialsProvider.create(awsBasicCredentials);
-      } else {
-        awsCredentialsProvider = DefaultCredentialsProvider.create();
-      }
+      while (response != null && response.streamNames() != null) {
+        allStreamNames.addAll(response.streamNames());
 
-      if (_kinesisConfig.isIamRoleBasedAccess()) {
-        AssumeRoleRequest.Builder assumeRoleRequestBuilder =
-            AssumeRoleRequest.builder()
-                .roleArn(_kinesisConfig.getRoleArn())
-                .roleSessionName(_kinesisConfig.getRoleSessionName())
-                .durationSeconds(_kinesisConfig.getSessionDurationSeconds());
-
-        AssumeRoleRequest assumeRoleRequest;
-        if (StringUtils.isNotEmpty(_kinesisConfig.getExternalId())) {
-          assumeRoleRequest = assumeRoleRequestBuilder
-              .externalId(_kinesisConfig.getExternalId())
-              .build();
-        } else {
-          assumeRoleRequest = assumeRoleRequestBuilder.build();
+        if (!response.hasMoreStreams()) {
+          break;
         }
 
-        StsClient stsClient =
-            StsClient.builder()
-                .region(Region.of(_region))
-                .credentialsProvider(awsCredentialsProvider)
-                .build();
-
-        awsCredentialsProvider =
-            StsAssumeRoleCredentialsProvider.builder()
-                .stsClient(stsClient)
-                .refreshRequest(assumeRoleRequest)
-                .asyncCredentialUpdateEnabled(_kinesisConfig.isAsyncSessionUpdateEnabled())
-                .build();
+        // Fetch the next page
+        response = _kinesisClient.listStreams(ListStreamsRequest.builder()
+            .exclusiveStartStreamName(allStreamNames.get(allStreamNames.size() - 1))
+            .limit(limit)
+            .build());
       }
 
-      kinesisClientBuilder =
-          KinesisClient.builder()
-              .region(Region.of(_region))
-              .credentialsProvider(awsCredentialsProvider)
-              .httpClientBuilder(new ApacheSdkHttpService().createHttpClientBuilder());
-
-      if (StringUtils.isNotBlank(_endpoint)) {
-        try {
-          kinesisClientBuilder = kinesisClientBuilder.endpointOverride(new URI(_endpoint));
-        } catch (URISyntaxException e) {
-          throw new IllegalArgumentException("URI syntax is not correctly specified for endpoint: " + _endpoint, e);
-        }
-      }
-
-      _kinesisClient = kinesisClientBuilder.build();
+      return allStreamNames;
+    } catch (Exception e) {
+      // Log the exception (if a logger is available) for better observability
+      throw new RuntimeException("Failed to list Kinesis streams: " + e.getMessage(), e);
     }
   }
 
+
+  @VisibleForTesting
+  public KinesisClient getClient() {
+    return _kinesisClient;
+  }
+
+  @Override
   public void close() {
-    if (_kinesisClient != null) {
-      _kinesisClient.close();
-      _kinesisClient = null;
-    }
+    _kinesisClient.close();
   }
 }

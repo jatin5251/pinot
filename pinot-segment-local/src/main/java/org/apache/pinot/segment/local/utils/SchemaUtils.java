@@ -25,6 +25,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import javax.annotation.Nullable;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pinot.segment.local.function.FunctionEvaluator;
 import org.apache.pinot.segment.local.function.FunctionEvaluatorFactory;
@@ -71,10 +72,14 @@ public class SchemaUtils {
    * @param tableConfigs table configs associated with this schema (table configs with raw name = schema name)
    */
   public static void validate(Schema schema, List<TableConfig> tableConfigs) {
+    validate(schema, tableConfigs, false);
+  }
+
+  public static void validate(Schema schema, List<TableConfig> tableConfigs, @Nullable boolean isIgnoreCase) {
     for (TableConfig tableConfig : tableConfigs) {
       validateCompatibilityWithTableConfig(schema, tableConfig);
     }
-    validate(schema);
+    validate(schema, isIgnoreCase);
   }
 
   /**
@@ -95,8 +100,20 @@ public class SchemaUtils {
    * 6) Schema validations from {@link Schema#validate}
    */
   public static void validate(Schema schema) {
+    validate(schema, false);
+  }
+
+  public static void validate(Schema schema, boolean isIgnoreCase) {
     schema.validate();
 
+    if (isIgnoreCase) {
+      Set<String> lowerCaseColumnNames = new HashSet<>();
+      for (String column : schema.getColumnNames()) {
+        Preconditions.checkState(lowerCaseColumnNames.add(column.toLowerCase()),
+          "When enable case insensitive, you can't use the same lowercase column name: %s",
+          column.toLowerCase());
+      }
+    }
     Set<String> transformedColumns = new HashSet<>();
     Set<String> argumentColumns = new HashSet<>();
     Set<String> primaryKeyColumnCandidates = new HashSet<>();
@@ -121,11 +138,15 @@ public class SchemaUtils {
                     + column + "'", e);
           }
         }
-        if (fieldSpec.getFieldType().equals(FieldSpec.FieldType.TIME)) {
+        if (fieldSpec.getFieldType() == FieldSpec.FieldType.TIME) {
           validateTimeFieldSpec((TimeFieldSpec) fieldSpec);
         }
-        if (fieldSpec.getFieldType().equals(FieldSpec.FieldType.DATE_TIME)) {
+        if (fieldSpec.getFieldType() == FieldSpec.FieldType.DATE_TIME) {
           validateDateTimeFieldSpec((DateTimeFieldSpec) fieldSpec);
+        }
+        if (fieldSpec.getDataType().equals(FieldSpec.DataType.FLOAT) || fieldSpec.getDataType()
+            .equals(FieldSpec.DataType.DOUBLE)) {
+          validateDefaultIsNotNaN(fieldSpec);
         }
       }
     }
@@ -140,6 +161,12 @@ public class SchemaUtils {
     }
   }
 
+  private static void validateDefaultIsNotNaN(FieldSpec fieldSpec) {
+    Preconditions.checkState(!fieldSpec.getDefaultNullValueString().equals("NaN"),
+            "NaN as null default value is not managed yet for %s",
+            fieldSpec.getName());
+  }
+
   /**
    * Validates that the schema is compatible with the given table config
    */
@@ -149,7 +176,7 @@ public class SchemaUtils {
     } catch (Exception e) {
       throw new IllegalStateException(
           "Schema is incompatible with tableConfig with name: " + tableConfig.getTableName() + " and type: "
-              + tableConfig.getTableType(), e);
+              + tableConfig.getTableType() + ", reason: " + e.getMessage(), e);
     }
   }
 

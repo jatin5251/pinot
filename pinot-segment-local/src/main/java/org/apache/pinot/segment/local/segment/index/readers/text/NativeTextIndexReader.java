@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.segment.local.segment.index.readers.text;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import java.io.File;
 import java.io.IOException;
@@ -52,10 +53,14 @@ public class NativeTextIndexReader implements TextIndexReader {
   public NativeTextIndexReader(String column, File indexDir) {
     _column = column;
     try {
-      _buffer = PinotDataBuffer.loadBigEndianFile(getTextIndexFile(indexDir));
+      String desc = "Native text index buffer: " + column;
+      File indexFile = getTextIndexFile(indexDir);
+      //TODO: Pass the load mode in (Direct, MMap)
+      _buffer =
+          PinotDataBuffer.mapFile(indexFile, /* readOnly */ true, 0, indexFile.length(), ByteOrder.BIG_ENDIAN, desc);
       populateIndexes();
     } catch (Exception e) {
-      LOGGER.error("Failed to instantiate Lucene text index reader for column {}, exception {}", column,
+      LOGGER.error("Failed to instantiate native text index reader for column {}, exception {}", column,
           e.getMessage());
       throw new RuntimeException(e);
     }
@@ -115,5 +120,15 @@ public class NativeTextIndexReader implements TextIndexReader {
   @Override
   public void close()
       throws IOException {
+    // TODO: this method doesn't release native buffers held by _fst
+    _buffer.close();
+  }
+
+  @VisibleForTesting
+  public void closeInTest()
+      throws IOException {
+    if (_fst instanceof ImmutableFST) {
+      ((ImmutableFST) _fst)._mutableBytesStore.close();
+    }
   }
 }

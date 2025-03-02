@@ -19,11 +19,17 @@
 package org.apache.pinot.client;
 
 import java.io.InputStream;
+import java.math.BigDecimal;
 import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
-import java.util.concurrent.Future;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.commons.io.IOUtils;
 import org.apache.pinot.client.utils.DateTimeUtils;
 import org.apache.pinot.spi.utils.JsonUtils;
@@ -136,6 +142,27 @@ public class PinotResultSetTest {
   }
 
   @Test
+  public void testFetchBigDecimals()
+      throws Exception {
+    ResultSetGroup resultSetGroup = getResultSet(TEST_RESULT_SET_RESOURCE);
+    ResultSet resultSet = resultSetGroup.getResultSet(0);
+    PinotResultSet pinotResultSet = new PinotResultSet(resultSet);
+
+    int currentRow = 0;
+    while (pinotResultSet.next()) {
+      Assert.assertEquals(pinotResultSet.getBigDecimal(7), new BigDecimal(resultSet.getString(currentRow, 6)));
+      currentRow++;
+    }
+
+    // test bad values and make sure exception is thrown
+    try {
+      pinotResultSet.getBigDecimal(6);
+    } catch (SQLException e) {
+      Assert.assertTrue(e.getMessage().contains("Unable to fetch BigDecimal value"));
+    }
+  }
+
+  @Test
   public void testFindColumn()
       throws Exception {
     ResultSetGroup resultSetGroup = getResultSet(TEST_RESULT_SET_RESOURCE);
@@ -157,6 +184,103 @@ public class PinotResultSetTest {
 
     for (int i = 0; i < resultSet.getColumnCount(); i++) {
       Assert.assertEquals(pinotResultSetMetadata.getColumnTypeName(i + 1), resultSet.getColumnDataType(i));
+    }
+  }
+
+  @Test
+  public void testGetCalculatedScale() {
+    PinotResultSet pinotResultSet = new PinotResultSet();
+    int calculatedResult;
+
+    calculatedResult = pinotResultSet.getCalculatedScale("1");
+    Assert.assertEquals(calculatedResult, 0);
+
+    calculatedResult = pinotResultSet.getCalculatedScale("1.0");
+    Assert.assertEquals(calculatedResult, 1);
+
+    calculatedResult = pinotResultSet.getCalculatedScale("1.2");
+    Assert.assertEquals(calculatedResult, 1);
+
+    calculatedResult = pinotResultSet.getCalculatedScale("1.23");
+    Assert.assertEquals(calculatedResult, 2);
+
+    calculatedResult = pinotResultSet.getCalculatedScale("1.234");
+    Assert.assertEquals(calculatedResult, 3);
+
+    calculatedResult = pinotResultSet.getCalculatedScale("-1.234");
+    Assert.assertEquals(calculatedResult, 3);
+  }
+
+  @Test
+  public void testDateFromStringConcurrent()
+      throws Throwable {
+    ExecutorService executorService = Executors.newFixedThreadPool(10);
+    AtomicReference<Throwable> throwable = new AtomicReference<>();
+    for (int i = 0; i < 10; i++) {
+      executorService.submit(() -> {
+        try {
+          Assert.assertEquals(DateTimeUtils.getDateFromString("2020-01-01", Calendar.getInstance()).toString(),
+              "2020-01-01");
+        } catch (Throwable t) {
+          throwable.set(t);
+        }
+      });
+    }
+
+    executorService.shutdown();
+    executorService.awaitTermination(1000, TimeUnit.MILLISECONDS);
+
+    if (throwable.get() != null) {
+      throw throwable.get();
+    }
+  }
+
+  @Test
+  public void testTimeFromStringConcurrent()
+      throws Throwable {
+    ExecutorService executorService = Executors.newFixedThreadPool(10);
+    AtomicReference<Throwable> throwable = new AtomicReference<>();
+    for (int i = 0; i < 10; i++) {
+      executorService.submit(() -> {
+        try {
+          Assert.assertEquals(DateTimeUtils.getTimeFromString("2020-01-01 12:00:00", Calendar.getInstance()).toString(),
+              "12:00:00");
+        } catch (Throwable t) {
+          throwable.set(t);
+        }
+      });
+    }
+
+    executorService.shutdown();
+    executorService.awaitTermination(1000, TimeUnit.MILLISECONDS);
+
+    if (throwable.get() != null) {
+      throw throwable.get();
+    }
+  }
+
+  @Test
+  public void testTimestampFromStringConcurrent()
+      throws Throwable {
+    ExecutorService executorService = Executors.newFixedThreadPool(10);
+    AtomicReference<Throwable> throwable = new AtomicReference<>();
+    for (int i = 0; i < 10; i++) {
+      executorService.submit(() -> {
+        try {
+          Assert.assertEquals(
+              DateTimeUtils.getTimestampFromString("2020-01-01 12:00:00", Calendar.getInstance()).toString(),
+              "2020-01-01 12:00:00.0");
+        } catch (Throwable t) {
+          throwable.set(t);
+        }
+      });
+    }
+
+    executorService.shutdown();
+    executorService.awaitTermination(1000, TimeUnit.MILLISECONDS);
+
+    if (throwable.get() != null) {
+      throw throwable.get();
     }
   }
 
@@ -189,19 +313,7 @@ public class PinotResultSetTest {
     }
 
     @Override
-    public Future<BrokerResponse> executeQueryAsync(String brokerAddress, String query)
-        throws PinotClientException {
-      return null;
-    }
-
-    @Override
-    public BrokerResponse executeQuery(String brokerAddress, Request request)
-        throws PinotClientException {
-      return executeQuery(brokerAddress, request.getQuery());
-    }
-
-    @Override
-    public Future<BrokerResponse> executeQueryAsync(String brokerAddress, Request request)
+    public CompletableFuture<BrokerResponse> executeQueryAsync(String brokerAddress, String query)
         throws PinotClientException {
       return null;
     }

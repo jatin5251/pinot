@@ -18,30 +18,51 @@
  */
 package org.apache.pinot.common.utils.fetcher;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.net.InetAddresses;
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import org.apache.http.Header;
-import org.apache.http.HttpHeaders;
-import org.apache.http.HttpStatus;
-import org.apache.http.message.BasicHeader;
+import org.apache.hc.core5.http.Header;
+import org.apache.hc.core5.http.HttpHeaders;
+import org.apache.hc.core5.http.HttpStatus;
+import org.apache.hc.core5.http.message.BasicHeader;
 import org.apache.pinot.common.exception.HttpErrorStatusException;
 import org.apache.pinot.common.utils.FileUploadDownloadClient;
 import org.apache.pinot.common.utils.RoundRobinURIProvider;
+import org.apache.pinot.common.utils.http.HttpClient;
+import org.apache.pinot.common.utils.http.HttpClientConfig;
 import org.apache.pinot.spi.env.PinotConfiguration;
+import org.apache.pinot.spi.utils.retry.AttemptsExceededException;
+import org.apache.pinot.spi.utils.retry.RetriableOperationException;
 import org.apache.pinot.spi.utils.retry.RetryPolicies;
 
 
 public class HttpSegmentFetcher extends BaseSegmentFetcher {
   protected FileUploadDownloadClient _httpClient;
+  private static final String CONNECTION_REQUEST_TIMEOUT_CONFIG_KEY =
+      "http.request.connectionRequestTimeoutMs";
+  private static final String SOCKET_TIMEOUT_CONFIG_KEY = "http.request.socketTimeoutMs";
+  private int _connectionRequestTimeoutMs;
+  private int _socketTimeoutMs;
+
+  @VisibleForTesting
+  void setHttpClient(FileUploadDownloadClient httpClient) {
+    _httpClient = httpClient;
+  }
 
   @Override
   protected void doInit(PinotConfiguration config) {
-    _httpClient = new FileUploadDownloadClient();
+    if (_httpClient == null) {
+      _httpClient = new FileUploadDownloadClient(HttpClientConfig.newBuilder(config).build());
+    }
+    _connectionRequestTimeoutMs =
+        config.getProperty(CONNECTION_REQUEST_TIMEOUT_CONFIG_KEY, HttpClient.DEFAULT_CONNECTION_REQUEST_TIMEOUT_MS);
+    _socketTimeoutMs = config.getProperty(SOCKET_TIMEOUT_CONFIG_KEY, HttpClient.DEFAULT_SOCKET_TIMEOUT_MS);
   }
 
   @Override
@@ -49,10 +70,9 @@ public class HttpSegmentFetcher extends BaseSegmentFetcher {
       throws Exception {
     // Create a RoundRobinURIProvider to round robin IP addresses when retry uploading. Otherwise may always try to
     // download from a same broken host as: 1) DNS may not RR the IP addresses 2) OS cache the DNS resolution result.
-    RoundRobinURIProvider uriProvider = new RoundRobinURIProvider(downloadURI);
+    RoundRobinURIProvider uriProvider = new RoundRobinURIProvider(List.of(downloadURI), true);
 
-    // Use the minimal value of configured retry count and number of IP addresses.
-    int retryCount = Math.min(_retryCount, uriProvider.numAddresses());
+    int retryCount = getRetryCount(uriProvider);
 
     _logger.info("Retry downloading for {} times. retryCount from pinot server config: {}, number of IP addresses for "
         + "download URI: {}", retryCount, _retryCount, uriProvider.numAddresses());
@@ -68,10 +88,10 @@ public class HttpSegmentFetcher extends BaseSegmentFetcher {
         if (!InetAddresses.isInetAddress(hostName)) {
           httpHeaders.add(new BasicHeader(HttpHeaders.HOST, hostName + ":" + port));
         }
-        int statusCode = _httpClient.downloadFile(uri, dest, _authProvider, httpHeaders);
-        _logger
-            .info("Downloaded segment from: {} to: {} of size: {}; Response status code: {}", uri, dest, dest.length(),
-                statusCode);
+        int statusCode = _httpClient.downloadFile(uri, dest, _authProvider, httpHeaders, _connectionRequestTimeoutMs,
+            _socketTimeoutMs);
+        _logger.info("Downloaded segment from: {} to: {} of size: {}; Response status code: {}", uri, dest,
+            dest.length(), statusCode);
         return true;
       } catch (HttpErrorStatusException e) {
         int statusCode = e.getStatusCode();
@@ -95,55 +115,77 @@ public class HttpSegmentFetcher extends BaseSegmentFetcher {
     });
   }
 
+  private int getRetryCount(RoundRobinURIProvider uriProvider) {
+    // Use the minimal value of configured retry count and number of IP addresses.
+    return Math.min(_retryCount, uriProvider.numAddresses());
+  }
+
   @Override
-  public File fetchUntarSegmentToLocalStreamed(URI downloadURI, File dest, long maxStreamRateInByte)
+  public File fetchUntarSegmentToLocalStreamed(URI downloadURI, File dest, long maxStreamRateInByte,
+      AtomicInteger attempts)
       throws Exception {
-    // Create a RoundRobinURIProvider to round robin IP addresses when retry uploading. Otherwise may always try to
+    // Create a RoundRobinURIProvider to round robin IP addresses when retry uploading. Otherwise, may always try to
     // download from a same broken host as: 1) DNS may not RR the IP addresses 2) OS cache the DNS resolution result.
-    RoundRobinURIProvider uriProvider = new RoundRobinURIProvider(downloadURI);
-    int retryCount = Math.max(_retryCount, uriProvider.numAddresses());
+    RoundRobinURIProvider uriProvider = new RoundRobinURIProvider(List.of(downloadURI), true);
+
+    int retryCount = getRetryCount(uriProvider);
+
     AtomicReference<File> ret = new AtomicReference<>(); // return the untared segment directory
     _logger.info("Retry downloading for {} times. retryCount from pinot server config: {}, number of IP addresses for "
         + "download URI: {}", retryCount, _retryCount, uriProvider.numAddresses());
-    RetryPolicies.exponentialBackoffRetryPolicy(retryCount, _retryWaitMs, _retryDelayScaleFactor).attempt(() -> {
-      URI uri = uriProvider.next();
-      try {
-        String hostName = downloadURI.getHost();
-        int port = downloadURI.getPort();
-        // If the original download address is specified as host name, need add a "HOST" HTTP header to the HTTP
-        // request. Otherwise, if the download address is a LB address, when the LB be configured as "disallow direct
-        // access by IP address", downloading will fail.
-        List<Header> httpHeaders = new LinkedList<>();
-        if (!InetAddresses.isInetAddress(hostName)) {
-          httpHeaders.add(new BasicHeader(HttpHeaders.HOST, hostName + ":" + port));
-        }
-        ret.set(_httpClient.downloadUntarFileStreamed(uri, dest, _authProvider, httpHeaders, maxStreamRateInByte));
+    int tries;
+    try {
+      tries =
+          RetryPolicies.exponentialBackoffRetryPolicy(retryCount, _retryWaitMs, _retryDelayScaleFactor).attempt(() -> {
+            URI uri = uriProvider.next();
+            try {
+              String hostName = downloadURI.getHost();
+              int port = downloadURI.getPort();
+              // If the original download address is specified as host name, need add a "HOST" HTTP header to the HTTP
+              // request. Otherwise, if the download address is a LB address, when the LB be configured as "disallow
+              // direct
+              // access by IP address", downloading will fail.
+              List<Header> httpHeaders = new LinkedList<>();
+              if (!InetAddresses.isInetAddress(hostName)) {
+                httpHeaders.add(new BasicHeader(HttpHeaders.HOST, hostName + ":" + port));
+              }
+              ret.set(_httpClient.downloadUntarFileStreamed(uri, dest, _authProvider, httpHeaders, maxStreamRateInByte,
+                  _connectionRequestTimeoutMs, _socketTimeoutMs));
 
-        return true;
-      } catch (HttpErrorStatusException e) {
-        int statusCode = e.getStatusCode();
-        if (statusCode == HttpStatus.SC_NOT_FOUND || statusCode >= 500) {
-          // Temporary exception
-          // 404 is treated as a temporary exception, as the downloadURI may be backed by multiple hosts,
-          // if singe host is down, can retry with another host.
-          _logger.warn("Got temporary error status code: {} while downloading segment from: {} to: {}", statusCode, uri,
-              dest, e);
-          return false;
-        } else {
-          // Permanent exception
-          _logger.error("Got permanent error status code: {} while downloading segment from: {} to: {}, won't retry",
-              statusCode, uri, dest, e);
-          throw e;
-        }
-      } catch (IOException e) {
-        _logger.warn("Caught IOException while stream download-untarring segment from: {} to: {}, retrying",
-            uri, dest, e);
-        return false;
-      } catch (Exception e) {
-        _logger.warn("Caught exception while downloading segment from: {} to: {}", uri, dest, e);
-        return false;
-      }
-    });
+              return true;
+            } catch (HttpErrorStatusException e) {
+              int statusCode = e.getStatusCode();
+              if (statusCode == HttpStatus.SC_NOT_FOUND || statusCode >= 500) {
+                // Temporary exception
+                // 404 is treated as a temporary exception, as the downloadURI may be backed by multiple hosts,
+                // if singe host is down, can retry with another host.
+                _logger.warn("Got temporary error status code: {} while downloading segment from: {} to: {}",
+                    statusCode, uri, dest, e);
+                return false;
+              } else {
+                // Permanent exception
+                _logger.error(
+                    "Got permanent error status code: {} while downloading segment from: {} to: {}, won't retry",
+                    statusCode, uri, dest, e);
+                throw e;
+              }
+            } catch (IOException e) {
+              _logger.warn("Caught IOException while stream download-untarring segment from: {} to: {}, retrying", uri,
+                  dest, e);
+              return false;
+            } catch (Exception e) {
+              _logger.warn("Caught exception while downloading segment from: {} to: {}", uri, dest, e);
+              return false;
+            }
+          });
+    } catch (AttemptsExceededException e) {
+      attempts.set(e.getAttempts());
+      throw e;
+    } catch (RetriableOperationException e) {
+      attempts.set(e.getAttempts());
+      throw e;
+    }
+    attempts.set(tries);
     return ret.get();
   }
 
@@ -152,8 +194,12 @@ public class HttpSegmentFetcher extends BaseSegmentFetcher {
       throws Exception {
     try {
       int statusCode = _httpClient.downloadFile(uri, dest, _authProvider);
-      _logger.info("Downloaded segment from: {} to: {} of size: {}; Response status code: {}", uri, dest, dest.length(),
-          statusCode);
+      _logger.info("Try to download the segment from: {} to: {} of size: {}; Response status code: {}", uri, dest,
+          dest.length(), statusCode);
+      // In case of download failure, throw exception.
+      if (statusCode >= 300) {
+        throw new HttpErrorStatusException("Failed to download segment", statusCode);
+      }
     } catch (Exception e) {
       _logger.warn("Caught exception while downloading segment from: {} to: {}", uri, dest, e);
       throw e;

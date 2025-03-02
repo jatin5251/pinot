@@ -19,11 +19,11 @@
 
 import React, {useState, useEffect} from 'react';
 import { Grid, makeStyles } from '@material-ui/core';
-import { startCase, pick } from 'lodash';
 import { DataTable } from 'Models';
 import AppLoader from '../components/AppLoader';
 import PinotMethodUtils from '../utils/PinotMethodUtils';
 import Instances from '../components/Homepage/InstancesTables';
+import { getInstanceTypeFromString } from '../utils/Utils';
 
 const useStyles = makeStyles(() => ({
   gridContainer: {
@@ -38,18 +38,23 @@ const InstanceListingPage = () => {
   const classes = useStyles();
 
   const [fetching, setFetching] = useState(true);
-  const [instances, setInstances] = useState<DataTable>();
   const [clusterName, setClusterName] = useState('');
+  const [instances, setInstances] = useState<DataTable>();
+  const [liveInstanceNames, setLiveInstanceNames] = useState<string[]>();
 
   const fetchData = async () => {
-    const instanceResponse = await PinotMethodUtils.getAllInstances();
-    const instanceType = startCase(window.location.hash.split('/')[1].slice(0, -1));
-    setInstances(pick(instanceResponse, instanceType));
     let clusterNameRes = localStorage.getItem('pinot_ui:clusterName');
     if(!clusterNameRes){
       clusterNameRes = await PinotMethodUtils.getClusterName();
     }
     setClusterName(clusterNameRes);
+
+    const liveInstanceNames = await PinotMethodUtils.getLiveInstance(clusterNameRes);
+    setLiveInstanceNames(liveInstanceNames.data || []);
+
+    const instancesList = await PinotMethodUtils.getAllInstances();
+    setInstances(instancesList);
+
     setFetching(false);
   };
 
@@ -57,11 +62,18 @@ const InstanceListingPage = () => {
     fetchData();
   }, []);
 
+  const instanceType = getInstanceTypeFromString(window.location.hash.split('/')[1].slice(0, -1));
+
   return fetching ? (
     <AppLoader />
   ) : (
     <Grid item xs className={classes.gridContainer}>
-      <Instances instances={instances} clusterName={clusterName} />
+      <Instances 
+        liveInstanceNames={liveInstanceNames} 
+        instances={instances} 
+        clusterName={clusterName} 
+        instanceType={instanceType} 
+      />
     </Grid>
   );
 };

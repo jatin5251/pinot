@@ -18,11 +18,13 @@
  */
 package org.apache.pinot.core.operator.filter;
 
+import com.google.common.base.CaseFormat;
 import java.util.Collections;
 import java.util.List;
 import org.apache.pinot.common.request.context.predicate.JsonMatchPredicate;
+import org.apache.pinot.core.common.BlockDocIdSet;
 import org.apache.pinot.core.common.Operator;
-import org.apache.pinot.core.operator.blocks.FilterBlock;
+import org.apache.pinot.core.operator.ExplainAttributeBuilder;
 import org.apache.pinot.core.operator.docidsets.BitmapDocIdSet;
 import org.apache.pinot.segment.spi.index.reader.JsonIndexReader;
 import org.apache.pinot.spi.trace.FilterType;
@@ -38,21 +40,20 @@ public class JsonMatchFilterOperator extends BaseFilterOperator {
   private static final String EXPLAIN_NAME = "FILTER_JSON_INDEX";
 
   private final JsonIndexReader _jsonIndex;
-  private final int _numDocs;
   private final JsonMatchPredicate _predicate;
 
   public JsonMatchFilterOperator(JsonIndexReader jsonIndex, JsonMatchPredicate predicate,
       int numDocs) {
+    super(numDocs, false);
     _jsonIndex = jsonIndex;
     _predicate = predicate;
-    _numDocs = numDocs;
   }
 
   @Override
-  protected FilterBlock getNextBlock() {
+  protected BlockDocIdSet getTrues() {
     ImmutableRoaringBitmap bitmap = _jsonIndex.getMatchingDocIds(_predicate.getValue());
     record(bitmap);
-    return new FilterBlock(new BitmapDocIdSet(bitmap, _numDocs));
+    return new BitmapDocIdSet(bitmap, _numDocs);
   }
 
   @Override
@@ -84,8 +85,21 @@ public class JsonMatchFilterOperator extends BaseFilterOperator {
   public String toExplainString() {
     StringBuilder stringBuilder = new StringBuilder(EXPLAIN_NAME).append("(indexLookUp:json_index");
     stringBuilder.append(",operator:").append(_predicate.getType());
-    stringBuilder.append(",predicate:").append(_predicate.toString());
+    stringBuilder.append(",predicate:").append(_predicate);
     return stringBuilder.append(')').toString();
+  }
+
+  @Override
+  protected String getExplainName() {
+    return CaseFormat.UPPER_UNDERSCORE.to(CaseFormat.UPPER_CAMEL, EXPLAIN_NAME);
+  }
+
+  @Override
+  protected void explainAttributes(ExplainAttributeBuilder attributeBuilder) {
+    super.explainAttributes(attributeBuilder);
+    attributeBuilder.putString("indexLookUp", "json_index");
+    attributeBuilder.putString("operator", _predicate.getType().name());
+    attributeBuilder.putString("predicate", _predicate.toString());
   }
 
   private void record(ImmutableRoaringBitmap bitmap) {

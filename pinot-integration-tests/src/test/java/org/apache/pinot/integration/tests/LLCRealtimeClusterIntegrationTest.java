@@ -22,26 +22,48 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.io.FileUtils;
-import org.apache.http.HttpStatus;
+import org.apache.hc.core5.http.HttpStatus;
+import org.apache.helix.HelixAdmin;
+import org.apache.helix.model.ExternalView;
+import org.apache.helix.model.IdealState;
 import org.apache.pinot.common.metadata.ZKMetadataProvider;
+import org.apache.pinot.common.metadata.controllerjob.ControllerJobType;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
 import org.apache.pinot.common.utils.FileUploadDownloadClient;
+import org.apache.pinot.common.utils.LLCSegmentName;
 import org.apache.pinot.controller.ControllerConf;
+import org.apache.pinot.plugin.stream.kafka.KafkaMessageBatch;
+import org.apache.pinot.plugin.stream.kafka20.KafkaConsumerFactory;
+import org.apache.pinot.plugin.stream.kafka20.KafkaPartitionLevelConsumer;
+import org.apache.pinot.segment.spi.index.StandardIndexes;
 import org.apache.pinot.spi.config.table.IndexingConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.config.table.ingestion.IngestionConfig;
+import org.apache.pinot.spi.config.table.ingestion.StreamIngestionConfig;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.env.PinotConfiguration;
+import org.apache.pinot.spi.stream.PartitionGroupConsumer;
+import org.apache.pinot.spi.stream.PartitionGroupConsumptionStatus;
+import org.apache.pinot.spi.stream.StreamConfig;
+import org.apache.pinot.spi.stream.StreamConfigProperties;
+import org.apache.pinot.spi.stream.StreamPartitionMsgOffset;
 import org.apache.pinot.spi.utils.CommonConstants;
+import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.spi.utils.ReadMode;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
@@ -51,6 +73,7 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertTrue;
 
@@ -61,13 +84,11 @@ import static org.testng.Assert.assertTrue;
  */
 public class LLCRealtimeClusterIntegrationTest extends BaseRealtimeClusterIntegrationTest {
   private static final String CONSUMER_DIRECTORY = "/tmp/consumer-test";
-  private static final List<String> UPDATED_INVERTED_INDEX_COLUMNS = Collections.singletonList("DivActualElapsedTime");
   private static final long RANDOM_SEED = System.currentTimeMillis();
   private static final Random RANDOM = new Random(RANDOM_SEED);
 
   private final boolean _isDirectAlloc = RANDOM.nextBoolean();
   private final boolean _isConsumerDirConfigured = RANDOM.nextBoolean();
-  private final boolean _enableSplitCommit = RANDOM.nextBoolean();
   private final boolean _enableLeadControllerResource = RANDOM.nextBoolean();
   private final long _startTime = System.currentTimeMillis();
 
@@ -84,12 +105,7 @@ public class LLCRealtimeClusterIntegrationTest extends BaseRealtimeClusterIntegr
   @Override
   public void startController()
       throws Exception {
-    Map<String, Object> properties = getDefaultControllerConfiguration();
-
-    properties.put(ControllerConf.ALLOW_HLC_TABLES, false);
-    properties.put(ControllerConf.ENABLE_SPLIT_COMMIT, _enableSplitCommit);
-
-    startController(properties);
+    super.startController();
     enableResourceConfigForLeadControllerResource(_enableLeadControllerResource);
   }
 
@@ -100,10 +116,75 @@ public class LLCRealtimeClusterIntegrationTest extends BaseRealtimeClusterIntegr
     if (_isConsumerDirConfigured) {
       configuration.setProperty(CommonConstants.Server.CONFIG_OF_CONSUMER_DIR, CONSUMER_DIRECTORY);
     }
-    if (_enableSplitCommit) {
-      configuration.setProperty(CommonConstants.Server.CONFIG_OF_ENABLE_SPLIT_COMMIT, true);
-      configuration.setProperty(CommonConstants.Server.CONFIG_OF_ENABLE_COMMIT_END_WITH_METADATA, true);
+  }
+
+  @Override
+  protected void overrideControllerConf(Map<String, Object> properties) {
+    // Make sure the realtime segment validation manager does not run by itself, only when we invoke it.
+    properties.put(ControllerConf.ControllerPeriodicTasksConf.REALTIME_SEGMENT_VALIDATION_FREQUENCY_PERIOD, "2h");
+    properties.put(ControllerConf.ControllerPeriodicTasksConf.REALTIME_SEGMENT_VALIDATION_INITIAL_DELAY_IN_SECONDS,
+        3600);
+  }
+
+  @Override
+  protected void runValidationJob(long timeoutMs)
+      throws Exception {
+    final int partition = ExceptingKafkaConsumerFactory.PARTITION_FOR_EXCEPTIONS;
+    if (partition < 0) {
+      return;
     }
+    int[] seqNumbers = {ExceptingKafkaConsumerFactory.SEQ_NUM_FOR_CREATE_EXCEPTION,
+        ExceptingKafkaConsumerFactory.SEQ_NUM_FOR_CONSUME_EXCEPTION};
+    Arrays.sort(seqNumbers);
+    for (int seqNum : seqNumbers) {
+      if (seqNum < 0) {
+        continue;
+      }
+      TestUtils.waitForCondition(() -> isOffline(partition, seqNum), 5000L, timeoutMs,
+          "Failed to find offline segment in partition " + partition + " seqNum ", true,
+          Duration.ofMillis(timeoutMs / 10));
+      getControllerRequestClient().runPeriodicTask("RealtimeSegmentValidationManager");
+    }
+  }
+
+  private boolean isOffline(int partition, int seqNum) {
+    ExternalView ev = _helixAdmin.getResourceExternalView(getHelixClusterName(),
+        TableNameBuilder.REALTIME.tableNameWithType(getTableName()));
+
+    boolean isOffline = false;
+    for (String segmentNameStr : ev.getPartitionSet()) {
+      if (LLCSegmentName.isLLCSegment(segmentNameStr)) {
+        LLCSegmentName segmentName = new LLCSegmentName(segmentNameStr);
+        if (segmentName.getSequenceNumber() == seqNum && segmentName.getPartitionGroupId() == partition
+            && ev.getStateMap(segmentNameStr).values().contains(
+            CommonConstants.Helix.StateModel.SegmentStateModel.OFFLINE)) {
+          isOffline = true;
+        }
+      }
+    }
+    return isOffline;
+  }
+
+  @Override
+  protected Map<String, String> getStreamConfigMap() {
+    Map<String, String> streamConfigMap = super.getStreamConfigMap();
+    streamConfigMap.put(StreamConfigProperties.constructStreamProperty(
+        streamConfigMap.get(StreamConfigProperties.STREAM_TYPE),
+        StreamConfigProperties.STREAM_CONSUMER_FACTORY_CLASS), ExceptingKafkaConsumerFactory.class.getName());
+    ExceptingKafkaConsumerFactory.init(getHelixClusterName(), _helixAdmin, getTableName());
+    return streamConfigMap;
+  }
+  @Override
+  protected IngestionConfig getIngestionConfig() {
+    IngestionConfig ingestionConfig = new IngestionConfig();
+    ingestionConfig.setStreamIngestionConfig(
+        new StreamIngestionConfig(Collections.singletonList(getStreamConfigMap())));
+    return ingestionConfig;
+  }
+
+  @Override
+  protected Map<String, String> getStreamConfigs() {
+    return null;
   }
 
   @Override
@@ -142,7 +223,7 @@ public class LLCRealtimeClusterIntegrationTest extends BaseRealtimeClusterIntegr
     if (onlyFirstSegment) {
       numSegments = 1;
     }
-    URI uploadSegmentHttpURI = FileUploadDownloadClient.getUploadSegmentHttpURI(LOCAL_HOST, _controllerPort);
+    URI uploadSegmentHttpURI = URI.create(getControllerRequestURLBuilder().forSegmentUpload());
     try (FileUploadDownloadClient fileUploadDownloadClient = new FileUploadDownloadClient()) {
       if (numSegments == 1) {
         File segmentTarFile = segmentTarFiles[0];
@@ -190,9 +271,8 @@ public class LLCRealtimeClusterIntegrationTest extends BaseRealtimeClusterIntegr
   public void setUp()
       throws Exception {
     System.out.println(String.format(
-        "Using random seed: %s, isDirectAlloc: %s, isConsumerDirConfigured: %s, enableSplitCommit: %s, "
-            + "enableLeadControllerResource: %s", RANDOM_SEED, _isDirectAlloc, _isConsumerDirConfigured,
-        _enableSplitCommit, _enableLeadControllerResource));
+        "Using random seed: %s, isDirectAlloc: %s, isConsumerDirConfigured: %s, enableLeadControllerResource: %s",
+        RANDOM_SEED, _isDirectAlloc, _isConsumerDirConfigured, _enableLeadControllerResource));
 
     // Remove the consumer directory
     FileUtils.deleteQuietly(new File(CONSUMER_DIRECTORY));
@@ -243,8 +323,41 @@ public class LLCRealtimeClusterIntegrationTest extends BaseRealtimeClusterIntegr
   }
 
   @Test
-  public void testAddRemoveDictionaryAndInvertedIndex()
+  public void testSortedColumn()
       throws Exception {
+    // There should be no inverted index or range index sealed because the sorted column is not configured with them
+    JsonNode columnIndexSize = getColumnIndexSize(getSortedColumn());
+    assertFalse(columnIndexSize.has(StandardIndexes.INVERTED_ID));
+    assertFalse(columnIndexSize.has(StandardIndexes.RANGE_ID));
+
+    // For point lookup query, there should be no scan from the committed/consuming segments, but full scan from the
+    // uploaded segments:
+    // - Committed segments have sorted index
+    // - Consuming segments have inverted index
+    // - Uploaded segments have neither of them
+    String query = "SELECT COUNT(*) FROM myTable WHERE Carrier = 'DL'";
+    JsonNode response = postQuery(query);
+    long numEntriesScannedInFilter = response.get("numEntriesScannedInFilter").asLong();
+    long numDocsInUploadedSegments = super.getCountStarResult();
+    assertEquals(numEntriesScannedInFilter, numDocsInUploadedSegments);
+
+    // For range query, there should be no scan from the committed segments, but full scan from the uploaded/consuming
+    // segments:
+    // - Committed segments have sorted index
+    // - Consuming/Uploaded segments do not have sorted index
+    query = "SELECT COUNT(*) FROM myTable WHERE Carrier > 'DL'";
+    response = postQuery(query);
+    numEntriesScannedInFilter = response.get("numEntriesScannedInFilter").asLong();
+    // NOTE: If this test is running after force commit test, there will be no records in consuming segments
+    assertTrue(numEntriesScannedInFilter >= numDocsInUploadedSegments);
+    assertTrue(numEntriesScannedInFilter < 2 * numDocsInUploadedSegments);
+  }
+
+  @Test(dataProvider = "useBothQueryEngines")
+  public void testAddRemoveDictionaryAndInvertedIndex(boolean useMultiStageQueryEngine)
+      throws Exception {
+    setUseMultiStageQueryEngine(useMultiStageQueryEngine);
+    notSupportedInV2();
     String query = "SELECT COUNT(*) FROM myTable WHERE ActualElapsedTime = -9999";
     long numTotalDocs = getCountStarResult();
 
@@ -304,9 +417,98 @@ public class LLCRealtimeClusterIntegrationTest extends BaseRealtimeClusterIntegr
   }
 
   @Test
-  public void testReset()
+  public void testReset() {
+    testReset(TableType.REALTIME);
+  }
+
+  @Test
+  public void testForceCommit()
       throws Exception {
-    super.testReset(TableType.REALTIME);
+    String realtimeTableName = TableNameBuilder.REALTIME.tableNameWithType(getTableName());
+    Set<String> consumingSegments = getConsumingSegmentsFromIdealState(realtimeTableName);
+    if (RANDOM.nextBoolean()) {
+      // Regular force commit without batch
+      String jobId = forceCommit(realtimeTableName);
+      testForceCommitInternal(realtimeTableName, jobId, consumingSegments, 60000L);
+    } else {
+      // Force commit with batch
+      String jobId = forceCommit(realtimeTableName, 1, 1, 120);
+      testForceCommitInternal(realtimeTableName, jobId, consumingSegments, 120000L);
+    }
+  }
+
+  public Set<String> getConsumingSegmentsFromIdealState(String realtimeTableName) {
+    IdealState idealState = _helixResourceManager.getTableIdealState(realtimeTableName);
+    assertNotNull(idealState);
+    Set<String> consumingSegments = new HashSet<>();
+    for (Map.Entry<String, Map<String, String>> entry : idealState.getRecord().getMapFields().entrySet()) {
+      if (entry.getValue().containsValue(CommonConstants.Helix.StateModel.SegmentStateModel.CONSUMING)) {
+        consumingSegments.add(entry.getKey());
+      }
+    }
+    return consumingSegments;
+  }
+
+  private String forceCommit(String tableName)
+      throws Exception {
+    String response = sendPostRequest(_controllerRequestURLBuilder.forTableForceCommit(tableName), null);
+    return JsonUtils.stringToJsonNode(response).get("forceCommitJobId").asText();
+  }
+
+  private String forceCommit(String tableName, int batchSize, int batchIntervalSec, int batchTimeoutSec)
+      throws Exception {
+    String response = sendPostRequest(
+        _controllerRequestURLBuilder.forTableForceCommit(tableName) + "?batchSize=" + batchSize
+            + "&batchStatusCheckIntervalSec=" + batchIntervalSec + "&batchStatusCheckTimeoutSec=" + batchTimeoutSec,
+        null);
+    return JsonUtils.stringToJsonNode(response).get("forceCommitJobId").asText();
+  }
+
+  private void testForceCommitInternal(String realtimeTableName, String jobId, Set<String> consumingSegments,
+      long timeoutMs) {
+    Map<String, String> jobMetadata =
+        _helixResourceManager.getControllerJobZKMetadata(jobId, ControllerJobType.FORCE_COMMIT);
+    assertNotNull(jobMetadata);
+    assertNotNull(jobMetadata.get(CommonConstants.ControllerJob.CONSUMING_SEGMENTS_FORCE_COMMITTED_LIST));
+
+    TestUtils.waitForCondition(aVoid -> {
+      try {
+        if (isForceCommitJobCompleted(jobId)) {
+          for (String segmentName : consumingSegments) {
+            SegmentZKMetadata segmentZKMetadata =
+                _helixResourceManager.getSegmentZKMetadata(realtimeTableName, segmentName);
+            assertNotNull(segmentZKMetadata);
+            assertEquals(segmentZKMetadata.getStatus(), CommonConstants.Segment.Realtime.Status.DONE);
+          }
+          return true;
+        }
+        return false;
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      }
+    }, timeoutMs, "Error verifying force commit operation on table!");
+  }
+
+  public boolean isForceCommitJobCompleted(String forceCommitJobId)
+      throws Exception {
+    String jobStatusResponse = sendGetRequest(_controllerRequestURLBuilder.forForceCommitJobStatus(forceCommitJobId));
+    JsonNode jobStatus = JsonUtils.stringToJsonNode(jobStatusResponse);
+
+    assertEquals(jobStatus.get("jobId").asText(), forceCommitJobId);
+    assertEquals(jobStatus.get("jobType").asText(), "FORCE_COMMIT");
+
+    Set<String> allSegments = JsonUtils.stringToObject(
+        jobStatus.get(CommonConstants.ControllerJob.CONSUMING_SEGMENTS_FORCE_COMMITTED_LIST).asText(), HashSet.class);
+    Set<String> pendingSegments = new HashSet<>();
+    for (JsonNode element : jobStatus.get(CommonConstants.ControllerJob.CONSUMING_SEGMENTS_YET_TO_BE_COMMITTED_LIST)) {
+      pendingSegments.add(element.asText());
+    }
+
+    assertTrue(pendingSegments.size() <= allSegments.size());
+    assertEquals(jobStatus.get(CommonConstants.ControllerJob.NUM_CONSUMING_SEGMENTS_YET_TO_BE_COMMITTED).asInt(-1),
+        pendingSegments.size());
+
+    return pendingSegments.isEmpty();
   }
 
   @Test
@@ -314,5 +516,86 @@ public class LLCRealtimeClusterIntegrationTest extends BaseRealtimeClusterIntegr
   public void testHardcodedServerPartitionedSqlQueries()
       throws Exception {
     super.testHardcodedServerPartitionedSqlQueries();
+  }
+
+  public static class ExceptingKafkaConsumerFactory extends KafkaConsumerFactory {
+
+    public static final int PARTITION_FOR_EXCEPTIONS = 1; // Setting this to -1 disables all exceptions thrown.
+    public static final int SEQ_NUM_FOR_CREATE_EXCEPTION = 1;
+    public static final int SEQ_NUM_FOR_CONSUME_EXCEPTION = 3;
+
+    private static HelixAdmin _helixAdmin;
+    private static String _helixClusterName;
+    private static String _tableName;
+    public ExceptingKafkaConsumerFactory() {
+      super();
+    }
+
+    public static void init(String helixClusterName, HelixAdmin helixAdmin, String tableName) {
+      _helixAdmin = helixAdmin;
+      _helixClusterName = helixClusterName;
+      _tableName = tableName;
+    }
+
+    @Override
+    public PartitionGroupConsumer createPartitionGroupConsumer(String clientId,
+        PartitionGroupConsumptionStatus partitionGroupConsumptionStatus) {
+      /*
+       * The segment data manager is creating a consumer to consume rows into a segment.
+       * Check the partition and sequence number of the segment and decide whether it
+       * qualifies for:
+       * - Throwing exception during create OR
+       * - Throwing exception during consumption.
+       * Make sure that this still works if retries are added in RealtimeSegmentDataManager
+       */
+      int partition = partitionGroupConsumptionStatus.getPartitionGroupId();
+      boolean exceptionDuringConsume = false;
+      int seqNum = getSegmentSeqNum(partition);
+      if (partition == PARTITION_FOR_EXCEPTIONS) {
+        if (seqNum == SEQ_NUM_FOR_CREATE_EXCEPTION) {
+          throw new RuntimeException("TestException during consumer creation");
+        } else if (seqNum == SEQ_NUM_FOR_CONSUME_EXCEPTION) {
+          exceptionDuringConsume = true;
+        }
+      }
+      return new ExceptingKafkaConsumer(clientId, _streamConfig, partition, exceptionDuringConsume);
+    }
+
+    private int getSegmentSeqNum(int partition) {
+      IdealState is = _helixAdmin.getResourceIdealState(_helixClusterName,
+          TableNameBuilder.REALTIME.tableNameWithType(_tableName));
+      AtomicInteger seqNum = new AtomicInteger(-1);
+      is.getPartitionSet().forEach(segmentNameStr -> {
+        if (LLCSegmentName.isLLCSegment(segmentNameStr)) {
+          if (is.getInstanceStateMap(segmentNameStr).values().contains(
+              CommonConstants.Helix.StateModel.SegmentStateModel.CONSUMING)) {
+            LLCSegmentName segmentName = new LLCSegmentName(segmentNameStr);
+            if (segmentName.getPartitionGroupId() == partition) {
+              seqNum.set(segmentName.getSequenceNumber());
+            }
+          }
+        }
+      });
+      assertTrue(seqNum.get() >= 0, "No consuming segment found in partition: " + partition);
+      return seqNum.get();
+    }
+
+    public static class ExceptingKafkaConsumer extends KafkaPartitionLevelConsumer {
+      private final boolean _exceptionDuringConsume;
+
+      public ExceptingKafkaConsumer(String clientId, StreamConfig streamConfig, int partition,
+          boolean exceptionDuringConsume) {
+        super(clientId, streamConfig, partition);
+        _exceptionDuringConsume = exceptionDuringConsume;
+      }
+
+      @Override
+      public KafkaMessageBatch fetchMessages(StreamPartitionMsgOffset startOffset, int timeoutMs) {
+        if (_exceptionDuringConsume) {
+          throw new RuntimeException("TestException during consumption");
+        }
+        return super.fetchMessages(startOffset, timeoutMs);
+      }
+    }
   }
 }

@@ -76,7 +76,7 @@ public class JsonFunctions {
   /**
    * Convert object to Json String
    */
-  @ScalarFunction(nullableParameters = true)
+  @ScalarFunction
   public static String jsonFormat(Object object)
       throws JsonProcessingException {
     return JsonUtils.objectToString(object);
@@ -85,6 +85,7 @@ public class JsonFunctions {
   /**
    * Extract object based on Json path
    */
+  @Nullable
   @ScalarFunction
   public static Object jsonPath(Object object, String jsonPath) {
     if (object instanceof String) {
@@ -96,6 +97,7 @@ public class JsonFunctions {
   /**
    * Extract object array based on Json path
    */
+  @Nullable
   @ScalarFunction
   public static Object[] jsonPathArray(Object object, String jsonPath) {
     if (object instanceof String) {
@@ -114,20 +116,36 @@ public class JsonFunctions {
     }
   }
 
-  private static Object[] convertObjectToArray(Object arrayObject) {
+  @Nullable
+  private static Object[] convertObjectToArray(@Nullable Object arrayObject) {
+    if (arrayObject == null) {
+      return null;
+    }
     if (arrayObject instanceof List) {
       return ((List) arrayObject).toArray();
-    } else if (arrayObject instanceof Object[]) {
+    }
+    if (arrayObject instanceof Object[]) {
       return (Object[]) arrayObject;
-    } else if (arrayObject == null) {
-      return null;
     }
     return new Object[]{arrayObject};
   }
 
   /**
+   * Check if path exists in Json object
+   */
+  @ScalarFunction
+  public static boolean jsonPathExists(Object object, String jsonPath) {
+    try {
+      return jsonPath(object, jsonPath) != null;
+    } catch (Exception ignore) {
+      return false;
+    }
+  }
+
+  /**
    * Extract from Json with path to String
    */
+  @Nullable
   @ScalarFunction
   public static String jsonPathString(Object object, String jsonPath)
       throws JsonProcessingException {
@@ -135,7 +153,7 @@ public class JsonFunctions {
     if (jsonValue instanceof String) {
       return (String) jsonValue;
     }
-    return JsonUtils.objectToString(jsonValue);
+    return jsonValue == null ? null : JsonUtils.objectToString(jsonValue);
   }
 
   /**

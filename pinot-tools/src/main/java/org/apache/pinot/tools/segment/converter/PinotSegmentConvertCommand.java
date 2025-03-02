@@ -22,7 +22,7 @@ import java.io.File;
 import java.util.HashMap;
 import java.util.Map;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.common.utils.TarGzCompressionUtils;
+import org.apache.pinot.common.utils.TarCompressionUtils;
 import org.apache.pinot.spi.data.readers.FileFormat;
 import org.apache.pinot.tools.AbstractBaseCommand;
 import org.apache.pinot.tools.Command;
@@ -41,7 +41,7 @@ import picocli.CommandLine;
  * </ul>
  */
 @SuppressWarnings("FieldCanBeLocal")
-@CommandLine.Command(name = "PinotSegmentConvert")
+@CommandLine.Command(name = "PinotSegmentConvert", mixinStandardHelpOptions = true)
 public class PinotSegmentConvertCommand extends AbstractBaseCommand implements Command {
   private static final Logger LOGGER = LoggerFactory.getLogger(PinotSegmentConvertCommand.class);
   private static final String TEMP_DIR_NAME = "temp";
@@ -70,10 +70,6 @@ public class PinotSegmentConvertCommand extends AbstractBaseCommand implements C
   @CommandLine.Option(names = {"-overwrite"}, required = false,
       description = "Overwrite the existing file (default false).")
   private boolean _overwrite;
-
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, help = true,
-      description = "Print this message.")
-  private boolean _help;
 
   @Override
   public boolean execute()
@@ -114,7 +110,7 @@ public class PinotSegmentConvertCommand extends AbstractBaseCommand implements C
           segmentPath.put(fileName, file.getAbsolutePath());
         } else if (fileName.toLowerCase().endsWith(".tar.gz") || fileName.toLowerCase().endsWith(".tgz")) {
           // Compressed segment.
-          File segment = TarGzCompressionUtils.untar(file, new File(tempDir, fileName)).get(0);
+          File segment = TarCompressionUtils.untar(file, new File(tempDir, fileName)).get(0);
           String segmentName = segment.getName();
           if (segmentPath.containsKey(segmentName)) {
             throw new RuntimeException("Multiple segments with the same segment name: " + fileName);
@@ -157,10 +153,5 @@ public class PinotSegmentConvertCommand extends AbstractBaseCommand implements C
   @Override
   public String description() {
     return "Convert Pinot segments to another format such as AVRO/CSV/JSON.";
-  }
-
-  @Override
-  public boolean getHelp() {
-    return _help;
   }
 }

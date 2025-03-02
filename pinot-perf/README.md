@@ -19,7 +19,7 @@
 
 -->
 
-Pint Perf Package
+Pinot Perf Package
 ===
 Pinot perf package contains a set of performance benchmark for Pinot components.
 
@@ -30,7 +30,7 @@ Note: this package will pull `org.openjdk.jmh:jmh-core`, which is based on `GPL 
 1. Build the source
 ```
 $ cd <root_source_code>/pinot-perf
-$ mvn package -DskipTests
+$ ./mvnw package -DskipTests
 ```
 2. The above cmd will generate `target/pinot-perf-pkg`
 

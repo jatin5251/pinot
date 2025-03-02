@@ -21,6 +21,7 @@ package org.apache.pinot.segment.local.segment.index.loader;
 import java.io.File;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import javax.annotation.Nullable;
 import org.apache.commons.io.FileUtils;
@@ -32,12 +33,14 @@ import org.apache.pinot.segment.local.segment.index.loader.invertedindex.Inverte
 import org.apache.pinot.segment.local.startree.StarTreeBuilderUtils;
 import org.apache.pinot.segment.local.startree.v2.builder.MultipleTreesBuilder;
 import org.apache.pinot.segment.local.startree.v2.builder.StarTreeV2BuilderConfig;
+import org.apache.pinot.segment.local.utils.SegmentOperationsThrottler;
 import org.apache.pinot.segment.spi.V1Constants;
-import org.apache.pinot.segment.spi.creator.IndexCreatorProvider;
-import org.apache.pinot.segment.spi.index.IndexingOverrides;
+import org.apache.pinot.segment.spi.index.IndexHandler;
+import org.apache.pinot.segment.spi.index.IndexService;
+import org.apache.pinot.segment.spi.index.IndexType;
+import org.apache.pinot.segment.spi.index.StandardIndexes;
 import org.apache.pinot.segment.spi.index.metadata.SegmentMetadataImpl;
 import org.apache.pinot.segment.spi.index.startree.StarTreeV2Metadata;
-import org.apache.pinot.segment.spi.store.ColumnIndexType;
 import org.apache.pinot.segment.spi.store.SegmentDirectory;
 import org.apache.pinot.spi.data.Schema;
 import org.slf4j.Logger;
@@ -79,6 +82,11 @@ public class SegmentPreProcessor implements AutoCloseable {
 
   public void process()
       throws Exception {
+    process(null);
+  }
+
+  public void process(@Nullable SegmentOperationsThrottler segmentOperationsThrottler)
+      throws Exception {
     if (_segmentMetadata.getTotalDocs() == 0) {
       LOGGER.info("Skip preprocessing empty segment: {}", _segmentMetadata.getName());
       return;
@@ -103,33 +111,38 @@ public class SegmentPreProcessor implements AutoCloseable {
       }
 
       // Update single-column indices, like inverted index, json index etc.
-      IndexCreatorProvider indexCreatorProvider = IndexingOverrides.getIndexCreatorProvider();
       List<IndexHandler> indexHandlers = new ArrayList<>();
-      for (ColumnIndexType type : ColumnIndexType.values()) {
-        IndexHandler handler =
-            IndexHandlerFactory.getIndexHandler(type, _segmentMetadata, _indexLoadingConfig, _schema);
-        indexHandlers.add(handler);
-        handler.updateIndices(segmentWriter, indexCreatorProvider);
-        if (type == ColumnIndexType.FORWARD_INDEX) {
-          // TODO: Find a way to ensure ForwardIndexHandler is always executed before other handlers instead of
-          // relying on enum ordering.
-          // ForwardIndexHandler may modify the segment metadata while rewriting forward index to create a dictionary
-          // This new metadata is needed to construct other indexes like RangeIndex.
-          _segmentMetadata = new SegmentMetadataImpl(indexDir);
-          _segmentDirectory.reloadMetadata();
+
+      // We cannot just create all the index handlers in a random order.
+      // Specifically, ForwardIndexHandler needs to be executed first. This is because it modifies the segment metadata
+      // while rewriting forward index to create a dictionary. Some other handlers (like the range one) assume that
+      // metadata was already been modified by ForwardIndexHandler.
+      IndexHandler forwardHandler = createHandler(StandardIndexes.forward());
+      indexHandlers.add(forwardHandler);
+      forwardHandler.updateIndices(segmentWriter);
+
+      // Now that ForwardIndexHandler.updateIndices has been updated, we can run all other indexes in any order
+      _segmentMetadata = new SegmentMetadataImpl(indexDir);
+      _segmentDirectory.reloadMetadata();
+
+      for (IndexType<?, ?, ?> type : IndexService.getInstance().getAllIndexes()) {
+        if (type != StandardIndexes.forward()) {
+          IndexHandler handler = createHandler(type);
+          indexHandlers.add(handler);
+          handler.updateIndices(segmentWriter);
+          // Other IndexHandler classes may modify the segment metadata while creating a temporary forward
+          // index to generate their respective indexes from if the forward index was disabled. This new metadata is
+          // needed to construct other indexes like RangeIndex.
+          _segmentMetadata = _segmentDirectory.getSegmentMetadata();
         }
       }
 
-      // Create/modify/remove star-trees if required.
-      processStarTrees(indexDir);
-
-      // Perform post-cleanup operations on the index handlers. This should be called after processing the startrees
+      // Perform post-cleanup operations on the index handlers.
       for (IndexHandler handler : indexHandlers) {
         handler.postUpdateIndicesCleanup(segmentWriter);
       }
 
       // Add min/max value to column metadata according to the prune mode.
-      // For star-tree index, because it can only increase the range, so min/max value can still be used in pruner.
       ColumnMinMaxValueGeneratorMode columnMinMaxValueGeneratorMode =
           _indexLoadingConfig.getColumnMinMaxValueGeneratorMode();
       if (columnMinMaxValueGeneratorMode != ColumnMinMaxValueGeneratorMode.NONE) {
@@ -142,6 +155,20 @@ public class SegmentPreProcessor implements AutoCloseable {
 
       segmentWriter.save();
     }
+
+    // Startree creation will load the segment again, so we need to close and re-open the segment writer to make sure
+    // that the other required indices (e.g. forward index) are up-to-date.
+    try (SegmentDirectory.Writer segmentWriter = _segmentDirectory.createWriter()) {
+      // Create/modify/remove star-trees if required.
+      processStarTrees(indexDir, segmentOperationsThrottler);
+      _segmentDirectory.reloadMetadata();
+      segmentWriter.save();
+    }
+  }
+
+  private IndexHandler createHandler(IndexType<?, ?, ?> type) {
+    return type.createIndexHandler(_segmentDirectory,
+        _indexLoadingConfig.getFieldIndexConfigByColName(), _schema, _indexLoadingConfig.getTableConfig());
   }
 
   /**
@@ -160,41 +187,42 @@ public class SegmentPreProcessor implements AutoCloseable {
         DefaultColumnHandler defaultColumnHandler = DefaultColumnHandlerFactory
             .getDefaultColumnHandler(null, _segmentMetadata, _indexLoadingConfig, _schema, null);
         if (defaultColumnHandler.needUpdateDefaultColumns()) {
-          LOGGER.info("Found default columns need updates");
+          LOGGER.info("Found default columns need updates in segment: {}", _segmentMetadata.getName());
           return true;
         }
       }
       // Check if there is need to update single-column indices, like inverted index, json index etc.
-      for (ColumnIndexType type : ColumnIndexType.values()) {
-        if (IndexHandlerFactory.getIndexHandler(type, _segmentMetadata, _indexLoadingConfig, _schema)
-            .needUpdateIndices(segmentReader)) {
-          LOGGER.info("Found index type: {} needs updates", type);
+      for (IndexType<?, ?, ?> type : IndexService.getInstance().getAllIndexes()) {
+        if (createHandler(type).needUpdateIndices(segmentReader)) {
+          LOGGER.info("Found index type: {} needs updates in segment: {}", type, _segmentMetadata.getName());
           return true;
         }
       }
       // Check if there is need to create/modify/remove star-trees.
       if (needProcessStarTrees()) {
-        LOGGER.info("Found startree index needs updates");
+        LOGGER.info("Found startree index needs updates in segment: {}", _segmentMetadata.getName());
         return true;
       }
       // Check if there is need to update column min max value.
-      if (needUpdateColumnMinMaxValue()) {
-        LOGGER.info("Found min max values need updates");
+      List<String> columnMinMaxValueUpdates = columnMinMaxValueUpdates();
+      if (!columnMinMaxValueUpdates.isEmpty()) {
+        LOGGER.info("Found min max values need updates for columns: {} in segment: {}",
+            columnMinMaxValueUpdates, _segmentMetadata.getName());
         return true;
       }
     }
     return false;
   }
 
-  private boolean needUpdateColumnMinMaxValue() {
+  private List<String> columnMinMaxValueUpdates() {
     ColumnMinMaxValueGeneratorMode columnMinMaxValueGeneratorMode =
         _indexLoadingConfig.getColumnMinMaxValueGeneratorMode();
     if (columnMinMaxValueGeneratorMode == ColumnMinMaxValueGeneratorMode.NONE) {
-      return false;
+      return Collections.emptyList();
     }
     ColumnMinMaxValueGenerator columnMinMaxValueGenerator =
         new ColumnMinMaxValueGenerator(_segmentMetadata, null, columnMinMaxValueGeneratorMode);
-    return columnMinMaxValueGenerator.needAddColumnMinMaxValue();
+    return columnMinMaxValueGenerator.columnMinMaxValueUpdates();
   }
 
   private boolean needProcessStarTrees() {
@@ -208,14 +236,16 @@ public class SegmentPreProcessor implements AutoCloseable {
     List<StarTreeV2Metadata> starTreeMetadataList = _segmentMetadata.getStarTreeV2MetadataList();
     // There are existing star-trees, but if they match the builder configs exactly,
     // then there is no need to generate the star-trees
-    if (starTreeMetadataList != null && !StarTreeBuilderUtils
-        .shouldRemoveExistingStarTrees(starTreeBuilderConfigs, starTreeMetadataList)) {
-      return false;
+
+    // We need reprocessing if existing configs are to be removed, or new configs have been added
+    if (starTreeMetadataList != null) {
+      return StarTreeBuilderUtils.shouldModifyExistingStarTrees(starTreeBuilderConfigs, starTreeMetadataList);
     }
     return !starTreeBuilderConfigs.isEmpty();
   }
 
-  private void processStarTrees(File indexDir)
+  private void processStarTrees(File indexDir,
+      @Nullable SegmentOperationsThrottler segmentOperationsThrottler)
       throws Exception {
     // Create/modify/remove star-trees if required
     if (_indexLoadingConfig.isEnableDynamicStarTreeCreation()) {
@@ -223,27 +253,45 @@ public class SegmentPreProcessor implements AutoCloseable {
           .generateBuilderConfigs(_indexLoadingConfig.getStarTreeIndexConfigs(),
               _indexLoadingConfig.isEnableDefaultStarTree(), _segmentMetadata);
       boolean shouldGenerateStarTree = !starTreeBuilderConfigs.isEmpty();
+      boolean shouldRemoveStarTree = false;
       List<StarTreeV2Metadata> starTreeMetadataList = _segmentMetadata.getStarTreeV2MetadataList();
       if (starTreeMetadataList != null) {
         // There are existing star-trees
-        if (StarTreeBuilderUtils.shouldRemoveExistingStarTrees(starTreeBuilderConfigs, starTreeMetadataList)) {
-          // Remove the existing star-trees
-          LOGGER.info("Removing star-trees from segment: {}", _segmentMetadata.getName());
-          StarTreeBuilderUtils.removeStarTrees(indexDir);
-          _segmentMetadata = new SegmentMetadataImpl(indexDir);
+        if (!shouldGenerateStarTree) {
+          // Newer config does not have star-trees. Delete all existing star-trees.
+          shouldRemoveStarTree = true;
+        } else if (StarTreeBuilderUtils.shouldModifyExistingStarTrees(starTreeBuilderConfigs, starTreeMetadataList)) {
+          // Existing and newer both have star-trees, but they don't match. Rebuild the star-trees.
+          LOGGER.info("Change detected in star-trees for segment: {}", _segmentMetadata.getName());
         } else {
           // Existing star-trees match the builder configs, no need to generate the star-trees
           shouldGenerateStarTree = false;
         }
       }
-      // Generate the star-trees if needed
-      if (shouldGenerateStarTree) {
-        // NOTE: Always use OFF_HEAP mode on server side.
-        try (MultipleTreesBuilder builder = new MultipleTreesBuilder(starTreeBuilderConfigs, indexDir,
-            MultipleTreesBuilder.BuildMode.OFF_HEAP)) {
-          builder.build();
+      // Generate/remove the star-trees if needed
+      if (shouldGenerateStarTree || shouldRemoveStarTree) {
+        if (segmentOperationsThrottler != null) {
+          segmentOperationsThrottler.getSegmentStarTreePreprocessThrottler().acquire();
         }
-        _segmentMetadata = new SegmentMetadataImpl(indexDir);
+
+        try {
+          if (shouldRemoveStarTree) {
+            // 'shouldGenerateStarTree' should be false if they need to be removed
+            LOGGER.info("Removing star-trees from segment: {}", _segmentMetadata.getName());
+            StarTreeBuilderUtils.removeStarTrees(indexDir);
+          } else {
+            // NOTE: Always use OFF_HEAP mode on server side.
+            try (MultipleTreesBuilder builder = new MultipleTreesBuilder(starTreeBuilderConfigs, indexDir,
+                MultipleTreesBuilder.BuildMode.OFF_HEAP)) {
+              builder.build();
+            }
+          }
+          _segmentMetadata = new SegmentMetadataImpl(indexDir);
+        } finally {
+          if (segmentOperationsThrottler != null) {
+            segmentOperationsThrottler.getSegmentStarTreePreprocessThrottler().release();
+          }
+        }
       }
     }
   }

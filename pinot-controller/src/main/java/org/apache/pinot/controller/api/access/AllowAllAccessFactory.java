@@ -18,15 +18,8 @@
  */
 package org.apache.pinot.controller.api.access;
 
-import javax.ws.rs.core.HttpHeaders;
-
-
 public class AllowAllAccessFactory implements AccessControlFactory {
   private static final AccessControl ALLOW_ALL_ACCESS = new AccessControl() {
-    @Override
-    public boolean hasDataAccess(HttpHeaders httpHeaders, String tableName) {
-      return true;
-    }
   };
 
   @Override

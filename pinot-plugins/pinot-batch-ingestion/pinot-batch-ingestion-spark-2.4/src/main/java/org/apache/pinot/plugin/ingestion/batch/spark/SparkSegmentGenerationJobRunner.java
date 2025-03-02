@@ -22,7 +22,6 @@ import java.io.File;
 import java.io.IOException;
 import java.io.Serializable;
 import java.net.URI;
-import java.net.URLEncoder;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -33,7 +32,8 @@ import java.util.Map;
 import java.util.UUID;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.common.segment.generation.SegmentGenerationUtils;
-import org.apache.pinot.common.utils.TarGzCompressionUtils;
+import org.apache.pinot.common.utils.TarCompressionUtils;
+import org.apache.pinot.common.utils.URIUtils;
 import org.apache.pinot.plugin.ingestion.batch.common.SegmentGenerationJobUtils;
 import org.apache.pinot.plugin.ingestion.batch.common.SegmentGenerationTaskRunner;
 import org.apache.pinot.spi.env.PinotConfiguration;
@@ -187,12 +187,12 @@ public class SparkSegmentGenerationJobRunner implements IngestionJobRunner, Seri
           List<String> siblingFiles = localDirIndex.get(parentPath);
           Collections.sort(siblingFiles);
           for (int i = 0; i < siblingFiles.size(); i++) {
-            pathAndIdxList.add(String.format("%s %d", siblingFiles.get(i), i));
+            pathAndIdxList.add(siblingFiles.get(i) + " " + i);
           }
         }
       } else {
         for (int i = 0; i < filteredFiles.size(); i++) {
-          pathAndIdxList.add(String.format("%s %d", filteredFiles.get(i), i));
+          pathAndIdxList.add(filteredFiles.get(i) + " " + i);
         }
       }
       int numDataFiles = pathAndIdxList.size();
@@ -228,7 +228,7 @@ public class SparkSegmentGenerationJobRunner implements IngestionJobRunner, Seri
           if (localPluginsTarFile.exists()) {
             File pluginsDirFile = new File(PINOT_PLUGINS_DIR + "-" + idx);
             try {
-              TarGzCompressionUtils.untar(localPluginsTarFile, pluginsDirFile);
+              TarCompressionUtils.untar(localPluginsTarFile, pluginsDirFile);
             } catch (Exception e) {
               LOGGER.error("Failed to untar local Pinot plugins tarball file [{}]", localPluginsTarFile, e);
               throw new RuntimeException(e);
@@ -275,6 +275,7 @@ public class SparkSegmentGenerationJobRunner implements IngestionJobRunner, Seri
           taskSpec.setSequenceId(idx);
           taskSpec.setSegmentNameGeneratorSpec(_spec.getSegmentNameGeneratorSpec());
           taskSpec.setFailOnEmptySegment(_spec.isFailOnEmptySegment());
+          taskSpec.setCreateMetadataTarGz(_spec.isCreateMetadataTarGz());
           taskSpec.setCustomProperty(BatchConfigProperties.INPUT_DATA_FILE_URI_KEY, inputFileURI.toString());
 
           SegmentGenerationTaskRunner taskRunner = new SegmentGenerationTaskRunner(taskSpec);
@@ -282,35 +283,44 @@ public class SparkSegmentGenerationJobRunner implements IngestionJobRunner, Seri
 
           // Tar segment directory to compress file
           File localSegmentDir = new File(localOutputTempDir, segmentName);
-          String segmentTarFileName = URLEncoder.encode(segmentName + Constants.TAR_GZ_FILE_EXT, "UTF-8");
+          String segmentTarFileName = URIUtils.encode(segmentName + Constants.TAR_GZ_FILE_EXT);
           File localSegmentTarFile = new File(localOutputTempDir, segmentTarFileName);
           LOGGER.info("Tarring segment from: {} to: {}", localSegmentDir, localSegmentTarFile);
-          TarGzCompressionUtils.createTarGzFile(localSegmentDir, localSegmentTarFile);
+          TarCompressionUtils.createCompressedTarFile(localSegmentDir, localSegmentTarFile);
           long uncompressedSegmentSize = FileUtils.sizeOf(localSegmentDir);
           long compressedSegmentSize = FileUtils.sizeOf(localSegmentTarFile);
           LOGGER.info("Size for segment: {}, uncompressed: {}, compressed: {}", segmentName,
               DataSizeUtils.fromBytes(uncompressedSegmentSize), DataSizeUtils.fromBytes(compressedSegmentSize));
-          //move segment to output PinotFS
-          URI outputSegmentTarURI =
-              SegmentGenerationUtils.getRelativeOutputPath(finalInputDirURI, inputFileURI, finalOutputDirURI)
-                  .resolve(segmentTarFileName);
-          LOGGER.info("Trying to move segment tar file from: [{}] to [{}]", localSegmentTarFile, outputSegmentTarURI);
-          if (!_spec.isOverwriteOutput() && PinotFSFactory.create(outputSegmentTarURI.getScheme())
-              .exists(outputSegmentTarURI)) {
-            LOGGER.warn("Not overwrite existing output segment tar file: {}",
-                finalOutputDirFS.exists(outputSegmentTarURI));
-          } else {
-            finalOutputDirFS.copyFromLocalFile(localSegmentTarFile, outputSegmentTarURI);
+          // Move segment to output PinotFS
+          URI relativeOutputPath =
+              SegmentGenerationUtils.getRelativeOutputPath(finalInputDirURI, inputFileURI, finalOutputDirURI);
+          URI outputSegmentTarURI = relativeOutputPath.resolve(segmentTarFileName);
+          SegmentGenerationJobUtils.moveLocalTarFileToRemote(localSegmentTarFile, outputSegmentTarURI,
+              _spec.isOverwriteOutput());
+
+          // Create and upload segment metadata tar file
+          String metadataTarFileName = URIUtils.encode(segmentName + Constants.METADATA_TAR_GZ_FILE_EXT);
+          URI outputMetadataTarURI = relativeOutputPath.resolve(metadataTarFileName);
+
+          if (finalOutputDirFS.exists(outputMetadataTarURI) && (_spec.isOverwriteOutput()
+              || !_spec.isCreateMetadataTarGz())) {
+            LOGGER.info("Deleting existing metadata tar gz file: {}", outputMetadataTarURI);
+            finalOutputDirFS.delete(outputMetadataTarURI, true);
+          }
+          if (taskSpec.isCreateMetadataTarGz()) {
+            File localMetadataTarFile = new File(localOutputTempDir, metadataTarFileName);
+            SegmentGenerationJobUtils.createSegmentMetadataTarGz(localSegmentDir, localMetadataTarFile);
+            SegmentGenerationJobUtils.moveLocalTarFileToRemote(localMetadataTarFile, outputMetadataTarURI,
+                _spec.isOverwriteOutput());
           }
           FileUtils.deleteQuietly(localSegmentDir);
-          FileUtils.deleteQuietly(localSegmentTarFile);
           FileUtils.deleteQuietly(localInputDataFile);
         }
       });
       if (stagingDirURI != null) {
-        LOGGER.info("Trying to copy segment tars from staging directory: [{}] to output directory [{}]", stagingDirURI,
-            outputDirURI);
-        outputDirFS.copyDir(stagingDirURI, outputDirURI);
+        LOGGER.info("Trying to move segment tars from staging directory: [{}] to output directory [{}]", stagingDirURI,
+                outputDirURI);
+        SegmentGenerationJobUtils.moveFiles(outputDirFS, stagingDirURI, outputDirURI, true);
       }
     } finally {
       if (stagingDirURI != null) {
@@ -362,7 +372,7 @@ public class SparkSegmentGenerationJobRunner implements IngestionJobRunner, Seri
     File pluginsTarGzFile = new File(PINOT_PLUGINS_TAR_GZ);
     try {
       File[] files = validPluginDirectories.toArray(new File[0]);
-      TarGzCompressionUtils.createTarGzFile(files, pluginsTarGzFile);
+      TarCompressionUtils.createCompressedTarFile(files, pluginsTarGzFile);
     } catch (IOException e) {
       LOGGER.error("Failed to tar plugins directories", e);
     }

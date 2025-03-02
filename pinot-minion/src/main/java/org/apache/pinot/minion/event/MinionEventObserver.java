@@ -20,12 +20,16 @@ package org.apache.pinot.minion.event;
 
 import javax.annotation.Nullable;
 import org.apache.pinot.core.minion.PinotTaskConfig;
+import org.apache.pinot.spi.tasks.MinionTaskBaseObserverStats;
+import org.apache.pinot.spi.tasks.MinionTaskObserverStorageManager;
 
 
 /**
  * The <code>MinionEventObserver</code> interface provides call backs for Minion events.
  */
 public interface MinionEventObserver {
+
+  void init(MinionTaskObserverStorageManager progressManager);
 
   /**
    * Invoked when a minion task starts.
@@ -45,6 +49,11 @@ public interface MinionEventObserver {
 
   @Nullable
   default Object getProgress() {
+    return null;
+  }
+
+  @Nullable
+  default MinionTaskBaseObserverStats getProgressStats() {
     return null;
   }
 
@@ -70,4 +79,26 @@ public interface MinionEventObserver {
    * @param exception Exception encountered during execution
    */
   void notifyTaskError(PinotTaskConfig pinotTaskConfig, Exception exception);
+
+  /**
+   * Gets the minion task state
+   * @return a {@link MinionTaskState}
+   */
+  default MinionTaskState getTaskState() {
+    return MinionTaskState.UNKNOWN;
+  }
+
+  /**
+   * Gets the minion task start timestamp
+   * @return the minion task start timestamp
+   */
+  default long getStartTs() {
+    return -1;
+  }
+
+  /**
+   * Place to handle the cleanup required on {@link MinionTaskObserverStorageManager} for the associated task.
+   * This method should be called before removing the observer.
+   */
+  void cleanup();
 }

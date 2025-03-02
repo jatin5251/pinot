@@ -22,7 +22,9 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.apache.helix.model.ExternalView;
+import org.apache.helix.model.HelixConfigScope;
 import org.apache.helix.model.IdealState;
+import org.apache.helix.model.builder.HelixConfigScopeBuilder;
 import org.apache.pinot.broker.broker.helix.HelixBrokerStarter;
 import org.apache.pinot.broker.routing.BrokerRoutingManager;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
@@ -38,6 +40,7 @@ import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.env.PinotConfiguration;
+import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.CommonConstants.Broker;
 import org.apache.pinot.spi.utils.CommonConstants.Helix;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
@@ -71,6 +74,12 @@ public class HelixBrokerStarterTest extends ControllerTest {
       throws Exception {
     startZk();
     startController();
+    // Set hyperloglog log2m value to 12.
+    HelixConfigScope scope =
+        new HelixConfigScopeBuilder(HelixConfigScope.ConfigScopeProperty.CLUSTER).forCluster(getHelixClusterName())
+            .build();
+    _helixManager.getConfigAccessor().set(scope, CommonConstants.Helix.DEFAULT_HYPERLOGLOG_LOG2M_KEY,
+        Integer.toString(12));
 
     Map<String, Object> properties = new HashMap<>();
     properties.put(Helix.KEY_OF_BROKER_QUERY_PORT, 18099);
@@ -78,6 +87,7 @@ public class HelixBrokerStarterTest extends ControllerTest {
     properties.put(Helix.CONFIG_OF_ZOOKEEPR_SERVER, getZkUrl());
     properties.put(Broker.CONFIG_OF_ENABLE_QUERY_LIMIT_OVERRIDE, true);
     properties.put(Broker.CONFIG_OF_DELAY_SHUTDOWN_TIME_MS, 0);
+    properties.put(Broker.CONFIG_OF_BROKER_DEFAULT_QUERY_LIMIT, 1000);
 
     _brokerStarter = new HelixBrokerStarter();
     _brokerStarter.init(new PinotConfiguration(properties));
@@ -95,7 +105,8 @@ public class HelixBrokerStarterTest extends ControllerTest {
     _helixResourceManager.addTable(offlineTableConfig);
     TableConfig realtimeTimeConfig =
         new TableConfigBuilder(TableType.REALTIME).setTableName(RAW_TABLE_NAME).setTimeColumnName(TIME_COLUMN_NAME)
-            .setTimeType(TimeUnit.DAYS.name()).setStreamConfigs(getStreamConfigs()).build();
+            .setTimeType(TimeUnit.DAYS.name()).setStreamConfigs(getStreamConfigs()).setNumReplicas(1)
+            .build();
     _helixResourceManager.addTable(realtimeTimeConfig);
 
     for (int i = 0; i < NUM_OFFLINE_SEGMENTS; i++) {
@@ -104,20 +115,26 @@ public class HelixBrokerStarterTest extends ControllerTest {
     }
 
     TestUtils.waitForCondition(aVoid -> {
+      // should wait for both realtime and offline table external view to be live.
       ExternalView offlineTableExternalView =
           _helixAdmin.getResourceExternalView(getHelixClusterName(), OFFLINE_TABLE_NAME);
+      ExternalView realtimeTableExternalView =
+          _helixAdmin.getResourceExternalView(getHelixClusterName(), REALTIME_TABLE_NAME);
       return offlineTableExternalView != null
-          && offlineTableExternalView.getPartitionSet().size() == NUM_OFFLINE_SEGMENTS;
+          && offlineTableExternalView.getPartitionSet().size() == NUM_OFFLINE_SEGMENTS
+          && realtimeTableExternalView != null;
     }, 30_000L, "Failed to find all OFFLINE segments in the ExternalView");
   }
 
   private Map<String, String> getStreamConfigs() {
     Map<String, String> streamConfigs = new HashMap<>();
     streamConfigs.put("streamType", "kafka");
-    streamConfigs.put("stream.kafka.consumer.type", "highLevel");
+    streamConfigs.put("stream.kafka.consumer.type", "lowlevel");
     streamConfigs.put("stream.kafka.topic.name", "kafkaTopic");
     streamConfigs.put("stream.kafka.decoder.class.name",
         "org.apache.pinot.plugin.stream.kafka.KafkaAvroMessageDecoder");
+    streamConfigs.put("stream.kafka.consumer.factory.class.name",
+        "org.apache.pinot.core.realtime.impl.fakestream.FakeStreamConsumerFactory");
     return streamConfigs;
   }
 
@@ -129,6 +146,7 @@ public class HelixBrokerStarterTest extends ControllerTest {
 
     // NOTE: It is disabled in cluster config, but enabled in instance config. Instance config should take precedence.
     assertTrue(config.getProperty(Broker.CONFIG_OF_ENABLE_QUERY_LIMIT_OVERRIDE, false));
+    assertEquals(config.getProperty(Broker.CONFIG_OF_BROKER_DEFAULT_QUERY_LIMIT, 1), 1000);
   }
 
   @Test
@@ -156,7 +174,8 @@ public class HelixBrokerStarterTest extends ControllerTest {
     RoutingTable routingTable = routingManager.getRoutingTable(brokerRequest, 0);
     assertNotNull(routingTable);
     assertEquals(routingTable.getServerInstanceToSegmentsMap().size(), NUM_SERVERS);
-    assertEquals(routingTable.getServerInstanceToSegmentsMap().values().iterator().next().size(), NUM_OFFLINE_SEGMENTS);
+    assertEquals(routingTable.getServerInstanceToSegmentsMap().values().iterator().next().getSegments().size(),
+        NUM_OFFLINE_SEGMENTS);
     assertTrue(routingTable.getUnavailableSegments().isEmpty());
 
     // Add a new segment into the OFFLINE table
@@ -164,9 +183,9 @@ public class HelixBrokerStarterTest extends ControllerTest {
         SegmentMetadataMockUtils.mockSegmentMetadata(RAW_TABLE_NAME), "downloadUrl");
 
     TestUtils.waitForCondition(aVoid ->
-        routingManager.getRoutingTable(brokerRequest, 0).getServerInstanceToSegmentsMap()
-            .values().iterator().next().size() == NUM_OFFLINE_SEGMENTS + 1, 30_000L, "Failed to add the new segment "
-        + "into the routing table");
+            routingManager.getRoutingTable(brokerRequest, 0).getServerInstanceToSegmentsMap().values().iterator().next()
+                .getSegments().size() == NUM_OFFLINE_SEGMENTS + 1, 30_000L,
+        "Failed to add the new segment " + "into the routing table");
 
     // Add a new table with different broker tenant
     String newRawTableName = "newTable";
@@ -181,6 +200,7 @@ public class HelixBrokerStarterTest extends ControllerTest {
     }
 
     // Add a new table with same broker tenant
+    addDummySchema(newRawTableName);
     newTableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(newRawTableName)
         .setServerTenant(TagNameUtils.DEFAULT_TENANT_NAME).build();
     _helixResourceManager.addTable(newTableConfig);

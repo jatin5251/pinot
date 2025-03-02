@@ -18,10 +18,9 @@
  */
 package org.apache.pinot.core.data.function;
 
-import java.lang.reflect.Method;
 import java.util.Collections;
-import org.apache.pinot.common.function.FunctionRegistry;
 import org.apache.pinot.segment.local.function.InbuiltFunctionEvaluator;
+import org.apache.pinot.spi.annotations.ScalarFunction;
 import org.apache.pinot.spi.data.readers.GenericRow;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
@@ -126,11 +125,8 @@ public class InbuiltFunctionEvaluatorTest {
   }
 
   @Test
-  public void testStateSharedBetweenRowsForExecution()
-      throws Exception {
-    MyFunc myFunc = new MyFunc();
-    Method method = myFunc.getClass().getDeclaredMethod("appendToStringAndReturn", String.class);
-    FunctionRegistry.registerFunction(method, false);
+  public void testStateSharedBetweenRowsForExecution() {
+    // This function is auto registered with @ScalarFunction annotation under MyFunc class
     String expression = "appendToStringAndReturn('test ')";
     InbuiltFunctionEvaluator evaluator = new InbuiltFunctionEvaluator(expression);
     assertTrue(evaluator.getArguments().isEmpty());
@@ -157,9 +153,11 @@ public class InbuiltFunctionEvaluatorTest {
     }
   }
 
+  @SuppressWarnings("unused")
   public static class MyFunc {
     String _baseString = "";
 
+    @ScalarFunction
     public String appendToStringAndReturn(String addedString) {
       _baseString += addedString;
       return _baseString;

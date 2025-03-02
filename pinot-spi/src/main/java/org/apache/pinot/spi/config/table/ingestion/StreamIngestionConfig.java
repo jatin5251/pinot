@@ -34,6 +34,15 @@ public class StreamIngestionConfig extends BaseJsonConfig {
   @JsonPropertyDescription("All configs for the streams from which to ingest")
   private final List<Map<String, String>> _streamConfigMaps;
 
+  @JsonPropertyDescription("Whether to use column major mode when creating the segment.")
+  private boolean _columnMajorSegmentBuilderEnabled = true;
+
+  @JsonPropertyDescription("Whether to track offsets of the filtered stream messages during consumption.")
+  private boolean _trackFilteredMessageOffsets = false;
+
+  @JsonPropertyDescription("Whether pauseless consumption is enabled for the table")
+  private boolean _pauselessConsumptionEnabled = false;
+
   @JsonCreator
   public StreamIngestionConfig(@JsonProperty("streamConfigMaps") List<Map<String, String>> streamConfigMaps) {
     _streamConfigMaps = streamConfigMaps;
@@ -41,5 +50,29 @@ public class StreamIngestionConfig extends BaseJsonConfig {
 
   public List<Map<String, String>> getStreamConfigMaps() {
     return _streamConfigMaps;
+  }
+
+  public void setColumnMajorSegmentBuilderEnabled(boolean enableColumnMajorSegmentCreation) {
+    _columnMajorSegmentBuilderEnabled = enableColumnMajorSegmentCreation;
+  }
+
+  public boolean getColumnMajorSegmentBuilderEnabled() {
+    return _columnMajorSegmentBuilderEnabled;
+  }
+
+  public void setTrackFilteredMessageOffsets(boolean trackFilteredMessageOffsets) {
+    _trackFilteredMessageOffsets = trackFilteredMessageOffsets;
+  }
+
+  public boolean isTrackFilteredMessageOffsets() {
+    return _trackFilteredMessageOffsets;
+  }
+
+  public boolean isPauselessConsumptionEnabled() {
+    return _pauselessConsumptionEnabled;
+  }
+
+  public void setPauselessConsumptionEnabled(boolean pauselessConsumptionEnabled) {
+    _pauselessConsumptionEnabled = pauselessConsumptionEnabled;
   }
 }

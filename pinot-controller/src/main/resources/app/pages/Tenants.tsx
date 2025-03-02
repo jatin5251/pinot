@@ -17,86 +17,82 @@
  * under the License.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Grid, makeStyles } from '@material-ui/core';
-import { TableData } from 'Models';
+import { InstanceType } from 'Models';
 import { RouteComponentProps } from 'react-router-dom';
-import CustomizedTables from '../components/Table';
-import AppLoader from '../components/AppLoader';
-import PinotMethodUtils from '../utils/PinotMethodUtils';
 import SimpleAccordion from '../components/SimpleAccordion';
+import AsyncPinotTables from '../components/AsyncPinotTables';
 import CustomButton from '../components/CustomButton';
+import { AsyncInstanceTable } from '../components/AsyncInstanceTable';
+import PinotMethodUtils from '../utils/PinotMethodUtils';
 
 const useStyles = makeStyles((theme) => ({
   operationDiv: {
     border: '1px #BDCCD9 solid',
     borderRadius: 4,
-    marginBottom: 20
-  }
+    marginBottom: 20,
+  },
 }));
 
 type Props = {
-  tenantName: string
+  tenantName: string;
 };
 
-const TableTooltipData = [
-  null,
-  "Uncompressed size of all data segments",
-  "Estimated size of all data segments, in case any servers are not reachable for actual size",
-  null,
-  "GOOD if all replicas of all segments are up"
-];
-
 const TenantPage = ({ match }: RouteComponentProps<Props>) => {
+  const { tenantName } = match.params;
+  const classes = useStyles();
+  const [instanceNames, setInstanceNames] = useState({
+    [InstanceType.BROKER]: null,
+    [InstanceType.SERVER]: null,
+  })
+  const [liveInstanceNames, setLiveInstanceNames] = useState<string[]>();
 
-  const {tenantName} = match.params;
-  const columnHeaders = ['Table Name', 'Reported Size', 'Estimated Size', 'Number of Segments', 'Status'];
-  const [fetching, setFetching] = useState(true);
-  const [tableData, setTableData] = useState<TableData>({
-    columns: columnHeaders,
-    records: []
-  });
-  const [brokerData, setBrokerData] = useState(null);
-  const [serverData, setServerData] = useState([]);
-
-  const fetchData = async () => {
-    const tenantData = await PinotMethodUtils.getTenantTableData(tenantName);
-    const brokersData = await PinotMethodUtils.getBrokerOfTenant(tenantName);
-    const serversData = await PinotMethodUtils.getServerOfTenant(tenantName);
-    setTableData(tenantData);
-    const separatedBrokers = Array.isArray(brokersData) ? brokersData.map((elm) => [elm]) : [];
-    setBrokerData(separatedBrokers || []);
-    const separatedServers = Array.isArray(serversData) ? serversData.map((elm) => [elm]) : [];
-    setServerData(separatedServers || []);
-    setFetching(false);
-  };
   useEffect(() => {
-    fetchData();
+     fetchInstanceData();
   }, []);
 
-  const classes = useStyles();
+  const fetchInstanceData = async () => {
+    const brokerNames = await PinotMethodUtils.getBrokerOfTenant(tenantName) || [];
+    const serverNames = await PinotMethodUtils.getServerOfTenant(tenantName) || [];
+    setInstanceNames({
+      [InstanceType.BROKER]: Array.isArray(brokerNames) ? brokerNames : [],
+      [InstanceType.SERVER]: Array.isArray(serverNames) ? serverNames : [],
+    });
+
+    const liveInstanceNames = await PinotMethodUtils.getLiveInstances();
+    setLiveInstanceNames(liveInstanceNames.data || []);
+
+  }
 
   return (
-    fetching ? <AppLoader /> :
-    <Grid item xs style={{ padding: 20, backgroundColor: 'white', maxHeight: 'calc(100vh - 70px)', overflowY: 'auto' }}>
+    <Grid
+      item
+      xs
+      style={{
+        padding: 20,
+        backgroundColor: 'white',
+        maxHeight: 'calc(100vh - 70px)',
+        overflowY: 'auto',
+      }}
+    >
       <div className={classes.operationDiv}>
-        <SimpleAccordion
-          headerTitle="Operations"
-          showSearchBox={false}
-        >
+        <SimpleAccordion headerTitle="Operations" showSearchBox={false}>
           <div>
             <CustomButton
-              onClick={()=>{console.log('rebalance');}}
-              tooltipTitle="Recalculates the segment to server mapping for all tables in this tenant"
-              enableTooltip={true}
+              onClick={() => {}}
+              // Tooltips do not render on disabled buttons. Add this back when we have a working implementation.
+              // tooltipTitle="Recalculates the segment to server mapping for all tables in this tenant"
+              // enableTooltip={true}
               isDisabled={true}
             >
               Rebalance Server Tenant
             </CustomButton>
             <CustomButton
-              onClick={()=>{console.log('rebuild');}}
-              tooltipTitle="Rebuilds brokerResource mappings for all tables in this tenant"
-              enableTooltip={true}
+              onClick={() => {}}
+              // Tooltips do not render on disabled buttons. Add this back when we have a working implementation.
+              // tooltipTitle="Rebuilds brokerResource mappings for all tables in this tenant"
+              // enableTooltip={true}
               isDisabled={true}
             >
               Rebuild Broker Resource
@@ -104,40 +100,26 @@ const TenantPage = ({ match }: RouteComponentProps<Props>) => {
           </div>
         </SimpleAccordion>
       </div>
-      <CustomizedTables
+      <AsyncPinotTables
         title={tenantName}
-        data={tableData}
-        tooltipData={TableTooltipData}
-        addLinks
-        baseURL={`/tenants/${tenantName}/table/`}
-        showSearchBox={true}
-        inAccordionFormat={true}
+        tenants={[tenantName]}
+        baseUrl={`/tenants/${tenantName}/table/`}
       />
       <Grid container spacing={2}>
-        <Grid item xs={6}>
-          <CustomizedTables
-            title="Brokers"
-            data={{
-              columns: ['Instance Name'],
-              records: brokerData.length > 0 ? brokerData : []
-            }}
-            addLinks
-            baseURL="/instance/"
-            showSearchBox={true}
-            inAccordionFormat={true}
+        <Grid item xs={12}>
+          <AsyncInstanceTable
+            instanceNames={instanceNames[InstanceType.BROKER]}
+            instanceType={InstanceType.BROKER}
+            liveInstanceNames={liveInstanceNames}
+            showInstanceDetails
           />
         </Grid>
-        <Grid item xs={6}>
-          <CustomizedTables
-            title="Servers"
-            data={{
-              columns: ['Instance Name'],
-              records: serverData.length > 0 ? serverData : []
-            }}
-            addLinks
-            baseURL="/instance/"
-            showSearchBox={true}
-            inAccordionFormat={true}
+        <Grid item xs={12}>
+          <AsyncInstanceTable
+            instanceNames={instanceNames[InstanceType.SERVER]}
+            instanceType={InstanceType.SERVER}
+            liveInstanceNames={liveInstanceNames}
+            showInstanceDetails
           />
         </Grid>
       </Grid>

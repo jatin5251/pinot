@@ -27,21 +27,23 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.apache.commons.io.FileUtils;
-import org.apache.http.Header;
-import org.apache.http.HttpHeaders;
-import org.apache.http.NameValuePair;
-import org.apache.http.message.BasicHeader;
-import org.apache.http.message.BasicNameValuePair;
+import org.apache.hc.core5.http.Header;
+import org.apache.hc.core5.http.HttpHeaders;
+import org.apache.hc.core5.http.NameValuePair;
+import org.apache.hc.core5.http.message.BasicHeader;
+import org.apache.hc.core5.http.message.BasicNameValuePair;
 import org.apache.pinot.common.auth.AuthProviderUtils;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadataCustomMapModifier;
+import org.apache.pinot.common.metrics.MinionMeter;
 import org.apache.pinot.common.utils.FileUploadDownloadClient;
-import org.apache.pinot.common.utils.TarGzCompressionUtils;
-import org.apache.pinot.common.utils.fetcher.SegmentFetcherFactory;
+import org.apache.pinot.common.utils.TarCompressionUtils;
 import org.apache.pinot.core.common.MinionConstants;
 import org.apache.pinot.core.minion.PinotTaskConfig;
 import org.apache.pinot.minion.event.MinionEventObserver;
 import org.apache.pinot.minion.event.MinionEventObservers;
 import org.apache.pinot.minion.exception.TaskCancelledException;
+import org.apache.pinot.plugin.minion.tasks.purge.PurgeTaskExecutor;
+import org.apache.pinot.segment.spi.index.metadata.SegmentMetadataImpl;
 import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.slf4j.Logger;
@@ -94,22 +96,23 @@ public abstract class BaseSingleSegmentConversionExecutor extends BaseTaskExecut
 
     File tempDataDir = new File(new File(MINION_CONTEXT.getDataDir(), taskType), "tmp-" + UUID.randomUUID());
     Preconditions.checkState(tempDataDir.mkdirs(), "Failed to create temporary directory: %s", tempDataDir);
-    String crypterName = getTableConfig(tableNameWithType).getValidationConfig().getCrypterClassName();
-
     try {
-      // Download the tarred segment file
-      _eventObserver.notifyProgress(_pinotTaskConfig, "Downloading segment from: " + downloadURL);
-      File tarredSegmentFile = new File(tempDataDir, "tarredSegment");
-      LOGGER.info("Downloading segment from {} to {}", downloadURL, tarredSegmentFile.getAbsolutePath());
-      SegmentFetcherFactory.fetchAndDecryptSegmentToLocal(downloadURL, tarredSegmentFile, crypterName);
-
-      // Un-tar the segment file
-      _eventObserver.notifyProgress(_pinotTaskConfig, "Decompressing segment from: " + downloadURL);
-      File segmentDir = new File(tempDataDir, "segmentDir");
-      File indexDir = TarGzCompressionUtils.untar(tarredSegmentFile, segmentDir).get(0);
-      if (!FileUtils.deleteQuietly(tarredSegmentFile)) {
-        LOGGER.warn("Failed to delete tarred input segment: {}", tarredSegmentFile.getAbsolutePath());
+      // Download and decompress the segment file
+      _eventObserver.notifyProgress(_pinotTaskConfig, "Downloading and decompressing segment from: "
+          + downloadURL);
+      File indexDir;
+      try {
+        indexDir = downloadSegmentToLocalAndUntar(tableNameWithType, segmentName, downloadURL, taskType,
+            tempDataDir, "");
+      } catch (Exception e) {
+        LOGGER.error("Failed to download segment from download url: {}", downloadURL, e);
+        _minionMetrics.addMeteredTableValue(tableNameWithType, MinionMeter.SEGMENT_DOWNLOAD_FAIL_COUNT, 1L);
+        _eventObserver.notifyTaskError(_pinotTaskConfig, e);
+        throw e;
       }
+
+      // Publish metrics related to segment download
+      reportSegmentDownloadMetrics(indexDir, tableNameWithType, taskType);
 
       // Convert the segment
       File workingDir = new File(tempDataDir, "workingDir");
@@ -119,12 +122,28 @@ public abstract class BaseSingleSegmentConversionExecutor extends BaseTaskExecut
           "Converted segment name: %s does not match original segment name: %s",
           segmentConversionResult.getSegmentName(), segmentName);
 
+      File convertedSegmentDir = segmentConversionResult.getFile();
+      if (convertedSegmentDir == null) {
+        return segmentConversionResult;
+      }
+
+      // Publish metrics related to segment upload
+      reportSegmentUploadMetrics(workingDir, tableNameWithType, taskType);
+
+      // Collect the task processing metrics from various single segment executors and publish them here.
+      SegmentMetadataImpl segmentMetadata = new SegmentMetadataImpl(indexDir);
+      Object numRecordsPurged = segmentConversionResult.getCustomProperty(PurgeTaskExecutor.NUM_RECORDS_PURGED_KEY);
+      if (numRecordsPurged != null) {
+        reportTaskProcessingMetrics(tableNameWithType, taskType, segmentMetadata.getTotalDocs(),
+            (int) numRecordsPurged);
+      } else {
+        reportTaskProcessingMetrics(tableNameWithType, taskType, segmentMetadata.getTotalDocs());
+      }
+
       // Tar the converted segment
       _eventObserver.notifyProgress(_pinotTaskConfig, "Compressing segment: " + segmentName);
-      File convertedSegmentDir = segmentConversionResult.getFile();
-      File convertedTarredSegmentFile =
-          new File(tempDataDir, segmentName + TarGzCompressionUtils.TAR_GZ_FILE_EXTENSION);
-      TarGzCompressionUtils.createTarGzFile(convertedSegmentDir, convertedTarredSegmentFile);
+      File convertedTarredSegmentFile = new File(tempDataDir, segmentName + TarCompressionUtils.TAR_GZ_FILE_EXTENSION);
+      TarCompressionUtils.createCompressedTarFile(convertedSegmentDir, convertedTarredSegmentFile);
       if (!FileUtils.deleteQuietly(convertedSegmentDir)) {
         LOGGER.warn("Failed to delete converted segment: {}", convertedSegmentDir.getAbsolutePath());
       }
@@ -172,18 +191,29 @@ public abstract class BaseSingleSegmentConversionExecutor extends BaseTaskExecut
           TableNameBuilder.extractRawTableName(tableNameWithType));
       NameValuePair tableTypeParameter = new BasicNameValuePair(FileUploadDownloadClient.QueryParameters.TABLE_TYPE,
           TableNameBuilder.getTableTypeFromTableName(tableNameWithType).toString());
-      List<NameValuePair> parameters = Arrays.asList(enableParallelPushProtectionParameter, tableNameParameter,
-          tableTypeParameter);
+      List<NameValuePair> parameters =
+          Arrays.asList(enableParallelPushProtectionParameter, tableNameParameter, tableTypeParameter);
 
       // Upload the tarred segment
       _eventObserver.notifyProgress(_pinotTaskConfig, "Uploading segment: " + segmentName);
-      SegmentConversionUtils.uploadSegment(configs, httpHeaders, parameters, tableNameWithType, segmentName, uploadURL,
-          convertedTarredSegmentFile);
+      boolean uploadSuccessful = true;
+      try {
+        SegmentConversionUtils.uploadSegment(configs, httpHeaders, parameters, tableNameWithType, segmentName,
+            uploadURL, convertedTarredSegmentFile);
+      } catch (Exception e) {
+        uploadSuccessful = false;
+        _minionMetrics.addMeteredTableValue(tableNameWithType, MinionMeter.SEGMENT_UPLOAD_FAIL_COUNT, 1L);
+        LOGGER.error("Segment upload failed for segment {}, table {}", segmentName, tableNameWithType, e);
+        _eventObserver.notifyTaskError(_pinotTaskConfig, e);
+      }
       if (!FileUtils.deleteQuietly(convertedTarredSegmentFile)) {
         LOGGER.warn("Failed to delete tarred converted segment: {}", convertedTarredSegmentFile.getAbsolutePath());
       }
 
-      LOGGER.info("Done executing {} on table: {}, segment: {}", taskType, tableNameWithType, segmentName);
+      if (uploadSuccessful) {
+        LOGGER.info("Done executing {} on table: {}, segment: {}", taskType, tableNameWithType, segmentName);
+      }
+
       return segmentConversionResult;
     } finally {
       FileUtils.deleteQuietly(tempDataDir);

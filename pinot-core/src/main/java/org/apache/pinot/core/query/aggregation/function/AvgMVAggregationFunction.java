@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.core.query.aggregation.function;
 
+import java.util.List;
 import java.util.Map;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.core.common.BlockValSet;
@@ -28,8 +29,8 @@ import org.apache.pinot.segment.spi.AggregationFunctionType;
 
 public class AvgMVAggregationFunction extends AvgAggregationFunction {
 
-  public AvgMVAggregationFunction(ExpressionContext expression) {
-    super(expression);
+  public AvgMVAggregationFunction(List<ExpressionContext> arguments) {
+    super(verifySingleArgument(arguments, "AVG_MV"), false);
   }
 
   @Override
@@ -50,7 +51,7 @@ public class AvgMVAggregationFunction extends AvgAggregationFunction {
       }
       count += values.length;
     }
-    setAggregationResult(aggregationResultHolder, sum, count);
+    updateAggregationResult(aggregationResultHolder, sum, count);
   }
 
   @Override
@@ -80,6 +81,6 @@ public class AvgMVAggregationFunction extends AvgAggregationFunction {
       sum += value;
     }
     long count = values.length;
-    setGroupByResult(groupKey, groupByResultHolder, sum, count);
+    updateGroupByResult(groupKey, groupByResultHolder, sum, count);
   }
 }

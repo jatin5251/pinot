@@ -24,16 +24,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import javax.annotation.Nullable;
-import org.apache.commons.collections.CollectionUtils;
-import org.apache.commons.configuration.Configuration;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.common.assignment.InstancePartitions;
 import org.apache.pinot.common.tier.Tier;
 import org.apache.pinot.controller.helix.core.assignment.segment.strategy.SegmentAssignmentStrategy;
 import org.apache.pinot.controller.helix.core.assignment.segment.strategy.SegmentAssignmentStrategyFactory;
+import org.apache.pinot.controller.helix.core.rebalance.RebalanceConfig;
 import org.apache.pinot.spi.config.table.assignment.InstancePartitionsType;
 import org.apache.pinot.spi.utils.CommonConstants.Helix.StateModel.SegmentStateModel;
-import org.apache.pinot.spi.utils.RebalanceConfigConstants;
 
 
 /**
@@ -89,11 +88,11 @@ public class RealtimeSegmentAssignment extends BaseSegmentAssignment {
     List<String> instancesAssigned;
     if (instancePartitionsType == InstancePartitionsType.COMPLETED) {
       // Gets Segment assignment strategy for instance partitions
-      SegmentAssignmentStrategy segmentAssignmentStrategy = SegmentAssignmentStrategyFactory
-          .getSegmentAssignmentStrategy(_helixManager, _tableConfig, instancePartitionsType.toString(),
-              instancePartitions);
-      instancesAssigned = segmentAssignmentStrategy
-          .assignSegment(segmentName, currentAssignment, instancePartitions, InstancePartitionsType.COMPLETED);
+      SegmentAssignmentStrategy segmentAssignmentStrategy =
+          SegmentAssignmentStrategyFactory.getSegmentAssignmentStrategy(_helixManager, _tableConfig,
+              instancePartitionsType.toString(), instancePartitions);
+      instancesAssigned = segmentAssignmentStrategy.assignSegment(segmentName, currentAssignment, instancePartitions,
+          InstancePartitionsType.COMPLETED);
     } else {
       instancesAssigned = assignConsumingSegment(segmentName, instancePartitions);
     }
@@ -106,8 +105,13 @@ public class RealtimeSegmentAssignment extends BaseSegmentAssignment {
    * Helper method to assign instances for CONSUMING segment based on the segment partition id and instance partitions.
    */
   private List<String> assignConsumingSegment(String segmentName, InstancePartitions instancePartitions) {
-    int segmentPartitionId = SegmentAssignmentUtils
-        .getRealtimeSegmentPartitionId(segmentName, _tableNameWithType, _helixManager, _partitionColumn);
+    int segmentPartitionId =
+        SegmentAssignmentUtils.getRealtimeSegmentPartitionId(segmentName, _tableNameWithType, _helixManager,
+            _partitionColumn);
+    return assignConsumingSegment(segmentPartitionId, instancePartitions);
+  }
+
+  protected List<String> assignConsumingSegment(int segmentPartitionId, InstancePartitions instancePartitions) {
     int numReplicaGroups = instancePartitions.getNumReplicaGroups();
     int numPartitions = instancePartitions.getNumPartitions();
 
@@ -169,17 +173,13 @@ public class RealtimeSegmentAssignment extends BaseSegmentAssignment {
   @Override
   public Map<String, Map<String, String>> rebalanceTable(Map<String, Map<String, String>> currentAssignment,
       Map<InstancePartitionsType, InstancePartitions> instancePartitionsMap, @Nullable List<Tier> sortedTiers,
-      @Nullable Map<String, InstancePartitions> tierInstancePartitionsMap, Configuration config) {
+      @Nullable Map<String, InstancePartitions> tierInstancePartitionsMap, RebalanceConfig config) {
     InstancePartitions completedInstancePartitions = instancePartitionsMap.get(InstancePartitionsType.COMPLETED);
     InstancePartitions consumingInstancePartitions = instancePartitionsMap.get(InstancePartitionsType.CONSUMING);
-    Preconditions
-        .checkState(consumingInstancePartitions != null, "Failed to find CONSUMING instance partitions for table: %s",
-            _tableNameWithType);
-    boolean includeConsuming = config
-        .getBoolean(RebalanceConfigConstants.INCLUDE_CONSUMING, RebalanceConfigConstants.DEFAULT_INCLUDE_CONSUMING);
-    boolean bootstrap =
-        config.getBoolean(RebalanceConfigConstants.BOOTSTRAP, RebalanceConfigConstants.DEFAULT_BOOTSTRAP);
-
+    Preconditions.checkState(consumingInstancePartitions != null,
+        "Failed to find CONSUMING instance partitions for table: %s", _tableNameWithType);
+    boolean includeConsuming = config.isIncludeConsuming();
+    boolean bootstrap = config.isBootstrap();
     // Rebalance tiers first
     Pair<List<Map<String, Map<String, String>>>, Map<String, Map<String, String>>> pair =
         rebalanceTiers(currentAssignment, sortedTiers, tierInstancePartitionsMap, bootstrap,
@@ -230,8 +230,8 @@ public class RealtimeSegmentAssignment extends BaseSegmentAssignment {
     Map<String, Map<String, String>> consumingSegmentAssignment =
         completedConsumingOfflineSegmentAssignment.getConsumingSegmentAssignment();
     if (includeConsuming) {
-      _logger
-          .info("Reassigning CONSUMING segments with CONSUMING instance partitions for table: {}", _tableNameWithType);
+      _logger.info("Reassigning CONSUMING segments with CONSUMING instance partitions for table: {}",
+          _tableNameWithType);
 
       for (String segmentName : consumingSegmentAssignment.keySet()) {
         List<String> instancesAssigned = assignConsumingSegment(segmentName, consumingInstancePartitions);
@@ -252,8 +252,8 @@ public class RealtimeSegmentAssignment extends BaseSegmentAssignment {
       newTierAssignments.forEach(newAssignment::putAll);
     }
 
-    _logger.info("Rebalanced table: {}, number of segments to be moved to each instance: {}", _tableNameWithType,
-        SegmentAssignmentUtils.getNumSegmentsToBeMovedPerInstance(currentAssignment, newAssignment));
+    _logger.info("Rebalanced table: {}, number of segments to be added/removed for each instance: {}",
+        _tableNameWithType, SegmentAssignmentUtils.getNumSegmentsToMovePerInstance(currentAssignment, newAssignment));
     return newAssignment;
   }
 }

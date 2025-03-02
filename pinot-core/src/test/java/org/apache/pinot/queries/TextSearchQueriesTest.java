@@ -27,13 +27,10 @@ import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Random;
-import java.util.Set;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
@@ -104,15 +101,38 @@ public class TextSearchQueriesTest extends BaseQueriesTest {
   private static final String SKILLS_TEXT_MV_COL_NAME = "SKILLS_TEXT_MV_COL";
   private static final String SKILLS_TEXT_MV_COL_DICT_NAME = "SKILLS_TEXT_MV_COL_DICT";
   private static final String INT_COL_NAME = "INT_COL";
+
   private static final List<String> RAW_TEXT_INDEX_COLUMNS =
       Arrays.asList(QUERY_LOG_TEXT_COL_NAME, SKILLS_TEXT_COL_NAME, SKILLS_TEXT_COL_MULTI_TERM_NAME,
           SKILLS_TEXT_NO_RAW_NAME, SKILLS_TEXT_MV_COL_NAME);
+
   private static final List<String> DICT_TEXT_INDEX_COLUMNS =
       Arrays.asList(SKILLS_TEXT_COL_DICT_NAME, SKILLS_TEXT_MV_COL_DICT_NAME);
+
   private static final int INT_BASE_VALUE = 1000;
+
+  private static final Schema SCHEMA = new Schema.SchemaBuilder()
+      .setSchemaName(TABLE_NAME)
+      .addSingleValueDimension(QUERY_LOG_TEXT_COL_NAME, FieldSpec.DataType.STRING)
+      .addSingleValueDimension(SKILLS_TEXT_COL_NAME, FieldSpec.DataType.STRING)
+      .addSingleValueDimension(SKILLS_TEXT_COL_DICT_NAME, FieldSpec.DataType.STRING)
+      .addSingleValueDimension(SKILLS_TEXT_COL_MULTI_TERM_NAME, FieldSpec.DataType.STRING)
+      .addSingleValueDimension(SKILLS_TEXT_NO_RAW_NAME, FieldSpec.DataType.STRING)
+      .addMultiValueDimension(SKILLS_TEXT_MV_COL_NAME, FieldSpec.DataType.STRING)
+      .addMultiValueDimension(SKILLS_TEXT_MV_COL_DICT_NAME, FieldSpec.DataType.STRING)
+      .addMetric(INT_COL_NAME, FieldSpec.DataType.INT)
+      .build();
+
+  private static final TableConfig TABLE_CONFIG = new TableConfigBuilder(TableType.OFFLINE)
+      .setTableName(TABLE_NAME)
+      .setNoDictionaryColumns(RAW_TEXT_INDEX_COLUMNS)
+      .setInvertedIndexColumns(DICT_TEXT_INDEX_COLUMNS)
+      .setFieldConfigList(createFieldConfigs())
+      .build();
 
   private IndexSegment _indexSegment;
   private List<IndexSegment> _indexSegments;
+  private TableConfig _tableConfig;
 
   @Override
   protected String getFilter() {
@@ -133,30 +153,36 @@ public class TextSearchQueriesTest extends BaseQueriesTest {
   public void setUp()
       throws Exception {
     FileUtils.deleteQuietly(INDEX_DIR);
-
     buildSegment();
-    IndexLoadingConfig indexLoadingConfig = new IndexLoadingConfig();
-    Set<String> textIndexColumns = new HashSet<>();
-    textIndexColumns.addAll(RAW_TEXT_INDEX_COLUMNS);
-    textIndexColumns.addAll(DICT_TEXT_INDEX_COLUMNS);
-    indexLoadingConfig.setTextIndexColumns(textIndexColumns);
-    indexLoadingConfig.setInvertedIndexColumns(new HashSet<>(DICT_TEXT_INDEX_COLUMNS));
-    Map<String, Map<String, String>> columnProperties = new HashMap<>();
-    Map<String, String> props = new HashMap<>();
-    props.put(FieldConfig.TEXT_INDEX_USE_AND_FOR_MULTI_TERM_QUERIES, "true");
-    columnProperties.put(SKILLS_TEXT_COL_MULTI_TERM_NAME, props);
-    props = new HashMap<>();
-    props.put(FieldConfig.TEXT_INDEX_STOP_WORD_INCLUDE_KEY, "coordinator");
-    props.put(FieldConfig.TEXT_INDEX_STOP_WORD_EXCLUDE_KEY, "it, those");
-    columnProperties.put(SKILLS_TEXT_COL_NAME, props);
-    props = new HashMap<>();
-    props.put(FieldConfig.TEXT_INDEX_STOP_WORD_EXCLUDE_KEY, "");
-    columnProperties.put(SKILLS_TEXT_COL_DICT_NAME, props);
-    indexLoadingConfig.setColumnProperties(columnProperties);
+    IndexLoadingConfig indexLoadingConfig = new IndexLoadingConfig(TABLE_CONFIG, SCHEMA);
     ImmutableSegment immutableSegment =
         ImmutableSegmentLoader.load(new File(INDEX_DIR, SEGMENT_NAME), indexLoadingConfig);
     _indexSegment = immutableSegment;
     _indexSegments = Arrays.asList(immutableSegment, immutableSegment);
+  }
+
+  private static List<FieldConfig> createFieldConfigs() {
+    List<FieldConfig> fieldConfigs = new ArrayList<>();
+    fieldConfigs.add(new FieldConfig(QUERY_LOG_TEXT_COL_NAME, FieldConfig.EncodingType.DICTIONARY,
+        List.of(FieldConfig.IndexType.TEXT), null, null));
+    fieldConfigs.add(
+        new FieldConfig(SKILLS_TEXT_COL_NAME, FieldConfig.EncodingType.DICTIONARY, List.of(FieldConfig.IndexType.TEXT),
+            null, Map.of(FieldConfig.TEXT_INDEX_STOP_WORD_INCLUDE_KEY, "coordinator",
+            FieldConfig.TEXT_INDEX_STOP_WORD_EXCLUDE_KEY, "it, those",
+            FieldConfig.TEXT_INDEX_ENABLE_PREFIX_SUFFIX_PHRASE_QUERIES, "true")));
+    fieldConfigs.add(new FieldConfig(SKILLS_TEXT_COL_DICT_NAME, FieldConfig.EncodingType.DICTIONARY,
+        List.of(FieldConfig.IndexType.TEXT), null, Map.of(FieldConfig.TEXT_INDEX_STOP_WORD_EXCLUDE_KEY, "")));
+    fieldConfigs.add(new FieldConfig(SKILLS_TEXT_COL_MULTI_TERM_NAME, FieldConfig.EncodingType.DICTIONARY,
+        List.of(FieldConfig.IndexType.TEXT), null,
+        Map.of(FieldConfig.TEXT_INDEX_USE_AND_FOR_MULTI_TERM_QUERIES, "true")));
+    fieldConfigs.add(new FieldConfig(SKILLS_TEXT_NO_RAW_NAME, FieldConfig.EncodingType.DICTIONARY,
+        List.of(FieldConfig.IndexType.TEXT), null,
+        Map.of(FieldConfig.TEXT_INDEX_NO_RAW_DATA, "true", FieldConfig.TEXT_INDEX_RAW_VALUE, "ILoveCoding")));
+    fieldConfigs.add(new FieldConfig(SKILLS_TEXT_MV_COL_NAME, FieldConfig.EncodingType.DICTIONARY,
+        List.of(FieldConfig.IndexType.TEXT), null, null));
+    fieldConfigs.add(new FieldConfig(SKILLS_TEXT_MV_COL_DICT_NAME, FieldConfig.EncodingType.DICTIONARY,
+        List.of(FieldConfig.IndexType.TEXT), null, null));
+    return fieldConfigs;
   }
 
   @AfterClass
@@ -168,46 +194,9 @@ public class TextSearchQueriesTest extends BaseQueriesTest {
   private void buildSegment()
       throws Exception {
     List<GenericRow> rows = createTestData();
-
-    List<FieldConfig> fieldConfigs = new ArrayList<>(RAW_TEXT_INDEX_COLUMNS.size() + DICT_TEXT_INDEX_COLUMNS.size());
-    for (String textIndexColumn : RAW_TEXT_INDEX_COLUMNS) {
-      fieldConfigs.add(
-          new FieldConfig(textIndexColumn, FieldConfig.EncodingType.RAW, FieldConfig.IndexType.TEXT, null, null));
-    }
-    for (String textIndexColumn : DICT_TEXT_INDEX_COLUMNS) {
-      fieldConfigs.add(
-          new FieldConfig(textIndexColumn, FieldConfig.EncodingType.DICTIONARY, FieldConfig.IndexType.TEXT, null,
-              null));
-    }
-    TableConfig tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(TABLE_NAME)
-        .setNoDictionaryColumns(RAW_TEXT_INDEX_COLUMNS).setInvertedIndexColumns(DICT_TEXT_INDEX_COLUMNS)
-        .setFieldConfigList(fieldConfigs).build();
-    Schema schema = new Schema.SchemaBuilder().setSchemaName(TABLE_NAME)
-        .addSingleValueDimension(QUERY_LOG_TEXT_COL_NAME, FieldSpec.DataType.STRING)
-        .addSingleValueDimension(SKILLS_TEXT_COL_NAME, FieldSpec.DataType.STRING)
-        .addSingleValueDimension(SKILLS_TEXT_COL_DICT_NAME, FieldSpec.DataType.STRING)
-        .addSingleValueDimension(SKILLS_TEXT_COL_MULTI_TERM_NAME, FieldSpec.DataType.STRING)
-        .addSingleValueDimension(SKILLS_TEXT_NO_RAW_NAME, FieldSpec.DataType.STRING)
-        .addMultiValueDimension(SKILLS_TEXT_MV_COL_NAME, FieldSpec.DataType.STRING)
-        .addMultiValueDimension(SKILLS_TEXT_MV_COL_DICT_NAME, FieldSpec.DataType.STRING)
-        .addMetric(INT_COL_NAME, FieldSpec.DataType.INT).build();
-    SegmentGeneratorConfig config = new SegmentGeneratorConfig(tableConfig, schema);
+    SegmentGeneratorConfig config = new SegmentGeneratorConfig(TABLE_CONFIG, SCHEMA);
     config.setOutDir(INDEX_DIR.getPath());
-    config.setTableName(TABLE_NAME);
     config.setSegmentName(SEGMENT_NAME);
-    Map<String, Map<String, String>> columnProperties = new HashMap<>();
-    Map<String, String> props = new HashMap<>();
-    props.put(FieldConfig.TEXT_INDEX_NO_RAW_DATA, "true");
-    props.put(FieldConfig.TEXT_INDEX_RAW_VALUE, "ILoveCoding");
-    columnProperties.put(SKILLS_TEXT_NO_RAW_NAME, props);
-    props = new HashMap<>();
-    props.put(FieldConfig.TEXT_INDEX_STOP_WORD_INCLUDE_KEY, "coordinator");
-    props.put(FieldConfig.TEXT_INDEX_STOP_WORD_EXCLUDE_KEY, "it, those");
-    columnProperties.put(SKILLS_TEXT_COL_NAME, props);
-    props = new HashMap<>();
-    props.put(FieldConfig.TEXT_INDEX_STOP_WORD_EXCLUDE_KEY, "");
-    columnProperties.put(SKILLS_TEXT_COL_DICT_NAME, props);
-    config.setColumnProperties(columnProperties);
     SegmentIndexCreationDriverImpl driver = new SegmentIndexCreationDriverImpl();
     try (RecordReader recordReader = new GenericRowRecordReader(rows)) {
       driver.init(config, recordReader);
@@ -264,6 +253,44 @@ public class TextSearchQueriesTest extends BaseQueriesTest {
     assertEquals(counter, 24150);
 
     return rows;
+  }
+
+  @Test
+  public void testMultiTermRegexSearch()
+      throws Exception {
+    // Search in SKILLS_TEXT_COL column to look for documents that have the /.*ealtime stream system.*/ regex pattern
+    List<Object[]> expected = new ArrayList<>();
+    expected.add(new Object[]{1010,
+        "Distributed systems, Java, realtime streaming systems, Machine learning, spark, Kubernetes, distributed "
+            + "storage, concurrency, multi-threading"});
+    expected.add(new Object[]{1019,
+        "C++, Java, Python, realtime streaming systems, Machine learning, spark, Kubernetes, transaction processing, "
+            + "distributed storage, concurrency, multi-threading, apache airflow"});
+
+    String query =
+        "SELECT INT_COL, SKILLS_TEXT_COL FROM MyTable WHERE TEXT_MATCH(SKILLS_TEXT_COL, '*ealtime streaming system*') "
+            + "LIMIT 50000";
+    testTextSearchSelectQueryHelper(query, expected.size(), false, expected);
+
+    // Search /*java realtime stream system*, only 1 result left./
+    List<Object[]> expected1 = new ArrayList<>();
+    expected1.add(new Object[]{1010,
+        "Distributed systems, Java, realtime streaming systems, Machine learning, spark, Kubernetes, distributed "
+            + "storage, concurrency, multi-threading"});
+    String query1 =
+        "SELECT INT_COL, SKILLS_TEXT_COL FROM MyTable WHERE TEXT_MATCH(SKILLS_TEXT_COL, '*ava realtime streaming "
+            + "system*') LIMIT 50000";
+    testTextSearchSelectQueryHelper(query1, expected1.size(), false, expected1);
+
+    String query2 =
+        "SELECT INT_COL, SKILLS_TEXT_COL FROM MyTable WHERE TEXT_MATCH(SKILLS_TEXT_COL, '*ava realtime streaming "
+            + "system* AND *chine learn*') LIMIT 50000";
+    testTextSearchSelectQueryHelper(query2, expected1.size(), false, expected1);
+
+    String query3 =
+        "SELECT INT_COL, SKILLS_TEXT_COL FROM MyTable WHERE TEXT_MATCH(SKILLS_TEXT_COL, '*ava realtime streaming "
+            + "system* AND *chine learner*') LIMIT 50000";
+    testTextSearchSelectQueryHelper(query3, 0, false, new ArrayList<>());
   }
 
   /**
@@ -1314,6 +1341,24 @@ public class TextSearchQueriesTest extends BaseQueriesTest {
         "SELECT COUNT(*) FROM MyTable WHERE SKILLS_TEXT_COL_DICT = 'Machine learning, Tensor flow, Java, Stanford "
             + "university,' OR TEXT_MATCH(SKILLS_TEXT_COL_DICT, '\"machine learning\"') LIMIT 50000";
     testTextSearchAggregationQueryHelper(query, expected.size());
+  }
+
+  /**
+   * Test NotFilterOperator with index based doc id iterator (text_match)
+   * @throws Exception
+   */
+  @Test
+  public void testTextSearchWithInverse()
+      throws Exception {
+
+    // all skills except the first 28 in createTestData contain 'software engineering' or ('software' and 'engineering')
+    List<Object[]> expected = new ArrayList<>();
+    for (int i = 0; i < 28; i++) {
+      expected.add(new Object[]{1000 + i});
+    }
+
+    String query = "SELECT INT_COL FROM MyTable WHERE NOT TEXT_MATCH(SKILLS_TEXT_COL, 'software') LIMIT 50000";
+    testTextSearchSelectQueryHelper(query, 28, false, expected);
   }
 
   /**

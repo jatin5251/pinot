@@ -20,12 +20,20 @@ package org.apache.pinot.spi.trace;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+import org.apache.pinot.spi.accounting.QueryResourceTracker;
 import org.apache.pinot.spi.accounting.ThreadAccountantFactory;
 import org.apache.pinot.spi.accounting.ThreadExecutionContext;
+import org.apache.pinot.spi.accounting.ThreadResourceTracker;
 import org.apache.pinot.spi.accounting.ThreadResourceUsageAccountant;
 import org.apache.pinot.spi.accounting.ThreadResourceUsageProvider;
 import org.apache.pinot.spi.env.PinotConfiguration;
+import org.apache.pinot.spi.exception.EarlyTerminationException;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,8 +65,8 @@ public class Tracing {
 
   private static final class Holder {
     static final Tracer TRACER = TRACER_REGISTRATION.get() == null ? createDefaultTracer() : TRACER_REGISTRATION.get();
-    static final ThreadResourceUsageAccountant ACCOUNTANT = ACCOUNTANT_REGISTRATION.get() == null
-        ? createDefaultThreadAccountant() : ACCOUNTANT_REGISTRATION.get();
+    static final ThreadResourceUsageAccountant ACCOUNTANT =
+        ACCOUNTANT_REGISTRATION.get() == null ? createDefaultThreadAccountant() : ACCOUNTANT_REGISTRATION.get();
   }
 
   /**
@@ -79,6 +87,13 @@ public class Tracing {
    */
   public static boolean register(ThreadResourceUsageAccountant threadResourceUsageAccountant) {
     return ACCOUNTANT_REGISTRATION.compareAndSet(null, threadResourceUsageAccountant);
+  }
+
+  /**
+   * visible for testing only
+   */
+  public static boolean isAccountantRegistered() {
+    return ACCOUNTANT_REGISTRATION.get() != null;
   }
 
   /**
@@ -108,8 +123,7 @@ public class Tracing {
     String defaultImplementationClassName = "org.apache.pinot.core.util.trace.BuiltInTracer";
     try {
       Class<?> clazz = Class.forName(defaultImplementationClassName, false, Tracing.class.getClassLoader());
-      return (Tracer) MethodHandles.publicLookup()
-          .findConstructor(clazz, MethodType.methodType(void.class)).invoke();
+      return (Tracer) MethodHandles.publicLookup().findConstructor(clazz, MethodType.methodType(void.class)).invoke();
     } catch (Throwable missing) {
       return FallbackTracer.INSTANCE;
     }
@@ -172,7 +186,7 @@ public class Tracing {
 
     @Override
     public void clear() {
-      _anchorThread.set(null);
+      _anchorThread.remove();
     }
 
     @Override
@@ -184,13 +198,22 @@ public class Tracing {
     }
 
     @Override
-    public final void createExecutionContext(String queryId, int taskId,
-        ThreadExecutionContext parentContext) {
-      _anchorThread.set(parentContext == null ? Thread.currentThread() : parentContext.getAnchorThread());
-      createExecutionContextInner(queryId, taskId, parentContext);
+    public void sampleUsageMSE() {
     }
 
-    public void createExecutionContextInner(String queryId, int taskId, ThreadExecutionContext parentContext) {
+    @Override
+    public void updateQueryUsageConcurrently(String queryId) {
+    }
+
+    @Override
+    public final void createExecutionContext(@Nullable String queryId, int taskId,
+        ThreadExecutionContext.TaskType taskType, @Nullable ThreadExecutionContext parentContext) {
+      _anchorThread.set(parentContext == null ? Thread.currentThread() : parentContext.getAnchorThread());
+      createExecutionContextInner(queryId, taskId, taskType, parentContext);
+    }
+
+    public void createExecutionContextInner(@Nullable String queryId, int taskId,
+        ThreadExecutionContext.TaskType taskType, @Nullable ThreadExecutionContext parentContext) {
     }
 
     @Override
@@ -205,6 +228,11 @@ public class Tracing {
         public Thread getAnchorThread() {
           return _anchorThread.get();
         }
+
+        @Override
+        public TaskType getTaskType() {
+          return TaskType.UNKNOWN;
+        }
       };
     }
 
@@ -216,6 +244,16 @@ public class Tracing {
     public Exception getErrorStatus() {
       return null;
     }
+
+    @Override
+    public Collection<? extends ThreadResourceTracker> getThreadResources() {
+      return Collections.emptyList();
+    }
+
+    @Override
+    public Map<String, ? extends QueryResourceTracker> getQueryResources() {
+      return Collections.emptyMap();
+    }
   }
 
   /**
@@ -223,49 +261,110 @@ public class Tracing {
    */
   public static class ThreadAccountantOps {
 
+    public static final int MAX_ENTRIES_KEYS_MERGED_PER_INTERRUPTION_CHECK_MASK = 0b1_1111_1111_1111;
+
     private ThreadAccountantOps() {
     }
 
-    public static void setupRunner(String queryId) {
-      Tracing.getThreadAccountant().setThreadResourceUsageProvider(new ThreadResourceUsageProvider());
-      Tracing.getThreadAccountant().createExecutionContext(queryId, CommonConstants.Accounting.ANCHOR_TASK_ID,
-          null);
+    public static void setupRunner(@Nonnull String queryId) {
+      setupRunner(queryId, ThreadExecutionContext.TaskType.SSE);
     }
 
+    public static void setupRunner(@Nonnull String queryId, ThreadExecutionContext.TaskType taskType) {
+      Tracing.getThreadAccountant().setThreadResourceUsageProvider(new ThreadResourceUsageProvider());
+      Tracing.getThreadAccountant()
+          .createExecutionContext(queryId, CommonConstants.Accounting.ANCHOR_TASK_ID, taskType, null);
+    }
+
+    /**
+     * Setup metadata of query worker threads. This function assumes that the workers are for Single Stage Engine.
+     * @param taskId Query task ID of the thread. In SSE, ID is an incrementing counter. In MSE, id is the stage id.
+     * @param threadResourceUsageProvider Object that measures resource usage.
+     * @param threadExecutionContext Context holds metadata about the query.
+     */
     public static void setupWorker(int taskId, ThreadResourceUsageProvider threadResourceUsageProvider,
         ThreadExecutionContext threadExecutionContext) {
+      setupWorker(taskId, ThreadExecutionContext.TaskType.SSE, threadResourceUsageProvider, threadExecutionContext);
+    }
+
+    /**
+     * Setup metadata of query worker threads.
+     * @param taskId Query task ID of the thread. In SSE, ID is an incrementing counter. In MSE, id is the stage id.
+     * @param threadResourceUsageProvider Object that measures resource usage.
+     * @param threadExecutionContext Context holds metadata about the query.
+     */
+    public static void setupWorker(int taskId, ThreadExecutionContext.TaskType taskType,
+        ThreadResourceUsageProvider threadResourceUsageProvider,
+        ThreadExecutionContext threadExecutionContext) {
       Tracing.getThreadAccountant().setThreadResourceUsageProvider(threadResourceUsageProvider);
-      Tracing.getThreadAccountant().createExecutionContext(null, taskId, threadExecutionContext);
+      String queryId = null;
+      if (threadExecutionContext != null) {
+        queryId = threadExecutionContext.getQueryId();
+      } else {
+        LOGGER.warn("Request ID not available. ParentContext not set for query worker thread.");
+      }
+      Tracing.getThreadAccountant()
+          .createExecutionContext(queryId, taskId, taskType, threadExecutionContext);
     }
 
     public static void sample() {
       Tracing.getThreadAccountant().sampleUsage();
     }
 
+    public static void sampleMSE() {
+      Tracing.getThreadAccountant().sampleUsageMSE();
+    }
+
     public static void clear() {
       Tracing.getThreadAccountant().clear();
     }
 
-    public static void initializeThreadAccountant(int numPqr, int numPqw, PinotConfiguration config) {
+    public static void initializeThreadAccountant(PinotConfiguration config, String instanceId) {
       String factoryName = config.getProperty(CommonConstants.Accounting.CONFIG_OF_FACTORY_NAME);
-      LOGGER.info("Config-specified accountant factory name {}", factoryName);
-      try {
-        ThreadAccountantFactory threadAccountantFactory =
-            (ThreadAccountantFactory) Class.forName(factoryName).getDeclaredConstructor().newInstance();
-        boolean registered = Tracing.register(threadAccountantFactory.init(numPqr, numPqw, config));
-        LOGGER.info("Using accountant provided by {}", factoryName);
-        if (!registered) {
-          LOGGER.warn("ThreadAccountant {} register unsuccessful, as it is already registered.", factoryName);
+      if (factoryName == null) {
+        LOGGER.warn("No thread accountant factory provided, using default implementation");
+      } else {
+        LOGGER.info("Config-specified accountant factory name {}", factoryName);
+        try {
+          ThreadAccountantFactory threadAccountantFactory =
+              (ThreadAccountantFactory) Class.forName(factoryName).getDeclaredConstructor().newInstance();
+          boolean registered = Tracing.register(threadAccountantFactory.init(config, instanceId));
+          LOGGER.info("Using accountant provided by {}", factoryName);
+          if (!registered) {
+            LOGGER.warn("ThreadAccountant {} register unsuccessful, as it is already registered.", factoryName);
+          }
+        } catch (Exception exception) {
+          LOGGER.warn("Using default implementation of thread accountant, "
+              + "due to invalid thread accountant factory {} provided, exception:", factoryName, exception);
         }
-      } catch (Exception exception) {
-        LOGGER.warn("Using default implementation of thread accountant, "
-            + "due to invalid thread accountant factory {} provided.", factoryName);
       }
       Tracing.getThreadAccountant().startWatcherTask();
     }
 
     public static boolean isInterrupted() {
       return Thread.interrupted() || Tracing.getThreadAccountant().isAnchorThreadInterrupted();
+    }
+
+    public static void sampleAndCheckInterruption() {
+      if (isInterrupted()) {
+        throw new EarlyTerminationException("Interrupted while merging records");
+      }
+      sample();
+    }
+
+    public static void updateQueryUsageConcurrently(String queryId) {
+      Tracing.getThreadAccountant().updateQueryUsageConcurrently(queryId);
+    }
+
+    public static void setThreadResourceUsageProvider() {
+      Tracing.getThreadAccountant().setThreadResourceUsageProvider(new ThreadResourceUsageProvider());
+    }
+
+    // Check for thread interruption, every time after merging 8192 keys
+    public static void sampleAndCheckInterruptionPeriodically(int mergedKeys) {
+      if ((mergedKeys & MAX_ENTRIES_KEYS_MERGED_PER_INTERRUPTION_CHECK_MASK) == 0) {
+        sampleAndCheckInterruption();
+      }
     }
   }
 }

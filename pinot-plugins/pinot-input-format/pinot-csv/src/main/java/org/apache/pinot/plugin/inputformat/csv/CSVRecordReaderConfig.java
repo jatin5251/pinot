@@ -43,6 +43,8 @@ public class CSVRecordReaderConfig implements RecordReaderConfig {
   private String _quoteMode;
   private String _recordSeparator;
 
+  // When set to true, the record reader will stop processing the file if it encounters an error.
+  private boolean _stopOnError;
 
   public String getFileFormat() {
     return _fileFormat;
@@ -154,6 +156,14 @@ public class CSVRecordReaderConfig implements RecordReaderConfig {
 
   public void setRecordSeparator(String recordSeparator) {
     _recordSeparator = recordSeparator;
+  }
+
+  public boolean isStopOnError() {
+    return _stopOnError;
+  }
+
+  public void setStopOnError(boolean stopOnError) {
+    _stopOnError = stopOnError;
   }
 
   @Override

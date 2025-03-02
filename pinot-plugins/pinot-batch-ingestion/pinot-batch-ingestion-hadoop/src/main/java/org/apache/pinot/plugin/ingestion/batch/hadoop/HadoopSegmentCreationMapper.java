@@ -22,7 +22,6 @@ import com.google.common.base.Preconditions;
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
-import java.net.URLEncoder;
 import java.nio.file.Files;
 import java.util.List;
 import java.util.UUID;
@@ -33,7 +32,9 @@ import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.pinot.common.segment.generation.SegmentGenerationUtils;
-import org.apache.pinot.common.utils.TarGzCompressionUtils;
+import org.apache.pinot.common.utils.TarCompressionUtils;
+import org.apache.pinot.common.utils.URIUtils;
+import org.apache.pinot.plugin.ingestion.batch.common.SegmentGenerationJobUtils;
 import org.apache.pinot.plugin.ingestion.batch.common.SegmentGenerationTaskRunner;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.filesystem.PinotFS;
@@ -78,7 +79,7 @@ public class HadoopSegmentCreationMapper extends Mapper<LongWritable, Text, Long
     if (localPluginsTarFile.exists()) {
       File pluginsDirFile = Files.createTempDirectory(PINOT_PLUGINS_DIR).toFile();
       try {
-        TarGzCompressionUtils.untar(localPluginsTarFile, pluginsDirFile);
+        TarCompressionUtils.untar(localPluginsTarFile, pluginsDirFile);
       } catch (Exception e) {
         LOGGER.error("Failed to untar local Pinot plugins tarball file [{}]", localPluginsTarFile, e);
         throw new RuntimeException(e);
@@ -107,7 +108,7 @@ public class HadoopSegmentCreationMapper extends Mapper<LongWritable, Text, Long
   protected void map(LongWritable key, Text value, Context context) {
     try {
       String[] splits = StringUtils.split(value.toString(), ' ');
-      Preconditions.checkState(splits.length == 2, "Illegal input value: {}", value);
+      Preconditions.checkState(splits.length == 2, "Illegal input value: %s", value);
 
       String path = splits[0];
       int idx = Integer.valueOf(splits[1]);
@@ -174,22 +175,35 @@ public class HadoopSegmentCreationMapper extends Mapper<LongWritable, Text, Long
 
       // Tar segment directory to compress file
       File localSegmentDir = new File(localOutputTempDir, segmentName);
-      String segmentTarFileName = URLEncoder.encode(segmentName + Constants.TAR_GZ_FILE_EXT, "UTF-8");
+      String segmentTarFileName = URIUtils.encode(segmentName + Constants.TAR_GZ_FILE_EXT);
       File localSegmentTarFile = new File(localOutputTempDir, segmentTarFileName);
       LOGGER.info("Tarring segment from: {} to: {}", localSegmentDir, localSegmentTarFile);
-      TarGzCompressionUtils.createTarGzFile(localSegmentDir, localSegmentTarFile);
+      TarCompressionUtils.createCompressedTarFile(localSegmentDir, localSegmentTarFile);
       long uncompressedSegmentSize = FileUtils.sizeOf(localSegmentDir);
       long compressedSegmentSize = FileUtils.sizeOf(localSegmentTarFile);
       LOGGER.info("Size for segment: {}, uncompressed: {}, compressed: {}", segmentName,
           DataSizeUtils.fromBytes(uncompressedSegmentSize), DataSizeUtils.fromBytes(compressedSegmentSize));
       //move segment to output PinotFS
-      URI outputSegmentTarURI = SegmentGenerationUtils.getRelativeOutputPath(inputDirURI, inputFileURI, outputDirURI)
-          .resolve(segmentTarFileName);
-      LOGGER.info("Copying segment tar file from [{}] to [{}]", localSegmentTarFile, outputSegmentTarURI);
-      outputDirFS.copyFromLocalFile(localSegmentTarFile, outputSegmentTarURI);
+      URI relativeOutputPath = SegmentGenerationUtils.getRelativeOutputPath(inputDirURI, inputFileURI, outputDirURI);
+      URI outputSegmentTarURI = relativeOutputPath.resolve(segmentTarFileName);
+      SegmentGenerationJobUtils.moveLocalTarFileToRemote(localSegmentTarFile, outputSegmentTarURI,
+          _spec.isOverwriteOutput());
 
+      // Create and upload segment metadata tar file
+      String metadataTarFileName = URIUtils.encode(segmentName + Constants.METADATA_TAR_GZ_FILE_EXT);
+      URI outputMetadataTarURI = relativeOutputPath.resolve(metadataTarFileName);
+      if (outputDirFS.exists(outputMetadataTarURI) && (_spec.isOverwriteOutput() || !_spec.isCreateMetadataTarGz())) {
+        LOGGER.info("Deleting existing metadata tar gz file: {}", outputMetadataTarURI);
+        outputDirFS.delete(outputMetadataTarURI, true);
+      }
+
+      if (taskSpec.isCreateMetadataTarGz()) {
+        File localMetadataTarFile = new File(localOutputTempDir, metadataTarFileName);
+        SegmentGenerationJobUtils.createSegmentMetadataTarGz(localSegmentDir, localMetadataTarFile);
+        SegmentGenerationJobUtils.moveLocalTarFileToRemote(localMetadataTarFile, outputMetadataTarURI,
+            _spec.isOverwriteOutput());
+      }
       FileUtils.deleteQuietly(localSegmentDir);
-      FileUtils.deleteQuietly(localSegmentTarFile);
       FileUtils.deleteQuietly(localInputDataFile);
 
       context.write(new LongWritable(idx), new Text(segmentTarFileName));

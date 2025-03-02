@@ -18,10 +18,14 @@
  */
 package org.apache.pinot.core.operator;
 
+import com.google.common.base.CaseFormat;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
+import org.apache.pinot.common.request.context.ExpressionContext;
+import org.apache.pinot.common.utils.HashUtil;
 import org.apache.pinot.core.common.DataBlockCache;
 import org.apache.pinot.core.common.DataFetcher;
 import org.apache.pinot.core.common.Operator;
@@ -31,28 +35,33 @@ import org.apache.pinot.segment.spi.datasource.DataSource;
 import org.apache.pinot.spi.trace.Tracing;
 
 
-public class ProjectionOperator extends BaseOperator<ProjectionBlock> {
-
+public class ProjectionOperator extends BaseProjectOperator<ProjectionBlock> {
   private static final String EXPLAIN_NAME = "PROJECT";
 
   private final Map<String, DataSource> _dataSourceMap;
   private final BaseOperator<DocIdSetBlock> _docIdSetOperator;
   private final DataBlockCache _dataBlockCache;
+  private final Map<String, ColumnContext> _columnContextMap;
 
   public ProjectionOperator(Map<String, DataSource> dataSourceMap,
       @Nullable BaseOperator<DocIdSetBlock> docIdSetOperator) {
     _dataSourceMap = dataSourceMap;
     _docIdSetOperator = docIdSetOperator;
     _dataBlockCache = new DataBlockCache(new DataFetcher(dataSourceMap));
+    _columnContextMap = new HashMap<>(HashUtil.getHashMapCapacity(dataSourceMap.size()));
+    dataSourceMap.forEach(
+        (column, dataSource) -> _columnContextMap.put(column, ColumnContext.fromDataSource(dataSource)));
   }
 
-  /**
-   * Returns the map from column to data source.
-   *
-   * @return Map from column to data source
-   */
-  public Map<String, DataSource> getDataSourceMap() {
-    return _dataSourceMap;
+  @Override
+  public Map<String, ColumnContext> getSourceColumnContextMap() {
+    return _columnContextMap;
+  }
+
+  @Override
+  public ColumnContext getResultColumnContext(ExpressionContext expression) {
+    assert expression.getType() == ExpressionContext.Type.IDENTIFIER;
+    return _columnContextMap.get(expression.getIdentifier());
   }
 
   @Override
@@ -64,14 +73,13 @@ public class ProjectionOperator extends BaseOperator<ProjectionBlock> {
       return null;
     } else {
       Tracing.activeRecording().setNumChildren(_dataSourceMap.size());
-      _dataBlockCache.initNewBlock(docIdSetBlock.getDocIdSet(), docIdSetBlock.getSearchableLength());
+      _dataBlockCache.initNewBlock(docIdSetBlock.getDocIds(), docIdSetBlock.getLength());
       return new ProjectionBlock(_dataSourceMap, _dataBlockCache);
     }
   }
 
-
   @Override
-  public List<Operator> getChildOperators() {
+  public List<Operator<DocIdSetBlock>> getChildOperators() {
     return Collections.singletonList(_docIdSetOperator);
   }
 
@@ -91,6 +99,17 @@ public class ProjectionOperator extends BaseOperator<ProjectionBlock> {
       }
     }
     return stringBuilder.append(')').toString();
+  }
+
+  @Override
+  protected String getExplainName() {
+    return CaseFormat.UPPER_UNDERSCORE.to(CaseFormat.UPPER_CAMEL, EXPLAIN_NAME);
+  }
+
+  @Override
+  protected void explainAttributes(ExplainAttributeBuilder attributeBuilder) {
+    super.explainAttributes(attributeBuilder);
+    attributeBuilder.putStringList("columns", _dataSourceMap.keySet());
   }
 
   @Override

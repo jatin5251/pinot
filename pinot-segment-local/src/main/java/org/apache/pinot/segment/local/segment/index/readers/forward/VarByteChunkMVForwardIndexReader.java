@@ -19,22 +19,23 @@
 package org.apache.pinot.segment.local.segment.index.readers.forward;
 
 import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
+import java.util.List;
 import javax.annotation.Nullable;
-import org.apache.pinot.segment.local.io.writer.impl.VarByteChunkSVForwardIndexWriter;
+import org.apache.pinot.segment.local.io.writer.impl.VarByteChunkForwardIndexWriter;
+import org.apache.pinot.segment.local.utils.ArraySerDeUtils;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 
+
 /**
- * Chunk-based single-value raw (non-dictionary-encoded) forward index reader for values of
- * variable
- * length data type
+ * Chunk-based multi-value raw (non-dictionary-encoded) forward index reader for values of variable length data type
  * (STRING, BYTES).
- * <p>For data layout, please refer to the documentation for {@link VarByteChunkSVForwardIndexWriter}
+ * <p>For data layout, please refer to the documentation for {@link VarByteChunkForwardIndexWriter}
+ *
+ * TODO: Consider reading directly from sliced ByteBuffer instead of copying to byte[] first
  */
 public final class VarByteChunkMVForwardIndexReader extends BaseChunkForwardIndexReader {
-
-  private static final int ROW_OFFSET_SIZE = VarByteChunkSVForwardIndexWriter.CHUNK_HEADER_ENTRY_ROW_OFFSET_SIZE;
+  private static final int ROW_OFFSET_SIZE = VarByteChunkForwardIndexWriter.CHUNK_HEADER_ENTRY_ROW_OFFSET_SIZE;
 
   private final int _maxChunkSize;
 
@@ -54,107 +55,28 @@ public final class VarByteChunkMVForwardIndexReader extends BaseChunkForwardInde
   }
 
   @Override
-  public int getStringMV(final int docId, final String[] valueBuffer,
-      final ChunkReaderContext context) {
-    byte[] compressedBytes;
-    if (_isCompressed) {
-      compressedBytes = getBytesCompressed(docId, context);
-    } else {
-      compressedBytes = getBytesUncompressed(docId);
-    }
-    ByteBuffer byteBuffer = ByteBuffer.wrap(compressedBytes);
-    int numValues = byteBuffer.getInt();
-    int contentOffset = (numValues + 1) * Integer.BYTES;
-    for (int i = 0; i < numValues; i++) {
-      int length = byteBuffer.getInt((i + 1) * Integer.BYTES);
-      byte[] bytes = new byte[length];
-      byteBuffer.position(contentOffset);
-      byteBuffer.get(bytes, 0, length);
-      valueBuffer[i] = new String(bytes, StandardCharsets.UTF_8);
-      contentOffset += length;
-    }
-    return numValues;
+  public int getStringMV(int docId, String[] valueBuffer, ChunkReaderContext context) {
+    return ArraySerDeUtils.deserializeStringArray(getBytes(docId, context), valueBuffer);
   }
 
   @Override
-  public String[] getStringMV(final int docId, final ChunkReaderContext context) {
-    byte[] compressedBytes;
-    if (_isCompressed) {
-      compressedBytes = getBytesCompressed(docId, context);
-    } else {
-      compressedBytes = getBytesUncompressed(docId);
-    }
-    ByteBuffer byteBuffer = ByteBuffer.wrap(compressedBytes);
-    int numValues = byteBuffer.getInt();
-    int contentOffset = (numValues + 1) * Integer.BYTES;
-    String[] valueBuffer = new String[numValues];
-    for (int i = 0; i < numValues; i++) {
-      int length = byteBuffer.getInt((i + 1) * Integer.BYTES);
-      byte[] bytes = new byte[length];
-      byteBuffer.position(contentOffset);
-      byteBuffer.get(bytes, 0, length);
-      valueBuffer[i] = new String(bytes, StandardCharsets.UTF_8);
-      contentOffset += length;
-    }
-    return valueBuffer;
+  public String[] getStringMV(int docId, ChunkReaderContext context) {
+    return ArraySerDeUtils.deserializeStringArray(getBytes(docId, context));
   }
 
   @Override
-  public int getBytesMV(final int docId, final byte[][] valueBuffer,
-      final ChunkReaderContext context) {
-    byte[] compressedBytes;
-    if (_isCompressed) {
-      compressedBytes = getBytesCompressed(docId, context);
-    } else {
-      compressedBytes = getBytesUncompressed(docId);
-    }
-    ByteBuffer byteBuffer = ByteBuffer.wrap(compressedBytes);
-    int numValues = byteBuffer.getInt();
-    int contentOffset = (numValues + 1) * Integer.BYTES;
-    for (int i = 0; i < numValues; i++) {
-      int length = byteBuffer.getInt((i + 1) * Integer.BYTES);
-      byte[] bytes = new byte[length];
-      byteBuffer.position(contentOffset);
-      byteBuffer.get(bytes, 0, length);
-      valueBuffer[i] = bytes;
-      contentOffset += length;
-    }
-    return numValues;
+  public int getBytesMV(int docId, byte[][] valueBuffer, ChunkReaderContext context) {
+    return ArraySerDeUtils.deserializeBytesArray(getBytes(docId, context), valueBuffer);
   }
 
   @Override
-  public byte[][] getBytesMV(final int docId, final ChunkReaderContext context) {
-    byte[] compressedBytes;
-    if (_isCompressed) {
-      compressedBytes = getBytesCompressed(docId, context);
-    } else {
-      compressedBytes = getBytesUncompressed(docId);
-    }
-    ByteBuffer byteBuffer = ByteBuffer.wrap(compressedBytes);
-    int numValues = byteBuffer.getInt();
-    int contentOffset = (numValues + 1) * Integer.BYTES;
-    byte[][] valueBuffer = new byte[numValues][];
-    for (int i = 0; i < numValues; i++) {
-      int length = byteBuffer.getInt((i + 1) * Integer.BYTES);
-      byte[] bytes = new byte[length];
-      byteBuffer.position(contentOffset);
-      byteBuffer.get(bytes, 0, length);
-      valueBuffer[i] = bytes;
-      contentOffset += length;
-    }
-    return valueBuffer;
+  public byte[][] getBytesMV(int docId, ChunkReaderContext context) {
+    return ArraySerDeUtils.deserializeBytesArray(getBytes(docId, context));
   }
 
   @Override
-  public int getNumValuesMV(final int docId, final ChunkReaderContext context) {
-    byte[] compressedBytes;
-    if (_isCompressed) {
-      compressedBytes = getBytesCompressed(docId, context);
-    } else {
-      compressedBytes = getBytesUncompressed(docId);
-    }
-    ByteBuffer byteBuffer = ByteBuffer.wrap(compressedBytes);
-    return byteBuffer.getInt();
+  public int getNumValuesMV(int docId, ChunkReaderContext context) {
+    return ByteBuffer.wrap(getBytes(docId, context)).getInt();
   }
 
   @Override
@@ -229,8 +151,7 @@ public final class VarByteChunkMVForwardIndexReader extends BaseChunkForwardInde
         // Last row in the last chunk
         return _dataBuffer.size();
       } else {
-        int valueEndOffsetInChunk = _dataBuffer
-            .getInt(chunkStartOffset + (long) (chunkRowId + 1) * ROW_OFFSET_SIZE);
+        int valueEndOffsetInChunk = _dataBuffer.getInt(chunkStartOffset + (long) (chunkRowId + 1) * ROW_OFFSET_SIZE);
         if (valueEndOffsetInChunk == 0) {
           // Last row in the last chunk (chunk is incomplete, which stores 0 as the offset for the absent rows)
           return _dataBuffer.size();
@@ -243,9 +164,37 @@ public final class VarByteChunkMVForwardIndexReader extends BaseChunkForwardInde
         // Last row in the chunk
         return getChunkPosition(chunkId + 1);
       } else {
-        return chunkStartOffset + _dataBuffer
-            .getInt(chunkStartOffset + (long) (chunkRowId + 1) * ROW_OFFSET_SIZE);
+        return chunkStartOffset + _dataBuffer.getInt(chunkStartOffset + (long) (chunkRowId + 1) * ROW_OFFSET_SIZE);
       }
     }
+  }
+
+  @Override
+  public boolean isBufferByteRangeInfoSupported() {
+    return true;
+  }
+
+  @Override
+  public void recordDocIdByteRanges(int docId, ChunkReaderContext context, List<ByteRange> ranges) {
+    if (_isCompressed) {
+      recordDocIdRanges(docId, context, ranges);
+    } else {
+      recordDocIdRangesUncompressed(docId, ROW_OFFSET_SIZE, ranges);
+    }
+  }
+
+  @Override
+  public boolean isFixedOffsetMappingType() {
+    return false;
+  }
+
+  @Override
+  public long getRawDataStartOffset() {
+    throw new UnsupportedOperationException("Forward index is not of fixed length type");
+  }
+
+  @Override
+  public int getDocLength() {
+    throw new UnsupportedOperationException("Forward index is not of fixed length type");
   }
 }

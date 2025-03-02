@@ -24,9 +24,10 @@ import java.io.FileInputStream;
 import java.net.URI;
 import java.util.List;
 import org.apache.commons.io.FileUtils;
-import org.apache.http.Header;
+import org.apache.hc.core5.http.Header;
+import org.apache.pinot.common.auth.AuthProviderUtils;
 import org.apache.pinot.common.utils.FileUploadDownloadClient;
-import org.apache.pinot.common.utils.TarGzCompressionUtils;
+import org.apache.pinot.common.utils.TarCompressionUtils;
 import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.utils.CommonConstants;
@@ -42,18 +43,18 @@ import picocli.CommandLine;
  *
  *
  */
-@CommandLine.Command(name = "UploadSegment")
+@CommandLine.Command(name = "UploadSegment", mixinStandardHelpOptions = true)
 public class UploadSegmentCommand extends AbstractBaseAdminCommand implements Command {
   private static final Logger LOGGER = LoggerFactory.getLogger(UploadSegmentCommand.class);
   private static final String SEGMENT_UPLOADER = "segmentUploader";
 
-  @CommandLine.Option(names = {"-controllerHost"}, required = false, description = "host name for controller.")
+  @CommandLine.Option(names = {"-controllerHost"}, required = false, description = "Host name for controller.")
   private String _controllerHost;
 
   @CommandLine.Option(names = {"-controllerPort"}, required = false, description = "Port number for controller.")
   private String _controllerPort = DEFAULT_CONTROLLER_PORT;
 
-  @CommandLine.Option(names = {"-controllerProtocol"}, required = false, description = "protocol for controller.")
+  @CommandLine.Option(names = {"-controllerProtocol"}, required = false, description = "Protocol for controller.")
   private String _controllerProtocol = CommonConstants.HTTP_PROTOCOL;
 
   @CommandLine.Option(names = {"-user"}, required = false, description = "Username for basic auth.")
@@ -78,16 +79,7 @@ public class UploadSegmentCommand extends AbstractBaseAdminCommand implements Co
       description = "Table type to upload. Can be OFFLINE or REALTIME")
   private TableType _tableType = TableType.OFFLINE;
 
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, required = false, help = true,
-      description = "Print this message.")
-  private boolean _help = false;
-
   private AuthProvider _authProvider;
-
-  @Override
-  public boolean getHelp() {
-    return _help;
-  }
 
   @Override
   public String getName() {
@@ -179,15 +171,16 @@ public class UploadSegmentCommand extends AbstractBaseAdminCommand implements Co
           // Tar the segment directory
           String segmentName = segmentFile.getName();
           LOGGER.info("Compressing segment: {}", segmentName);
-          segmentTarFile = new File(tempDir, segmentName + TarGzCompressionUtils.TAR_GZ_FILE_EXTENSION);
-          TarGzCompressionUtils.createTarGzFile(segmentFile, segmentTarFile);
+          segmentTarFile = new File(tempDir, segmentName + TarCompressionUtils.TAR_GZ_FILE_EXTENSION);
+          TarCompressionUtils.createCompressedTarFile(segmentFile, segmentTarFile);
         } else {
           segmentTarFile = segmentFile;
         }
 
         LOGGER.info("Uploading segment tar file: {}", segmentTarFile);
         List<Header> headerList =
-            makeAuthHeaders(makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user, _password));
+            AuthProviderUtils.makeAuthHeaders(
+                AuthProviderUtils.makeAuthProvider(_authProvider, _authTokenUrl, _authToken, _user, _password));
 
         FileInputStream fileInputStream = new FileInputStream(segmentTarFile);
         fileUploadDownloadClient.uploadSegment(uploadSegmentHttpURI, segmentTarFile.getName(),

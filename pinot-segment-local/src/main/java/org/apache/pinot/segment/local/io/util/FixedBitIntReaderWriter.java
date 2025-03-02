@@ -28,8 +28,11 @@ public final class FixedBitIntReaderWriter implements Closeable {
   private final int _numBitsPerValue;
 
   public FixedBitIntReaderWriter(PinotDataBuffer dataBuffer, int numValues, int numBitsPerValue) {
-    Preconditions
-        .checkState(dataBuffer.size() == (int) (((long) numValues * numBitsPerValue + Byte.SIZE - 1) / Byte.SIZE));
+    long actualBufferSize = dataBuffer.size();
+    long expectedBufferSize = ((long) numValues * numBitsPerValue + Byte.SIZE - 1) / Byte.SIZE;
+    Preconditions.checkState(actualBufferSize == expectedBufferSize, "Buffer size mismatch: actual: %s, expected: %s",
+        actualBufferSize, expectedBufferSize);
+    Preconditions.checkState(actualBufferSize <= Integer.MAX_VALUE, "Buffer size too large: %s", actualBufferSize);
     _dataBitSet = new PinotDataBitSet(dataBuffer);
     _numBitsPerValue = numBitsPerValue;
   }
@@ -48,6 +51,14 @@ public final class FixedBitIntReaderWriter implements Closeable {
 
   public void writeInt(int startIndex, int length, int[] values) {
     _dataBitSet.writeInt(startIndex, _numBitsPerValue, length, values);
+  }
+
+  public int getStartByteOffset(int index) {
+    return (int) (((long) index * _numBitsPerValue) / Byte.SIZE);
+  }
+
+  public int getEndByteOffset(int index) {
+    return (int) (((long) (index + 1) * _numBitsPerValue - 1) / Byte.SIZE) + 1;
   }
 
   @Override

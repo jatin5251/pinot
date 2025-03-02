@@ -19,12 +19,13 @@
 package org.apache.pinot.common.utils.webhdfs;
 
 import java.io.File;
-import java.io.IOException;
-import org.apache.commons.httpclient.HttpClient;
-import org.apache.commons.httpclient.HttpMethod;
-import org.apache.commons.httpclient.methods.FileRequestEntity;
-import org.apache.commons.httpclient.methods.PutMethod;
-import org.apache.commons.httpclient.methods.RequestEntity;
+import org.apache.hc.client5.http.classic.methods.HttpPut;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
+import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.core5.http.HttpEntity;
+import org.apache.hc.core5.http.io.entity.EntityUtils;
+import org.apache.hc.core5.http.io.entity.FileEntity;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,7 +51,7 @@ public class WebHdfsV1Client {
   private final boolean _overwrite;
   private final int _permission;
 
-  private final HttpClient _httpClient;
+  private final CloseableHttpClient _httpClient;
 
   public WebHdfsV1Client(String host, int port) {
     this(host, port, DEFAULT_PROTOCOL, DEFAULT_OVERWRITE, DEFAULT_PERMISSION);
@@ -62,7 +63,7 @@ public class WebHdfsV1Client {
     _protocol = protocol;
     _overwrite = overwrite;
     _permission = permission;
-    _httpClient = new HttpClient();
+    _httpClient = HttpClients.createDefault();
   }
 
   // This method is based on:
@@ -72,48 +73,48 @@ public class WebHdfsV1Client {
     // redirects and without sending the file data.
     String firstPutReqString =
         String.format(WEB_HDFS_UPLOAD_PATH_TEMPLATE, _protocol, _host, _port, webHdfsPath, _overwrite, _permission);
-    HttpMethod firstPutReq = new PutMethod(firstPutReqString);
+    HttpPut firstPutReq = new HttpPut(firstPutReqString);
     try {
       LOGGER.info("Trying to send request: {}.", firstPutReqString);
-      int firstResponseCode = _httpClient.executeMethod(firstPutReq);
-      if (firstResponseCode != 307) {
-        LOGGER.error(String.format("Failed to execute the first PUT request to upload segment to webhdfs: %s. "
-                + "Expected response code 307, but get %s. Response body: %s", firstPutReqString, firstResponseCode,
-            firstPutReq.getResponseBodyAsString()));
-        return false;
+      try (CloseableHttpResponse response = _httpClient.execute(firstPutReq)) {
+        int firstResponseCode = response.getCode();
+        if (firstResponseCode != 307) {
+          LOGGER.error(String.format("Failed to execute the first PUT request to upload segment to webhdfs: %s. "
+                  + "Expected response code 307, but get %s. Response body: %s", firstPutReqString, firstResponseCode,
+              EntityUtils.toString(response.getEntity())));
+          return false;
+        }
       }
     } catch (Exception e) {
       LOGGER.error(
           String.format("Failed to execute the first request to upload segment to webhdfs: %s.", firstPutReqString), e);
       return false;
-    } finally {
-      firstPutReq.releaseConnection();
     }
     // Step 2: Submit another HTTP PUT request using the URL in the Location
     // header with the file data to be written.
-    String redirectedReqString = firstPutReq.getResponseHeader(LOCATION).getValue();
-    PutMethod redirectedReq = new PutMethod(redirectedReqString);
+    String redirectedReqString = firstPutReq.getFirstHeader(LOCATION).getValue();
+    HttpPut redirectedReq = new HttpPut(redirectedReqString);
     File localFile = new File(localFilePath);
-    RequestEntity requestEntity = new FileRequestEntity(localFile, "application/binary");
-    redirectedReq.setRequestEntity(requestEntity);
+    HttpEntity requestEntity = new FileEntity(localFile, null);
+    redirectedReq.setEntity(requestEntity);
 
     try {
       LOGGER.info("Trying to send request: {}.", redirectedReqString);
-      int redirectedResponseCode = _httpClient.executeMethod(redirectedReq);
-      if (redirectedResponseCode != 201) {
-        LOGGER.error(String.format("Failed to execute the redirected PUT request to upload segment to webhdfs: %s. "
-                + "Expected response code 201, but get %s. Response: %s", redirectedReqString, redirectedResponseCode,
-            redirectedReq.getResponseBodyAsString()));
+      try (CloseableHttpResponse redirectResponse = _httpClient.execute(redirectedReq)) {
+        int redirectedResponseCode = redirectResponse.getCode();
+        if (redirectedResponseCode != 201) {
+          LOGGER.error(String.format("Failed to execute the redirected PUT request to upload segment to webhdfs: %s. "
+                  + "Expected response code 201, but get %s. Response: %s", redirectedReqString, redirectedResponseCode,
+              EntityUtils.toString(redirectResponse.getEntity())));
+        }
+        return true;
       }
-      return true;
-    } catch (IOException e) {
+    } catch (Exception e) {
       LOGGER.error(String
               .format("Failed to execute the redirected request to upload segment to webhdfs: %s.",
                   redirectedReqString),
           e);
       return false;
-    } finally {
-      redirectedReq.releaseConnection();
     }
   }
 

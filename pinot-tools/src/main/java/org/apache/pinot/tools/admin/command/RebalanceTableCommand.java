@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.tools.admin.command;
 
+import org.apache.pinot.controller.helix.core.rebalance.RebalanceConfig;
 import org.apache.pinot.controller.helix.core.rebalance.RebalanceResult;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.tools.Command;
@@ -31,7 +32,7 @@ import picocli.CommandLine;
  * A sub-command for pinot-admin tool to rebalance a specific table
  */
 @SuppressWarnings({"FieldCanBeLocal", "unused"})
-@CommandLine.Command(name = "RebalanceTable")
+@CommandLine.Command(name = "RebalanceTable", mixinStandardHelpOptions = true)
 public class RebalanceTableCommand extends AbstractBaseAdminCommand implements Command {
   private static final Logger LOGGER = LoggerFactory.getLogger(RebalanceTableCommand.class);
 
@@ -72,17 +73,27 @@ public class RebalanceTableCommand extends AbstractBaseAdminCommand implements C
           + "number of replicas allowed to be unavailable if value is negative (1 by default)")
   private int _minAvailableReplicas = 1;
 
+  @CommandLine.Option(names = {"-lowDiskMode"}, description =
+      "For no-downtime rebalance, whether to enable low disk mode during rebalance. When enabled, "
+          + "segments will first be offloaded from servers, then added to servers after offload is done while "
+          + "maintaining the min available replicas. It may increase the total time of the rebalance, but can be "
+          + "useful when servers are low on disk space, and we want to scale up the cluster and rebalance the table "
+          + "to more servers (false by default)")
+  private boolean _lowDiskMode = false;
+
   @CommandLine.Option(names = {"-bestEfforts"},
       description = "Whether to use best-efforts to rebalance (not fail the rebalance when the no-downtime contract"
           + " cannot be achieved, false by default)")
   private boolean _bestEfforts = false;
 
-  @CommandLine.Option(names = {"-help", "-h", "--h", "--help"}, help = true, description = "Print this message")
-  private boolean _help = false;
+  @CommandLine.Option(names = {"-externalViewCheckIntervalInMs"},
+      description = "How often to check if external view converges with ideal view")
+  private long _externalViewCheckIntervalInMs = RebalanceConfig.DEFAULT_EXTERNAL_VIEW_CHECK_INTERVAL_IN_MS;
 
-  public boolean getHelp() {
-    return _help;
-  }
+  @CommandLine.Option(names = {"-externalViewStabilizationTimeoutInMs"},
+      description = "How long to wait till external view converges with ideal view")
+  private long _externalViewStabilizationTimeoutInMs =
+      RebalanceConfig.DEFAULT_EXTERNAL_VIEW_STABILIZATION_TIMEOUT_IN_MS;
 
   @Override
   public String getName() {
@@ -94,7 +105,8 @@ public class RebalanceTableCommand extends AbstractBaseAdminCommand implements C
       throws Exception {
     PinotTableRebalancer tableRebalancer =
         new PinotTableRebalancer(_zkAddress, _clusterName, _dryRun, _reassignInstances, _includeConsuming, _bootstrap,
-            _downtime, _minAvailableReplicas, _bestEfforts);
+            _downtime, _minAvailableReplicas, _lowDiskMode, _bestEfforts, _externalViewCheckIntervalInMs,
+            _externalViewStabilizationTimeoutInMs);
     RebalanceResult rebalanceResult = tableRebalancer.rebalance(_tableNameWithType);
     LOGGER
         .info("Got rebalance result: {} for table: {}", JsonUtils.objectToString(rebalanceResult), _tableNameWithType);

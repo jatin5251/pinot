@@ -19,13 +19,14 @@
 package org.apache.pinot.spi.stream;
 
 import java.util.Properties;
+import org.apache.commons.lang3.NotImplementedException;
 
 
 /**
  * StreamDataServerStartable is the interface for stream data sources.
  * Each stream data connector should implement a mock/wrapper of the data server.
  *
- * E.g. KafkaDataServerStartable is a wrapper class of Kafka 0.9 broker.
+ * E.g. KafkaDataServerStartable is a wrapper class of Kafka 2.x broker.
  *
  */
 public interface StreamDataServerStartable {
@@ -53,6 +54,24 @@ public interface StreamDataServerStartable {
    * @param topicProps
    */
   void createTopic(String topic, Properties topicProps);
+
+  /**
+   * Delete a data stream (e.g Kafka topic) in the server.
+   *
+   * @param topic
+   */
+  default void deleteTopic(String topic) {
+    throw new NotImplementedException("deleteTopic is not implemented!");
+  }
+
+  /**
+   *
+   * @param topic
+   * @param numPartitions
+   */
+  default void createPartitions(String topic, int numPartitions) {
+    throw new NotImplementedException("createPartitions is not implemented!");
+  }
 
   /**
    * Get the port of the server.

@@ -19,177 +19,277 @@
 package org.apache.pinot.query.runtime.operator;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableSet;
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.BitSet;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Set;
-import javax.annotation.Nullable;
-import org.apache.calcite.rel.core.JoinRelType;
-import org.apache.pinot.common.datablock.DataBlock;
+import java.util.Map;
+import org.apache.pinot.common.response.ProcessingException;
 import org.apache.pinot.common.utils.DataSchema;
-import org.apache.pinot.core.common.Operator;
-import org.apache.pinot.core.data.table.Key;
-import org.apache.pinot.core.operator.BaseOperator;
-import org.apache.pinot.query.planner.logical.RexExpression;
 import org.apache.pinot.query.planner.partitioning.KeySelector;
-import org.apache.pinot.query.planner.stage.JoinNode;
+import org.apache.pinot.query.planner.partitioning.KeySelectorFactory;
+import org.apache.pinot.query.planner.plannode.JoinNode;
 import org.apache.pinot.query.runtime.blocks.TransferableBlock;
 import org.apache.pinot.query.runtime.blocks.TransferableBlockUtils;
-import org.apache.pinot.query.runtime.operator.operands.TransformOperand;
-import org.apache.pinot.query.runtime.operator.utils.FunctionInvokeUtils;
+import org.apache.pinot.query.runtime.operator.join.DoubleLookupTable;
+import org.apache.pinot.query.runtime.operator.join.FloatLookupTable;
+import org.apache.pinot.query.runtime.operator.join.IntLookupTable;
+import org.apache.pinot.query.runtime.operator.join.LongLookupTable;
+import org.apache.pinot.query.runtime.operator.join.LookupTable;
+import org.apache.pinot.query.runtime.operator.join.ObjectLookupTable;
+import org.apache.pinot.query.runtime.plan.OpChainExecutionContext;
+import org.apache.pinot.spi.utils.CommonConstants.MultiStageQueryRunner.JoinOverFlowMode;
 
 
 /**
- * This basic {@code BroadcastJoinOperator} implement a basic broadcast join algorithm.
- *
- * <p>It takes the right table as the broadcast side and materialize a hash table. Then for each of the left table row,
- * it looks up for the corresponding row(s) from the hash table and create a joint row.
- *
- * <p>For each of the data block received from the left table, it will generate a joint data block.
- *
- * We currently support left join, inner join and semi join.
- * The output is in the format of [left_row, right_row]
+ * This {@code HashJoinOperator} join algorithm with join keys. Right table is materialized into a hash table.
  */
-// TODO: Move inequi out of hashjoin. (https://github.com/apache/pinot/issues/9728)
-public class HashJoinOperator extends BaseOperator<TransferableBlock> {
+// TODO: Support memory size based resource limit.
+@SuppressWarnings("unchecked")
+public class HashJoinOperator extends BaseJoinOperator {
   private static final String EXPLAIN_NAME = "HASH_JOIN";
-  private static final Set<JoinRelType> SUPPORTED_JOIN_TYPES = ImmutableSet.of(JoinRelType.INNER, JoinRelType.LEFT);
-  private final HashMap<Key, List<Object[]>> _broadcastHashTable;
-  private final Operator<TransferableBlock> _leftTableOperator;
-  private final Operator<TransferableBlock> _rightTableOperator;
-  private final JoinRelType _joinType;
-  private final DataSchema _resultSchema;
-  private final int _resultRowSize;
-  private final List<TransformOperand> _joinClauseEvaluators;
-  private boolean _isHashTableBuilt;
-  private TransferableBlock _upstreamErrorBlock;
-  private KeySelector<Object[], Object[]> _leftKeySelector;
-  private KeySelector<Object[], Object[]> _rightKeySelector;
 
-  public HashJoinOperator(Operator<TransferableBlock> leftTableOperator, Operator<TransferableBlock> rightTableOperator,
-      DataSchema outputSchema, JoinNode.JoinKeys joinKeys, List<RexExpression> joinClauses, JoinRelType joinType) {
-    Preconditions.checkState(SUPPORTED_JOIN_TYPES.contains(joinType),
-        "Join type: " + joinType + " is not supported!");
-    _leftKeySelector = joinKeys.getLeftJoinKeySelector();
-    _rightKeySelector = joinKeys.getRightJoinKeySelector();
-    Preconditions.checkState(_leftKeySelector != null, "LeftKeySelector for join cannot be null");
-    Preconditions.checkState(_rightKeySelector != null, "RightKeySelector for join cannot be null");
-    _leftTableOperator = leftTableOperator;
-    _rightTableOperator = rightTableOperator;
-    _resultSchema = outputSchema;
-    _joinClauseEvaluators = new ArrayList<>(joinClauses.size());
-    for (RexExpression joinClause : joinClauses) {
-      _joinClauseEvaluators.add(TransformOperand.toTransformOperand(joinClause, _resultSchema));
+  // Placeholder for BitSet in _matchedRightRows when all keys are unique in the right table.
+  private static final BitSet BIT_SET_PLACEHOLDER = new BitSet(0);
+
+  private final KeySelector<?> _leftKeySelector;
+  private final KeySelector<?> _rightKeySelector;
+  private final LookupTable _rightTable;
+  // Track matched right rows for right join and full join to output non-matched right rows.
+  // TODO: Revisit whether we should use IntList or RoaringBitmap for smaller memory footprint.
+  // TODO: Optimize this
+  private final Map<Object, BitSet> _matchedRightRows;
+
+  public HashJoinOperator(OpChainExecutionContext context, MultiStageOperator leftInput, DataSchema leftSchema,
+      MultiStageOperator rightInput, JoinNode node) {
+    super(context, leftInput, leftSchema, rightInput, node);
+    List<Integer> leftKeys = node.getLeftKeys();
+    Preconditions.checkState(!leftKeys.isEmpty(), "Hash join operator requires join keys");
+    _leftKeySelector = KeySelectorFactory.getKeySelector(leftKeys);
+    _rightKeySelector = KeySelectorFactory.getKeySelector(node.getRightKeys());
+    _rightTable = createLookupTable(leftKeys, leftSchema);
+    _matchedRightRows = needUnmatchedRightRows() ? new HashMap<>() : null;
+  }
+
+  private static LookupTable createLookupTable(List<Integer> joinKeys, DataSchema schema) {
+    if (joinKeys.size() > 1) {
+      return new ObjectLookupTable();
     }
-    _joinType = joinType;
-    _resultRowSize = _resultSchema.size();
-    _isHashTableBuilt = false;
-    _broadcastHashTable = new HashMap<>();
-    _upstreamErrorBlock = null;
+    switch (schema.getColumnDataType(joinKeys.get(0)).getStoredType()) {
+      case INT:
+        return new IntLookupTable();
+      case LONG:
+        return new LongLookupTable();
+      case FLOAT:
+        return new FloatLookupTable();
+      case DOUBLE:
+        return new DoubleLookupTable();
+      default:
+        return new ObjectLookupTable();
+    }
   }
 
-  @Override
-  public List<Operator> getChildOperators() {
-    // WorkerExecutor doesn't use getChildOperators, returns null here.
-    return null;
-  }
-
-  @Nullable
   @Override
   public String toExplainString() {
     return EXPLAIN_NAME;
   }
 
   @Override
-  protected TransferableBlock getNextBlock() {
-    try {
-      if (!_isHashTableBuilt) {
-        // Build JOIN hash table
-        buildBroadcastHashTable();
+  protected void buildRightTable()
+      throws ProcessingException {
+    LOGGER.trace("Building hash table for join operator");
+    long startTime = System.currentTimeMillis();
+    int numRows = 0;
+    TransferableBlock rightBlock = _rightInput.nextBlock();
+    while (!TransferableBlockUtils.isEndOfStream(rightBlock)) {
+      List<Object[]> rows = rightBlock.getContainer();
+      // Row based overflow check.
+      if (rows.size() + numRows > _maxRowsInJoin) {
+        if (_joinOverflowMode == JoinOverFlowMode.THROW) {
+          throwProcessingExceptionForJoinRowLimitExceeded(
+              "Cannot build in memory hash table for join operator, reached number of rows limit: " + _maxRowsInJoin);
+        } else {
+          // Just fill up the buffer.
+          int remainingRows = _maxRowsInJoin - numRows;
+          rows = rows.subList(0, remainingRows);
+          _statMap.merge(StatKey.MAX_ROWS_IN_JOIN_REACHED, true);
+          // setting only the rightTableOperator to be early terminated and awaits EOS block next.
+          _rightInput.earlyTerminate();
+        }
       }
-      if (_upstreamErrorBlock != null) {
-        return _upstreamErrorBlock;
-      } else if (!_isHashTableBuilt) {
-        return TransferableBlockUtils.getNoOpTransferableBlock();
+      for (Object[] row : rows) {
+        _rightTable.addRow(_rightKeySelector.getKey(row), row);
       }
-      // JOIN each left block with the right block.
-      return buildJoinedDataBlock(_leftTableOperator.nextBlock());
-    } catch (Exception e) {
-      return TransferableBlockUtils.getErrorTransferableBlock(e);
+      numRows += rows.size();
+      sampleAndCheckInterruption();
+      rightBlock = _rightInput.nextBlock();
+    }
+    if (rightBlock.isErrorBlock()) {
+      _upstreamErrorBlock = rightBlock;
+    } else {
+      _rightTable.finish();
+      _isRightTableBuilt = true;
+      _rightSideStats = rightBlock.getQueryStats();
+      assert _rightSideStats != null;
+    }
+    _statMap.merge(StatKey.TIME_BUILDING_HASH_TABLE_MS, System.currentTimeMillis() - startTime);
+    LOGGER.trace("Finished building hash table for join operator");
+  }
+
+  @Override
+  protected List<Object[]> buildJoinedRows(TransferableBlock leftBlock)
+      throws ProcessingException {
+    switch (_joinType) {
+      case SEMI:
+        return buildJoinedDataBlockSemi(leftBlock);
+      case ANTI:
+        return buildJoinedDataBlockAnti(leftBlock);
+      default: { // INNER, LEFT, RIGHT, FULL
+        if (_rightTable.isKeysUnique()) {
+          return buildJoinedDataBlockUniqueKeys(leftBlock);
+        } else {
+          return buildJoinedDataBlockDuplicateKeys(leftBlock);
+        }
+      }
     }
   }
 
-  private void buildBroadcastHashTable() {
-    TransferableBlock rightBlock = _rightTableOperator.nextBlock();
-    while (!rightBlock.isNoOpBlock()) {
+  private List<Object[]> buildJoinedDataBlockUniqueKeys(TransferableBlock leftBlock)
+      throws ProcessingException {
+    List<Object[]> leftRows = leftBlock.getContainer();
+    ArrayList<Object[]> rows = new ArrayList<>(leftRows.size());
 
-      if (rightBlock.isErrorBlock()) {
-        _upstreamErrorBlock = rightBlock;
-        return;
-      }
-
-      if (TransferableBlockUtils.isEndOfStream(rightBlock)) {
-        _isHashTableBuilt = true;
-        return;
-      }
-
-      List<Object[]> container = rightBlock.getContainer();
-      // put all the rows into corresponding hash collections keyed by the key selector function.
-      for (Object[] row : container) {
-        List<Object[]> hashCollection = _broadcastHashTable.computeIfAbsent(
-            new Key(_rightKeySelector.getKey(row)), k -> new ArrayList<>());
-        hashCollection.add(row);
-      }
-
-      rightBlock = _rightTableOperator.nextBlock();
-    }
-  }
-
-  private TransferableBlock buildJoinedDataBlock(TransferableBlock leftBlock)
-      throws Exception {
-    if (leftBlock.isErrorBlock()) {
-      _upstreamErrorBlock = leftBlock;
-      return _upstreamErrorBlock;
-    } else if (TransferableBlockUtils.isNoOpBlock(leftBlock) || TransferableBlockUtils.isEndOfStream(leftBlock)) {
-      return leftBlock;
-    }
-    List<Object[]> rows = new ArrayList<>();
-    List<Object[]> container = leftBlock.isEndOfStreamBlock() ? new ArrayList<>() : leftBlock.getContainer();
-    for (Object[] leftRow : container) {
-      // NOTE: Empty key selector will always give same hash code.
-      List<Object[]> hashCollection =
-          _broadcastHashTable.getOrDefault(new Key(_leftKeySelector.getKey(leftRow)), Collections.emptyList());
-      // If it is a left join and right table is empty, we return left rows.
-      if (hashCollection.isEmpty() && _joinType == JoinRelType.LEFT) {
-        rows.add(joinRow(leftRow, null));
+    for (Object[] leftRow : leftRows) {
+      Object key = _leftKeySelector.getKey(leftRow);
+      Object[] rightRow = (Object[]) _rightTable.lookup(key);
+      if (rightRow == null) {
+        handleUnmatchedLeftRow(leftRow, rows);
       } else {
-        // If it is other type of join.
-        for (Object[] rightRow : hashCollection) {
-          // TODO: Optimize this to avoid unnecessary object copy.
-          Object[] resultRow = joinRow(leftRow, rightRow);
-          if (_joinClauseEvaluators.isEmpty() || _joinClauseEvaluators.stream().allMatch(evaluator ->
-              (Boolean) FunctionInvokeUtils.convert(evaluator.apply(resultRow), DataSchema.ColumnDataType.BOOLEAN))) {
+        Object[] resultRow = joinRow(leftRow, rightRow);
+        if (matchNonEquiConditions(resultRow)) {
+          if (isMaxRowsLimitReached(rows.size())) {
+            break;
+          }
+          rows.add(resultRow);
+          if (_matchedRightRows != null) {
+            _matchedRightRows.put(key, BIT_SET_PLACEHOLDER);
+          }
+        } else {
+          handleUnmatchedLeftRow(leftRow, rows);
+        }
+      }
+    }
+
+    return rows;
+  }
+
+  private List<Object[]> buildJoinedDataBlockDuplicateKeys(TransferableBlock leftBlock)
+      throws ProcessingException {
+    List<Object[]> leftRows = leftBlock.getContainer();
+    List<Object[]> rows = new ArrayList<>(leftRows.size());
+
+    for (Object[] leftRow : leftRows) {
+      Object key = _leftKeySelector.getKey(leftRow);
+      List<Object[]> rightRows = (List<Object[]>) _rightTable.lookup(key);
+      if (rightRows == null) {
+        handleUnmatchedLeftRow(leftRow, rows);
+      } else {
+        boolean maxRowsLimitReached = false;
+        boolean hasMatchForLeftRow = false;
+        int numRightRows = rightRows.size();
+        for (int i = 0; i < numRightRows; i++) {
+          Object[] resultRow = joinRow(leftRow, rightRows.get(i));
+          if (matchNonEquiConditions(resultRow)) {
+            if (isMaxRowsLimitReached(rows.size())) {
+              maxRowsLimitReached = true;
+              break;
+            }
             rows.add(resultRow);
+            hasMatchForLeftRow = true;
+            if (_matchedRightRows != null) {
+              _matchedRightRows.computeIfAbsent(key, k -> new BitSet(numRightRows)).set(i);
+            }
+          }
+        }
+        if (maxRowsLimitReached) {
+          break;
+        }
+        if (!hasMatchForLeftRow) {
+          handleUnmatchedLeftRow(leftRow, rows);
+        }
+      }
+    }
+
+    return rows;
+  }
+
+  private void handleUnmatchedLeftRow(Object[] leftRow, List<Object[]> rows)
+      throws ProcessingException {
+    if (needUnmatchedLeftRows()) {
+      if (isMaxRowsLimitReached(rows.size())) {
+        return;
+      }
+      rows.add(joinRow(leftRow, null));
+    }
+  }
+
+  private List<Object[]> buildJoinedDataBlockSemi(TransferableBlock leftBlock) {
+    List<Object[]> leftRows = leftBlock.getContainer();
+    List<Object[]> rows = new ArrayList<>(leftRows.size());
+
+    for (Object[] leftRow : leftRows) {
+      Object key = _leftKeySelector.getKey(leftRow);
+      // SEMI-JOIN only checks existence of the key
+      if (_rightTable.containsKey(key)) {
+        rows.add(leftRow);
+      }
+    }
+
+    return rows;
+  }
+
+  private List<Object[]> buildJoinedDataBlockAnti(TransferableBlock leftBlock) {
+    List<Object[]> leftRows = leftBlock.getContainer();
+    List<Object[]> rows = new ArrayList<>(leftRows.size());
+
+    for (Object[] leftRow : leftRows) {
+      Object key = _leftKeySelector.getKey(leftRow);
+      // ANTI-JOIN only checks non-existence of the key
+      if (!_rightTable.containsKey(key)) {
+        rows.add(leftRow);
+      }
+    }
+
+    return rows;
+  }
+
+  @Override
+  protected List<Object[]> buildNonMatchRightRows() {
+    List<Object[]> rows = new ArrayList<>();
+    if (_rightTable.isKeysUnique()) {
+      for (Map.Entry<Object, Object[]> entry : _rightTable.entrySet()) {
+        Object[] rightRow = entry.getValue();
+        if (!_matchedRightRows.containsKey(entry.getKey())) {
+          rows.add(joinRow(null, rightRow));
+        }
+      }
+    } else {
+      for (Map.Entry<Object, ArrayList<Object[]>> entry : _rightTable.entrySet()) {
+        List<Object[]> rightRows = entry.getValue();
+        BitSet matchedIndices = _matchedRightRows.get(entry.getKey());
+        if (matchedIndices == null) {
+          for (Object[] rightRow : rightRows) {
+            rows.add(joinRow(null, rightRow));
+          }
+        } else {
+          int numRightRows = rightRows.size();
+          int unmatchedIndex = 0;
+          while ((unmatchedIndex = matchedIndices.nextClearBit(unmatchedIndex)) < numRightRows) {
+            rows.add(joinRow(null, rightRows.get(unmatchedIndex++)));
           }
         }
       }
     }
-    return new TransferableBlock(rows, _resultSchema, DataBlock.Type.ROW);
-  }
-
-  private Object[] joinRow(Object[] leftRow, @Nullable Object[] rightRow) {
-    Object[] resultRow = new Object[_resultRowSize];
-    int idx = 0;
-    for (Object obj : leftRow) {
-      resultRow[idx++] = obj;
-    }
-    if (rightRow != null) {
-      for (Object obj : rightRow) {
-        resultRow[idx++] = obj;
-      }
-    }
-    return resultRow;
+    return rows;
   }
 }

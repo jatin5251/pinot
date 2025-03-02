@@ -22,17 +22,15 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import java.io.Closeable;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.ArrayList;
-import java.util.Collection;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import org.apache.commons.configuration.PropertiesConfiguration;
+import org.apache.commons.configuration2.PropertiesConfiguration;
 import org.apache.pinot.common.function.FunctionUtils;
 import org.apache.pinot.common.utils.PinotDataType;
 import org.apache.pinot.segment.local.function.FunctionEvaluator;
@@ -41,8 +39,6 @@ import org.apache.pinot.segment.local.segment.creator.impl.SegmentColumnarIndexC
 import org.apache.pinot.segment.local.segment.creator.impl.SegmentDictionaryCreator;
 import org.apache.pinot.segment.local.segment.creator.impl.fwd.MultiValueUnsortedForwardIndexCreator;
 import org.apache.pinot.segment.local.segment.creator.impl.fwd.SingleValueSortedForwardIndexCreator;
-import org.apache.pinot.segment.local.segment.creator.impl.fwd.SingleValueUnsortedForwardIndexCreator;
-import org.apache.pinot.segment.local.segment.creator.impl.inv.BitSlicedRangeIndexCreator;
 import org.apache.pinot.segment.local.segment.creator.impl.inv.OffHeapBitmapInvertedIndexCreator;
 import org.apache.pinot.segment.local.segment.creator.impl.nullvalue.NullValueVectorCreator;
 import org.apache.pinot.segment.local.segment.creator.impl.stats.BytesColumnPredIndexStatsCollector;
@@ -51,20 +47,29 @@ import org.apache.pinot.segment.local.segment.creator.impl.stats.FloatColumnPreI
 import org.apache.pinot.segment.local.segment.creator.impl.stats.IntColumnPreIndexStatsCollector;
 import org.apache.pinot.segment.local.segment.creator.impl.stats.LongColumnPreIndexStatsCollector;
 import org.apache.pinot.segment.local.segment.creator.impl.stats.StringColumnPreIndexStatsCollector;
+import org.apache.pinot.segment.local.segment.index.dictionary.DictionaryIndexType;
+import org.apache.pinot.segment.local.segment.index.forward.ForwardIndexCreatorFactory;
+import org.apache.pinot.segment.local.segment.index.forward.ForwardIndexPlugin;
+import org.apache.pinot.segment.local.segment.index.forward.ForwardIndexType;
 import org.apache.pinot.segment.local.segment.index.loader.IndexLoadingConfig;
 import org.apache.pinot.segment.local.segment.index.loader.LoaderUtils;
 import org.apache.pinot.segment.local.segment.readers.PinotSegmentColumnReader;
 import org.apache.pinot.segment.spi.ColumnMetadata;
+import org.apache.pinot.segment.spi.SegmentMetadata;
 import org.apache.pinot.segment.spi.V1Constants;
 import org.apache.pinot.segment.spi.creator.ColumnIndexCreationInfo;
+import org.apache.pinot.segment.spi.creator.IndexCreationContext;
 import org.apache.pinot.segment.spi.creator.StatsCollectorConfig;
+import org.apache.pinot.segment.spi.index.DictionaryIndexConfig;
+import org.apache.pinot.segment.spi.index.FieldIndexConfigs;
+import org.apache.pinot.segment.spi.index.ForwardIndexConfig;
+import org.apache.pinot.segment.spi.index.StandardIndexes;
 import org.apache.pinot.segment.spi.index.creator.DictionaryBasedInvertedIndexCreator;
 import org.apache.pinot.segment.spi.index.creator.ForwardIndexCreator;
-import org.apache.pinot.segment.spi.index.metadata.SegmentMetadataImpl;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
 import org.apache.pinot.segment.spi.index.reader.ForwardIndexReader;
-import org.apache.pinot.segment.spi.store.ColumnIndexType;
 import org.apache.pinot.segment.spi.store.SegmentDirectory;
+import org.apache.pinot.segment.spi.utils.SegmentMetadataUtils;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.ingestion.TransformConfig;
 import org.apache.pinot.spi.data.FieldSpec;
@@ -74,6 +79,7 @@ import org.apache.pinot.spi.utils.ByteArray;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.pinot.spi.data.FieldSpec.FieldType.COMPLEX;
 import static org.apache.pinot.spi.data.FieldSpec.FieldType.DATE_TIME;
 import static org.apache.pinot.spi.data.FieldSpec.FieldType.DIMENSION;
 import static org.apache.pinot.spi.data.FieldSpec.FieldType.METRIC;
@@ -87,10 +93,12 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     ADD_DIMENSION,
     ADD_METRIC,
     ADD_DATE_TIME,
+    ADD_COMPLEX,
     // Present in segment but not in schema
     REMOVE_DIMENSION,
     REMOVE_METRIC,
     REMOVE_DATE_TIME,
+    REMOVE_COMPLEX,
     // Present in both segment and schema but one of the following updates is needed
     UPDATE_DIMENSION_DATA_TYPE,
     UPDATE_DIMENSION_DEFAULT_VALUE,
@@ -99,10 +107,12 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     UPDATE_METRIC_DEFAULT_VALUE,
     UPDATE_METRIC_NUMBER_OF_VALUES,
     UPDATE_DATE_TIME_DATA_TYPE,
-    UPDATE_DATE_TIME_DEFAULT_VALUE;
+    UPDATE_DATE_TIME_DEFAULT_VALUE,
+    UPDATE_COMPLEX_DATA_TYPE,
+    UPDATE_COMPLEX_DEFAULT_VALUE;
 
     boolean isAddAction() {
-      return this == ADD_DIMENSION || this == ADD_METRIC || this == ADD_DATE_TIME;
+      return this == ADD_DIMENSION || this == ADD_METRIC || this == ADD_DATE_TIME || this == ADD_COMPLEX;
     }
 
     boolean isUpdateAction() {
@@ -110,31 +120,35 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     }
 
     boolean isRemoveAction() {
-      return this == REMOVE_DIMENSION || this == REMOVE_METRIC || this == REMOVE_DATE_TIME;
+      return this == REMOVE_DIMENSION || this == REMOVE_METRIC || this == REMOVE_DATE_TIME || this == REMOVE_COMPLEX;
     }
   }
 
   protected final File _indexDir;
-  protected final SegmentMetadataImpl _segmentMetadata;
+  protected final SegmentMetadata _segmentMetadata;
   protected final IndexLoadingConfig _indexLoadingConfig;
   protected final Schema _schema;
   protected final SegmentDirectory.Writer _segmentWriter;
 
-  private final PropertiesConfiguration _segmentProperties;
+  // NOTE: _segmentProperties shouldn't be used when checking whether default column need to be created because at that
+  //       time _segmentMetadata might not be loaded from a local file
+  private PropertiesConfiguration _segmentProperties;
 
-  protected BaseDefaultColumnHandler(File indexDir, SegmentMetadataImpl segmentMetadata,
+  protected BaseDefaultColumnHandler(File indexDir, SegmentMetadata segmentMetadata,
       IndexLoadingConfig indexLoadingConfig, Schema schema, SegmentDirectory.Writer segmentWriter) {
     _indexDir = indexDir;
     _segmentMetadata = segmentMetadata;
     _indexLoadingConfig = indexLoadingConfig;
     _schema = schema;
     _segmentWriter = segmentWriter;
-    _segmentProperties = _segmentMetadata.getPropertiesConfiguration();
   }
 
   @Override
   public boolean needUpdateDefaultColumns() {
     Map<String, DefaultColumnAction> defaultColumnActionMap = computeDefaultColumnActionMap();
+    if (LOGGER.isDebugEnabled()) {
+      LOGGER.debug("Need to update default columns with actionMap: {}", defaultColumnActionMap);
+    }
     return !defaultColumnActionMap.isEmpty();
   }
 
@@ -146,11 +160,15 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
       throws Exception {
     // Compute the action needed for each column.
     Map<String, DefaultColumnAction> defaultColumnActionMap = computeDefaultColumnActionMap();
+    if (LOGGER.isDebugEnabled()) {
+      LOGGER.debug("Update default columns with actionMap: {}", defaultColumnActionMap);
+    }
     if (defaultColumnActionMap.isEmpty()) {
       return;
     }
 
     // Update each default column based on the default column action.
+    _segmentProperties = SegmentMetadataUtils.getPropertiesConfiguration(_segmentMetadata);
     Iterator<Map.Entry<String, DefaultColumnAction>> entryIterator = defaultColumnActionMap.entrySet().iterator();
     while (entryIterator.hasNext()) {
       Map.Entry<String, DefaultColumnAction> entry = entryIterator.next();
@@ -168,6 +186,9 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     List<String> dateTimeColumns =
         LoaderUtils.getStringListFromSegmentProperties(V1Constants.MetadataKeys.Segment.DATETIME_COLUMNS,
             _segmentProperties);
+    List<String> complexColumns =
+        LoaderUtils.getStringListFromSegmentProperties(V1Constants.MetadataKeys.Segment.COMPLEX_COLUMNS,
+            _segmentProperties);
     for (Map.Entry<String, DefaultColumnAction> entry : defaultColumnActionMap.entrySet()) {
       String column = entry.getKey();
       DefaultColumnAction action = entry.getValue();
@@ -181,6 +202,9 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
         case ADD_DATE_TIME:
           dateTimeColumns.add(column);
           break;
+        case ADD_COMPLEX:
+          complexColumns.add(column);
+          break;
         case REMOVE_DIMENSION:
           dimensionColumns.remove(column);
           break;
@@ -190,6 +214,9 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
         case REMOVE_DATE_TIME:
           dateTimeColumns.remove(column);
           break;
+        case REMOVE_COMPLEX:
+          complexColumns.remove(column);
+          break;
         default:
           break;
       }
@@ -197,14 +224,10 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     _segmentProperties.setProperty(V1Constants.MetadataKeys.Segment.DIMENSIONS, dimensionColumns);
     _segmentProperties.setProperty(V1Constants.MetadataKeys.Segment.METRICS, metricColumns);
     _segmentProperties.setProperty(V1Constants.MetadataKeys.Segment.DATETIME_COLUMNS, dateTimeColumns);
+    _segmentProperties.setProperty(V1Constants.MetadataKeys.Segment.COMPLEX_COLUMNS, complexColumns);
 
-    // Save the new metadata.
-    //
-    // Commons Configuration 1.10 does not support file path containing '%'.
-    // Explicitly providing the output stream for save bypasses the problem. */
-    try (FileOutputStream fileOutputStream = new FileOutputStream(_segmentProperties.getFile())) {
-      _segmentProperties.save(fileOutputStream);
-    }
+    // Save the new metadata
+    SegmentMetadataUtils.savePropertiesConfiguration(_segmentProperties, _segmentMetadata.getIndexDir());
   }
 
   /**
@@ -218,10 +241,11 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     Map<String, DefaultColumnAction> defaultColumnActionMap = new HashMap<>();
 
     // Compute ADD and UPDATE actions.
-    Collection<String> columnsInSchema = _schema.getPhysicalColumnNames();
-    for (String column : columnsInSchema) {
-      FieldSpec fieldSpecInSchema = _schema.getFieldSpecFor(column);
-      Preconditions.checkNotNull(fieldSpecInSchema);
+    for (FieldSpec fieldSpecInSchema : _schema.getAllFieldSpecs()) {
+      if (fieldSpecInSchema.isVirtualColumn()) {
+        continue;
+      }
+      String column = fieldSpecInSchema.getName();
       FieldSpec.FieldType fieldTypeInSchema = fieldSpecInSchema.getFieldType();
       ColumnMetadata columnMetadata = _segmentMetadata.getColumnMetadataFor(column);
 
@@ -273,6 +297,12 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
           } else if (!defaultValueInSchema.equals(defaultValueInMetadata)) {
             defaultColumnActionMap.put(column, DefaultColumnAction.UPDATE_DATE_TIME_DEFAULT_VALUE);
           }
+        } else if (fieldTypeInMetadata == COMPLEX) {
+          if (dataTypeInMetadata != dataTypeInSchema) {
+            defaultColumnActionMap.put(column, DefaultColumnAction.UPDATE_COMPLEX_DATA_TYPE);
+          } else if (!defaultValueInSchema.equals(defaultValueInMetadata)) {
+            defaultColumnActionMap.put(column, DefaultColumnAction.UPDATE_COMPLEX_DEFAULT_VALUE);
+          }
         }
       } else {
         // Column does not exist in the segment, add default value for it.
@@ -287,6 +317,9 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
           case DATE_TIME:
             defaultColumnActionMap.put(column, DefaultColumnAction.ADD_DATE_TIME);
             break;
+          case COMPLEX:
+            defaultColumnActionMap.put(column, DefaultColumnAction.ADD_COMPLEX);
+            break;
           default:
             LOGGER.warn("Skip adding default column for column: {} with field type: {}", column, fieldTypeInSchema);
             break;
@@ -295,21 +328,19 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     }
 
     // Compute REMOVE actions.
-    Set<String> columnsInMetadata = _segmentMetadata.getAllColumns();
-    for (String column : columnsInMetadata) {
-      if (!columnsInSchema.contains(column)) {
-        ColumnMetadata columnMetadata = _segmentMetadata.getColumnMetadataFor(column);
-
-        // Only remove auto-generated columns.
-        if (columnMetadata.isAutoGenerated()) {
-          FieldSpec.FieldType fieldTypeInMetadata = columnMetadata.getFieldSpec().getFieldType();
-          if (fieldTypeInMetadata == DIMENSION) {
-            defaultColumnActionMap.put(column, DefaultColumnAction.REMOVE_DIMENSION);
-          } else if (fieldTypeInMetadata == METRIC) {
-            defaultColumnActionMap.put(column, DefaultColumnAction.REMOVE_METRIC);
-          } else if (fieldTypeInMetadata == DATE_TIME) {
-            defaultColumnActionMap.put(column, DefaultColumnAction.REMOVE_DATE_TIME);
-          }
+    for (ColumnMetadata columnMetadata : _segmentMetadata.getColumnMetadataMap().values()) {
+      String column = columnMetadata.getColumnName();
+      // Only remove auto-generated columns
+      if (!_schema.hasColumn(column) && columnMetadata.isAutoGenerated()) {
+        FieldSpec.FieldType fieldTypeInMetadata = columnMetadata.getFieldSpec().getFieldType();
+        if (fieldTypeInMetadata == DIMENSION) {
+          defaultColumnActionMap.put(column, DefaultColumnAction.REMOVE_DIMENSION);
+        } else if (fieldTypeInMetadata == METRIC) {
+          defaultColumnActionMap.put(column, DefaultColumnAction.REMOVE_METRIC);
+        } else if (fieldTypeInMetadata == DATE_TIME) {
+          defaultColumnActionMap.put(column, DefaultColumnAction.REMOVE_DATE_TIME);
+        } else if (fieldTypeInMetadata == COMPLEX) {
+          defaultColumnActionMap.put(column, DefaultColumnAction.REMOVE_COMPLEX);
         }
       }
     }
@@ -334,8 +365,8 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     String segmentName = _segmentMetadata.getName();
     LOGGER.info("Removing default column: {} from segment: {}", column, segmentName);
     // Delete existing dictionary and forward index
-    _segmentWriter.removeIndex(column, ColumnIndexType.DICTIONARY);
-    _segmentWriter.removeIndex(column, ColumnIndexType.FORWARD_INDEX);
+    _segmentWriter.removeIndex(column, StandardIndexes.dictionary());
+    _segmentWriter.removeIndex(column, StandardIndexes.forward());
     // Remove the column metadata
     SegmentColumnarIndexCreator.removeColumnMetadataInfo(_segmentProperties, column);
     LOGGER.info("Removed default column: {} from segment: {}", column, segmentName);
@@ -348,6 +379,7 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
   protected boolean createColumnV1Indices(String column)
       throws Exception {
     TableConfig tableConfig = _indexLoadingConfig.getTableConfig();
+    boolean errorOnFailure = _indexLoadingConfig.isErrorOnColumnBuildFailure();
     if (tableConfig != null && tableConfig.getIngestionConfig() != null
         && tableConfig.getIngestionConfig().getTransformConfigs() != null) {
       List<TransformConfig> transformConfigs = tableConfig.getIngestionConfig().getTransformConfigs();
@@ -363,38 +395,41 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
           for (String argument : arguments) {
             ColumnMetadata columnMetadata = _segmentMetadata.getColumnMetadataFor(argument);
             if (columnMetadata == null) {
-              LOGGER.warn("Skip creating derived column: {} because argument: {} does not exist in the segment", column,
-                  argument);
-              return false;
+              LOGGER.warn("Assigning default value to derived column: {} because argument: {} does not exist in the "
+                  + "segment", column, argument);
+              createDefaultValueColumnV1Indices(column);
+              return true;
             }
             // TODO: Support creation of derived columns from forward index disabled columns
-            if (!_segmentWriter.hasIndexFor(argument, ColumnIndexType.FORWARD_INDEX)) {
+            if (!_segmentWriter.hasIndexFor(argument, StandardIndexes.forward())) {
               throw new UnsupportedOperationException(String.format("Operation not supported! Cannot create a derived "
-                  + "column %s because argument: %s does not have a forward index. Enable forward index and "
-                  + "refresh/backfill the segments to create a derived column from source column %s", column, argument,
+                      + "column %s because argument: %s does not have a forward index. Enable forward index and "
+                      + "refresh/backfill the segments to create a derived column from source column %s", column,
+                  argument,
                   argument));
             }
             argumentsMetadata.add(columnMetadata);
           }
 
-          // TODO: Support raw derived column
-          if (_indexLoadingConfig.getNoDictionaryColumns().contains(column)) {
-            LOGGER.warn("Skip creating raw derived column: {}", column);
-            return false;
-          }
-
           // TODO: Support forward index disabled derived column
-          if (_indexLoadingConfig.getForwardIndexDisabledColumns().contains(column)) {
+          if (isForwardIndexDisabled(column)) {
             LOGGER.warn("Skip creating forward index disabled derived column: {}", column);
+            if (errorOnFailure) {
+              throw new UnsupportedOperationException(
+                  String.format("Failed to create forward index disabled derived column: %s", column));
+            }
             return false;
           }
 
           try {
-            createDerivedColumnV1Indices(column, functionEvaluator, argumentsMetadata);
+            createDerivedColumnV1Indices(column, functionEvaluator, argumentsMetadata, errorOnFailure);
             return true;
           } catch (Exception e) {
             LOGGER.error("Caught exception while creating derived column: {} with transform function: {}", column,
                 transformFunction, e);
+            if (errorOnFailure) {
+              throw e;
+            }
             return false;
           }
         }
@@ -406,38 +441,11 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
   }
 
   /**
-   * Validates the compatibility of the indexes if the column has the forward index disabled. Throws exceptions due to
-   * compatibility mismatch. The checks performed are:
-   *     - Validate dictionary is enabled.
-   *     - Validate inverted index is enabled.
-   *     - Validate that either no range index exists for column or the range index version is at least 2 and isn't a
-   *       multi-value column (since multi-value defaults to index v1).
-   */
-  protected void validateForwardIndexDisabledConfigsIfPresent(String column, boolean forwardIndexDisabled) {
-    if (!forwardIndexDisabled) {
-      return;
-    }
-    FieldSpec fieldSpec = _schema.getFieldSpecFor(column);
-    Preconditions.checkState(_indexLoadingConfig.getInvertedIndexColumns().contains(column),
-          String.format("Inverted index must be enabled for forward index disabled column: %s", column));
-      Preconditions.checkState(!_indexLoadingConfig.getNoDictionaryColumns().contains(column),
-          String.format("Dictionary disabled column: %s cannot disable the forward index", column));
-      if (_indexLoadingConfig.getRangeIndexColumns() != null
-          && _indexLoadingConfig.getRangeIndexColumns().contains(column)) {
-        Preconditions.checkState(fieldSpec.isSingleValueField(),
-            String.format("Multi-value column with range index: %s cannot disable the forward index", column));
-        Preconditions.checkState(_indexLoadingConfig.getRangeIndexVersion() == BitSlicedRangeIndexCreator.VERSION,
-            String.format("Single-value column with range index version < 2: %s cannot disable the forward index",
-                column));
-      }
-  }
-
-  /**
    * Check and return whether the forward index is disabled for a given column
    */
   protected boolean isForwardIndexDisabled(String column) {
-    return _indexLoadingConfig.getForwardIndexDisabledColumns() != null
-        && _indexLoadingConfig.getForwardIndexDisabledColumns().contains(column);
+    FieldIndexConfigs fieldIndexConfig = _indexLoadingConfig.getFieldIndexConfig(column);
+    return fieldIndexConfig != null && fieldIndexConfig.getConfig(StandardIndexes.forward()).isDisabled();
   }
 
   /**
@@ -453,9 +461,6 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     Object defaultValue = fieldSpec.getDefaultNullValue();
     boolean isSingleValue = fieldSpec.isSingleValueField();
     int maxNumberOfMultiValueElements = isSingleValue ? 0 : 1;
-    boolean forwardIndexDisabled = isForwardIndexDisabled(column);
-
-    validateForwardIndexDisabledConfigsIfPresent(column, forwardIndexDisabled);
 
     Object sortedArray;
     switch (dataType.getStoredType()) {
@@ -501,7 +506,7 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
         new ColumnIndexCreationInfo(columnStatistics, true/*createDictionary*/, false, true/*isAutoGenerated*/,
             defaultValue/*defaultNullValue*/);
 
-    // Create dictionary.
+    // We always create a dictionary for default value columns.
     // We will have only one value in the dictionary.
     int dictionaryElementSize;
     try (SegmentDictionaryCreator creator = new SegmentDictionaryCreator(fieldSpec, _indexDir, false)) {
@@ -522,12 +527,14 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     } else {
       // Multi-value column.
 
+      boolean forwardIndexDisabled = isForwardIndexDisabled(column);
       if (forwardIndexDisabled) {
         // Generate an inverted index instead of forward index for multi-value columns when forward index is disabled
         try (DictionaryBasedInvertedIndexCreator creator = new OffHeapBitmapInvertedIndexCreator(_indexDir, fieldSpec,
             1, totalDocs, totalDocs)) {
+          int[] dictIds = new int[]{0};
           for (int docId = 0; docId < totalDocs; docId++) {
-            creator.add(0);
+            creator.add(dictIds, 1);
           }
           creator.seal();
         }
@@ -543,10 +550,8 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
       }
     }
 
-    if (_indexLoadingConfig.getTableConfig() != null
-        && _indexLoadingConfig.getTableConfig().getIndexingConfig() != null
-        && _indexLoadingConfig.getTableConfig().getIndexingConfig().isNullHandlingEnabled()) {
-      if (!_segmentWriter.hasIndexFor(column, ColumnIndexType.NULLVALUE_VECTOR)) {
+    if (isNullable(fieldSpec)) {
+      if (!_segmentWriter.hasIndexFor(column, StandardIndexes.nullValueVector())) {
         try (NullValueVectorCreator nullValueVectorCreator =
             new NullValueVectorCreator(_indexDir, fieldSpec.getName())) {
           for (int docId = 0; docId < totalDocs; docId++) {
@@ -563,15 +568,24 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
         fieldSpec, true/*hasDictionary*/, dictionaryElementSize);
   }
 
+  private boolean isNullable(FieldSpec fieldSpec) {
+    if (_schema.isEnableColumnBasedNullHandling()) {
+      return fieldSpec.isNullable();
+    } else {
+      return _indexLoadingConfig.getTableConfig() != null
+          && _indexLoadingConfig.getTableConfig().getIndexingConfig() != null
+          && _indexLoadingConfig.getTableConfig().getIndexingConfig().isNullHandlingEnabled();
+    }
+  }
+
   /**
    * Helper method to create the V1 indices (dictionary and forward index) for a column with derived values.
    * TODO:
    *   - Support chained derived column
-   *   - Support raw derived column
    *   - Support forward index disabled derived column
    */
   private void createDerivedColumnV1Indices(String column, FunctionEvaluator functionEvaluator,
-      List<ColumnMetadata> argumentsMetadata)
+      List<ColumnMetadata> argumentsMetadata, boolean errorOnFailure)
       throws Exception {
     // Initialize value readers for all arguments
     int numArguments = argumentsMetadata.size();
@@ -579,6 +593,17 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     for (ColumnMetadata argumentMetadata : argumentsMetadata) {
       valueReaders.add(new ValueReader(argumentMetadata));
     }
+
+    FieldSpec fieldSpec = _schema.getFieldSpecFor(column);
+    NullValueVectorCreator nullValueVectorCreator = null;
+    if (isNullable(fieldSpec)) {
+      nullValueVectorCreator = new NullValueVectorCreator(_indexDir, fieldSpec.getName());
+    }
+
+    // Just log the first function evaluation error
+    int functionEvaluateErrorCount = 0;
+    Exception functionEvalError = null;
+    Object[] inputValuesWithError = null;
 
     try {
       // Calculate the values for the derived column
@@ -590,16 +615,54 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
         for (int j = 0; j < numArguments; j++) {
           inputValues[j] = valueReaders.get(j).getValue(i);
         }
-        Object outputValue = functionEvaluator.evaluate(inputValues);
-        outputValues[i] = outputValue;
-        if (outputValueType == null) {
+
+        Object outputValue = null;
+        try {
+          outputValue = functionEvaluator.evaluate(inputValues);
+        } catch (Exception e) {
+          if (!errorOnFailure) {
+            LOGGER.debug("Encountered an exception while evaluating function {} for derived column {} with "
+                + "arguments: {}", functionEvaluator, column, Arrays.toString(inputValues), e);
+            functionEvaluateErrorCount++;
+            if (functionEvalError == null) {
+              functionEvalError = e;
+              inputValuesWithError = Arrays.copyOf(inputValues, inputValues.length);
+            }
+          } else {
+            throw e;
+          }
+        }
+
+        if (outputValue == null) {
+          outputValue = fieldSpec.getDefaultNullValue();
+          if (nullValueVectorCreator != null) {
+            // Add doc to null vector index if the column / table has null handling enabled
+            nullValueVectorCreator.setNull(i);
+          }
+        } else if (outputValueType == null) {
           Class<?> outputValueClass = outputValue.getClass();
-          outputValueType = FunctionUtils.getParameterType(outputValueClass);
+          outputValueType = FunctionUtils.getArgumentType(outputValueClass);
           Preconditions.checkState(outputValueType != null, "Unsupported output value class: %s", outputValueClass);
         }
+
+        outputValues[i] = outputValue;
       }
 
-      FieldSpec fieldSpec = _schema.getFieldSpecFor(column);
+      if (functionEvaluateErrorCount > 0) {
+        LOGGER.warn("Caught {} exceptions while evaluating derived column: {} with function: {}. The first input value "
+                + "tuple that led to an error is: {}", functionEvaluateErrorCount, column, functionEvaluator,
+            Arrays.toString(inputValuesWithError), functionEvalError);
+      }
+
+      if (nullValueVectorCreator != null) {
+        nullValueVectorCreator.seal();
+      }
+
+      FieldIndexConfigs fieldIndexConfigs = _indexLoadingConfig.getFieldIndexConfig(column);
+      DictionaryIndexConfig dictionaryIndexConfig =
+          fieldIndexConfigs != null ? fieldIndexConfigs.getConfig(StandardIndexes.dictionary())
+              : DictionaryIndexConfig.DEFAULT;
+      boolean createDictionary = dictionaryIndexConfig.isEnabled();
       StatsCollectorConfig statsCollectorConfig =
           new StatsCollectorConfig(_indexLoadingConfig.getTableConfig(), _schema, null);
       ColumnIndexCreationInfo indexCreationInfo;
@@ -607,16 +670,8 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
       switch (fieldSpec.getDataType().getStoredType()) {
         case INT: {
           for (int i = 0; i < numDocs; i++) {
-            Object outputValue = outputValues[i];
-            if (isSingleValue) {
-              outputValues[i] = outputValueType.toInt(outputValue);
-            } else {
-              Integer[] values = outputValueType.toIntegerArray(outputValue);
-              if (values.length == 0) {
-                values = new Integer[]{(Integer) fieldSpec.getDefaultNullValue()};
-              }
-              outputValues[i] = values;
-            }
+            outputValues[i] = getIntOutputValue(outputValues[i], isSingleValue, outputValueType,
+                (Integer) fieldSpec.getDefaultNullValue(), createDictionary);
           }
           IntColumnPreIndexStatsCollector statsCollector =
               new IntColumnPreIndexStatsCollector(column, statsCollectorConfig);
@@ -625,21 +680,14 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
           }
           statsCollector.seal();
           indexCreationInfo =
-              new ColumnIndexCreationInfo(statsCollector, true, false, true, fieldSpec.getDefaultNullValue());
+              new ColumnIndexCreationInfo(statsCollector, createDictionary, false, true,
+                  fieldSpec.getDefaultNullValue());
           break;
         }
         case LONG: {
           for (int i = 0; i < numDocs; i++) {
-            Object outputValue = outputValues[i];
-            if (isSingleValue) {
-              outputValues[i] = outputValueType.toLong(outputValue);
-            } else {
-              Long[] values = outputValueType.toLongArray(outputValue);
-              if (values.length == 0) {
-                values = new Long[]{(Long) fieldSpec.getDefaultNullValue()};
-              }
-              outputValues[i] = values;
-            }
+            outputValues[i] = getLongOutputValue(outputValues[i], isSingleValue, outputValueType,
+                (Long) fieldSpec.getDefaultNullValue(), createDictionary);
           }
           LongColumnPreIndexStatsCollector statsCollector =
               new LongColumnPreIndexStatsCollector(column, statsCollectorConfig);
@@ -648,21 +696,14 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
           }
           statsCollector.seal();
           indexCreationInfo =
-              new ColumnIndexCreationInfo(statsCollector, true, false, true, fieldSpec.getDefaultNullValue());
+              new ColumnIndexCreationInfo(statsCollector, createDictionary, false, true,
+                  fieldSpec.getDefaultNullValue());
           break;
         }
         case FLOAT: {
           for (int i = 0; i < numDocs; i++) {
-            Object outputValue = outputValues[i];
-            if (isSingleValue) {
-              outputValues[i] = outputValueType.toFloat(outputValue);
-            } else {
-              Float[] values = outputValueType.toFloatArray(outputValue);
-              if (values.length == 0) {
-                values = new Float[]{(Float) fieldSpec.getDefaultNullValue()};
-              }
-              outputValues[i] = values;
-            }
+            outputValues[i] = getFloatOutputValue(outputValues[i], isSingleValue, outputValueType,
+                (Float) fieldSpec.getDefaultNullValue(), createDictionary);
           }
           FloatColumnPreIndexStatsCollector statsCollector =
               new FloatColumnPreIndexStatsCollector(column, statsCollectorConfig);
@@ -671,21 +712,14 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
           }
           statsCollector.seal();
           indexCreationInfo =
-              new ColumnIndexCreationInfo(statsCollector, true, false, true, fieldSpec.getDefaultNullValue());
+              new ColumnIndexCreationInfo(statsCollector, createDictionary, false, true,
+                  fieldSpec.getDefaultNullValue());
           break;
         }
         case DOUBLE: {
           for (int i = 0; i < numDocs; i++) {
-            Object outputValue = outputValues[i];
-            if (isSingleValue) {
-              outputValues[i] = outputValueType.toDouble(outputValue);
-            } else {
-              Double[] values = outputValueType.toDoubleArray(outputValue);
-              if (values.length == 0) {
-                values = new Double[]{(Double) fieldSpec.getDefaultNullValue()};
-              }
-              outputValues[i] = values;
-            }
+            outputValues[i] = getDoubleOutputValue(outputValues[i], isSingleValue, outputValueType,
+                (Double) fieldSpec.getDefaultNullValue(), createDictionary);
           }
           DoubleColumnPreIndexStatsCollector statsCollector =
               new DoubleColumnPreIndexStatsCollector(column, statsCollectorConfig);
@@ -694,13 +728,20 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
           }
           statsCollector.seal();
           indexCreationInfo =
-              new ColumnIndexCreationInfo(statsCollector, true, false, true, fieldSpec.getDefaultNullValue());
+              new ColumnIndexCreationInfo(statsCollector, createDictionary, false, true,
+                  fieldSpec.getDefaultNullValue());
           break;
         }
         case BIG_DECIMAL: {
           for (int i = 0; i < numDocs; i++) {
             Preconditions.checkState(isSingleValue, "MV BIG_DECIMAL is not supported");
-            outputValues[i] = outputValueType.toBigDecimal(outputValues[i]);
+
+            // Skip type conversion if output value is already the required type. If outputValueType is null, that
+            // means the transform function returned null for all docs and in that case outputValue will be the
+            // default null value for the field type
+            if (outputValueType != null && !(outputValues[i] instanceof BigDecimal)) {
+              outputValues[i] = outputValueType.toBigDecimal(outputValues[i]);
+            }
           }
           DoubleColumnPreIndexStatsCollector statsCollector =
               new DoubleColumnPreIndexStatsCollector(column, statsCollectorConfig);
@@ -709,21 +750,14 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
           }
           statsCollector.seal();
           indexCreationInfo =
-              new ColumnIndexCreationInfo(statsCollector, true, false, true, fieldSpec.getDefaultNullValue());
+              new ColumnIndexCreationInfo(statsCollector, createDictionary, false, true,
+                  fieldSpec.getDefaultNullValue());
           break;
         }
         case STRING: {
           for (int i = 0; i < numDocs; i++) {
-            Object outputValue = outputValues[i];
-            if (isSingleValue) {
-              outputValues[i] = outputValueType.toString(outputValue);
-            } else {
-              String[] values = outputValueType.toStringArray(outputValue);
-              if (values.length == 0) {
-                values = new String[]{(String) fieldSpec.getDefaultNullValue()};
-              }
-              outputValues[i] = values;
-            }
+            outputValues[i] = getStringOutputValue(outputValues[i], isSingleValue, outputValueType,
+                (String) fieldSpec.getDefaultNullValue());
           }
           StringColumnPreIndexStatsCollector statsCollector =
               new StringColumnPreIndexStatsCollector(column, statsCollectorConfig);
@@ -731,23 +765,14 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
             statsCollector.collect(value);
           }
           statsCollector.seal();
-          indexCreationInfo = new ColumnIndexCreationInfo(statsCollector, true,
-              _indexLoadingConfig.getVarLengthDictionaryColumns().contains(column), true,
-              fieldSpec.getDefaultNullValue());
+          indexCreationInfo = new ColumnIndexCreationInfo(statsCollector, createDictionary,
+              dictionaryIndexConfig.getUseVarLengthDictionary(), true, fieldSpec.getDefaultNullValue());
           break;
         }
         case BYTES: {
           for (int i = 0; i < numDocs; i++) {
-            Object outputValue = outputValues[i];
-            if (isSingleValue) {
-              outputValues[i] = outputValueType.toBytes(outputValue);
-            } else {
-              byte[][] values = outputValueType.toBytesArray(outputValue);
-              if (values.length == 0) {
-                values = new byte[][]{(byte[]) fieldSpec.getDefaultNullValue()};
-              }
-              outputValues[i] = values;
-            }
+            outputValues[i] = getBytesOutputValue(outputValues[i], isSingleValue, outputValueType,
+                (byte[]) fieldSpec.getDefaultNullValue());
           }
           BytesColumnPredIndexStatsCollector statsCollector =
               new BytesColumnPredIndexStatsCollector(column, statsCollectorConfig);
@@ -759,49 +784,430 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
           if (!statsCollector.isFixedLength()) {
             useVarLengthDictionary = true;
           } else {
-            useVarLengthDictionary = _indexLoadingConfig.getVarLengthDictionaryColumns().contains(column);
+            useVarLengthDictionary = dictionaryIndexConfig.getUseVarLengthDictionary();
           }
-          indexCreationInfo = new ColumnIndexCreationInfo(statsCollector, true, useVarLengthDictionary, true,
-              new ByteArray((byte[]) fieldSpec.getDefaultNullValue()));
+          indexCreationInfo =
+              new ColumnIndexCreationInfo(statsCollector, createDictionary, useVarLengthDictionary, true,
+                  new ByteArray((byte[]) fieldSpec.getDefaultNullValue()));
           break;
         }
         default:
           throw new IllegalStateException();
       }
 
-      // Create dictionary
-      try (SegmentDictionaryCreator dictionaryCreator = new SegmentDictionaryCreator(fieldSpec, _indexDir,
-          indexCreationInfo.isUseVarLengthDictionary())) {
-        dictionaryCreator.build(indexCreationInfo.getSortedUniqueElementsArray());
-
-        // Create forward index
-        int cardinality = indexCreationInfo.getDistinctValueCount();
-        if (isSingleValue) {
-          try (ForwardIndexCreator forwardIndexCreator = indexCreationInfo.isSorted()
-              ? new SingleValueSortedForwardIndexCreator(_indexDir, column, cardinality)
-              : new SingleValueUnsortedForwardIndexCreator(_indexDir, column, cardinality, numDocs)) {
-            for (int i = 0; i < numDocs; i++) {
-              forwardIndexCreator.putDictId(dictionaryCreator.indexOfSV(outputValues[i]));
-            }
-          }
-        } else {
-          try (ForwardIndexCreator forwardIndexCreator = new MultiValueUnsortedForwardIndexCreator(_indexDir, column,
-              cardinality, numDocs, indexCreationInfo.getTotalNumberOfEntries())) {
-            for (int i = 0; i < numDocs; i++) {
-              forwardIndexCreator.putDictIdMV(dictionaryCreator.indexOfMV(outputValues[i]));
-            }
-          }
-        }
-
-        // Add the column metadata
-        SegmentColumnarIndexCreator.addColumnMetadataInfo(_segmentProperties, column, indexCreationInfo, numDocs,
-            fieldSpec, true, dictionaryCreator.getNumBytesPerEntry());
+      if (createDictionary) {
+        createDerivedColumnForwardIndexWithDictionary(column, fieldSpec, outputValues, indexCreationInfo);
+      } else {
+        createDerivedColumnForwardIndexWithoutDictionary(column, fieldSpec, outputValues, indexCreationInfo);
       }
     } finally {
       for (ValueReader valueReader : valueReaders) {
         valueReader.close();
       }
     }
+  }
+
+  /**
+   * Helper method to convert the output of a transform function to the appropriate type for an SV or MV
+   * {@link FieldSpec.DataType#INT} field
+   *
+   * @param outputValue the output of the transform function
+   * @param isSingleValue true if the field (column) is single-valued
+   * @param outputValueType the output value type for the transform function; can be null (in which case,
+   *                        the {@code outputValue} should be the field's default null value)
+   * @param defaultNullValue the default null value for the field
+   * @param dictionary true if the column has a dictionary. For an MV field, this results in a primitive array being
+   *                   returned rather than an array of the primitive wrapper class
+   * @return the converted output value (either an Integer, an Integer[] or an int[])
+   */
+  private Object getIntOutputValue(Object outputValue, boolean isSingleValue, PinotDataType outputValueType,
+      Integer defaultNullValue, boolean dictionary) {
+    if (isSingleValue) {
+      // Skip type conversion if output value is already the required type. The outputValueType is guaranteed to be
+      // non-null if outputValue is not the default null value
+      if (outputValue instanceof Integer) {
+        return outputValue;
+      } else {
+        return outputValueType.toInt(outputValue);
+      }
+    } else {
+      if (dictionary) {
+        // Use array of primitive wrapper class for dictionary
+        if (outputValue instanceof Integer) {
+          return new Integer[]{(Integer) outputValue};
+        } else {
+          Integer[] values = outputValueType.toIntegerArray(outputValue);
+          if (values.length == 0) {
+            values = new Integer[]{defaultNullValue};
+          }
+          return values;
+        }
+      } else {
+        // Use primitive array for raw encoded
+        if (outputValue instanceof Integer) {
+          return new int[]{(Integer) outputValue};
+        } else {
+          int[] values = outputValueType.toPrimitiveIntArray(outputValue);
+          if (values.length == 0) {
+            values = new int[]{defaultNullValue};
+          }
+          return values;
+        }
+      }
+    }
+  }
+
+  /**
+   * Helper method to convert the output of a transform function to the appropriate type for an SV or MV
+   * {@link FieldSpec.DataType#LONG} field
+   *
+   * @param outputValue the output of the transform function
+   * @param isSingleValue true if the field (column) is single-valued
+   * @param outputValueType the output value type for the transform function; can be null (in which case,
+   *                        the {@code outputValue} should be the field's default null value)
+   * @param defaultNullValue the default null value for the field
+   * @param dictionary true if the column has a dictionary. For an MV field, this results in a primitive array being
+   *                   returned rather than an array of the primitive wrapper class
+   * @return the converted output value (either a Long, a Long[] or a long[])
+   */
+  private Object getLongOutputValue(Object outputValue, boolean isSingleValue, PinotDataType outputValueType,
+      Long defaultNullValue, boolean dictionary) {
+    if (isSingleValue) {
+      // Skip type conversion if output value is already the required type. The outputValueType is guaranteed to be
+      // non-null if outputValue is not the default null value
+      if (outputValue instanceof Long) {
+        return outputValue;
+      } else {
+        return outputValueType.toLong(outputValue);
+      }
+    } else {
+      if (dictionary) {
+        // Use array of primitive wrapper class for dictionary
+        if (outputValue instanceof Long) {
+          return new Long[]{(Long) outputValue};
+        } else {
+          Long[] values = outputValueType.toLongArray(outputValue);
+          if (values.length == 0) {
+            values = new Long[]{defaultNullValue};
+          }
+          return values;
+        }
+      } else {
+        // Use primitive array for raw encoded
+        if (outputValue instanceof Long) {
+          return new long[]{(Long) outputValue};
+        } else {
+          long[] values = outputValueType.toPrimitiveLongArray(outputValue);
+          if (values.length == 0) {
+            values = new long[]{defaultNullValue};
+          }
+          return values;
+        }
+      }
+    }
+  }
+
+  /**
+   * Helper method to convert the output of a transform function to the appropriate type for an SV or MV
+   * {@link FieldSpec.DataType#FLOAT} field
+   *
+   * @param outputValue the output of the transform function
+   * @param isSingleValue true if the field (column) is single-valued
+   * @param outputValueType the output value type for the transform function; can be null (in which case,
+   *                        the {@code outputValue} should be the field's default null value)
+   * @param defaultNullValue the default null value for the field
+   * @param dictionary true if the column has a dictionary. For an MV field, this results in a primitive array being
+   *                   returned rather than an array of the primitive wrapper class
+   * @return the converted output value (either a Float, a Float[] or a float[])
+   */
+  private Object getFloatOutputValue(Object outputValue, boolean isSingleValue, PinotDataType outputValueType,
+      Float defaultNullValue, boolean dictionary) {
+    if (isSingleValue) {
+      // Skip type conversion if output value is already the required type. The outputValueType is guaranteed to be
+      // non-null if outputValue is not the default null value
+      if (outputValue instanceof Float) {
+        return outputValue;
+      } else {
+        return outputValueType.toFloat(outputValue);
+      }
+    } else {
+      if (dictionary) {
+        // Use array of primitive wrapper class for dictionary
+        if (outputValue instanceof Float) {
+          return new Float[]{(Float) outputValue};
+        } else {
+          Float[] values = outputValueType.toFloatArray(outputValue);
+          if (values.length == 0) {
+            values = new Float[]{defaultNullValue};
+          }
+          return values;
+        }
+      } else {
+        // Use primitive array for raw encoded
+        if (outputValue instanceof Float) {
+          return new float[]{(Float) outputValue};
+        } else {
+          float[] values = outputValueType.toPrimitiveFloatArray(outputValue);
+          if (values.length == 0) {
+            values = new float[]{defaultNullValue};
+          }
+          return values;
+        }
+      }
+    }
+  }
+
+  /**
+   * Helper method to convert the output of a transform function to the appropriate type for an SV or MV
+   * {@link FieldSpec.DataType#DOUBLE} field
+   *
+   * @param outputValue the output of the transform function
+   * @param isSingleValue true if the field (column) is single-valued
+   * @param outputValueType the output value type for the transform function; can be null (in which case,
+   *                        the {@code outputValue} should be the field's default null value)
+   * @param defaultNullValue the default null value for the field
+   * @param dictionary true if the column has a dictionary. For an MV field, this results in a primitive array being
+   *                   returned rather than an array of the primitive wrapper class
+   * @return the converted output value (either a Double, a Double[] or a double[])
+   */
+  private Object getDoubleOutputValue(Object outputValue, boolean isSingleValue, PinotDataType outputValueType,
+      Double defaultNullValue, boolean dictionary) {
+    if (isSingleValue) {
+      // Skip type conversion if output value is already the required type. The outputValueType is guaranteed to be
+      // non-null if outputValue is not the default null value
+      if (outputValue instanceof Double) {
+        return outputValue;
+      } else {
+        return outputValueType.toDouble(outputValue);
+      }
+    } else {
+      if (dictionary) {
+        // Use array of primitive wrapper class for dictionary
+        if (outputValue instanceof Double) {
+          return new Double[]{(Double) outputValue};
+        } else {
+          Double[] values = outputValueType.toDoubleArray(outputValue);
+          if (values.length == 0) {
+            values = new Double[]{defaultNullValue};
+          }
+          return values;
+        }
+      } else {
+        // Use primitive array for raw encoded
+        if (outputValue instanceof Double) {
+          return new double[]{(double) outputValue};
+        } else {
+          double[] values = outputValueType.toPrimitiveDoubleArray(outputValue);
+          if (values.length == 0) {
+            values = new double[]{defaultNullValue};
+          }
+          return values;
+        }
+      }
+    }
+  }
+
+  /**
+   * Helper method to convert the output of a transform function to the appropriate type for an SV or MV
+   * {@link FieldSpec.DataType#STRING} field
+   *
+   * @param outputValue the output of the transform function
+   * @param isSingleValue true if the field (column) is single-valued
+   * @param outputValueType the output value type for the transform function; can be null (in which case,
+   *                        the {@code outputValue} should be the field's default null value)
+   * @param defaultNullValue the default null value for the field
+   * @return the converted output value (either a String or a String[])
+   */
+  private Object getStringOutputValue(Object outputValue, boolean isSingleValue, PinotDataType outputValueType,
+      String defaultNullValue) {
+    if (isSingleValue) {
+      // Skip type conversion if output value is already the required type. The outputValueType is guaranteed to be
+      // non-null if outputValue is not the default null value
+      if (outputValue instanceof String) {
+        return outputValue;
+      } else {
+        return outputValueType.toString(outputValue);
+      }
+    } else {
+      if (outputValue instanceof String) {
+        return new String[]{(String) outputValue};
+      } else {
+        String[] values = outputValueType.toStringArray(outputValue);
+        if (values.length == 0) {
+          values = new String[]{defaultNullValue};
+        }
+        return values;
+      }
+    }
+  }
+
+  /**
+   * Helper method to convert the output of a transform function to the appropriate type for an SV or MV
+   * {@link FieldSpec.DataType#BYTES} field
+   *
+   * @param outputValue the output of the transform function
+   * @param isSingleValue true if the field (column) is single-valued
+   * @param outputValueType the output value type for the transform function; can be null (in which case,
+   *                        the {@code outputValue} should be the field's default null value)
+   * @param defaultNullValue the default null value for the field
+   * @return the converted output value (either a byte[] or a byte[][])
+   */
+  private Object getBytesOutputValue(Object outputValue, boolean isSingleValue, PinotDataType outputValueType,
+      byte[] defaultNullValue) {
+    if (isSingleValue) {
+      // Skip type conversion if output value is already the required type. The outputValueType is guaranteed to be
+      // non-null if outputValue is not the default null value
+      if (outputValue instanceof byte[]) {
+        return outputValue;
+      } else {
+        return outputValueType.toBytes(outputValue);
+      }
+    } else {
+      if (outputValue instanceof byte[]) {
+        return new byte[][]{(byte[]) outputValue};
+      } else {
+        byte[][] values = outputValueType.toBytesArray(outputValue);
+        if (values.length == 0) {
+          values = new byte[][]{defaultNullValue};
+        }
+        return values;
+      }
+    }
+  }
+
+  /**
+   * Helper method to create the dictionary and forward indices for a column with derived values.
+   */
+  private void createDerivedColumnForwardIndexWithDictionary(String column, FieldSpec fieldSpec, Object[] outputValues,
+      ColumnIndexCreationInfo indexCreationInfo)
+      throws Exception {
+
+    // Create dictionary
+    try (SegmentDictionaryCreator dictionaryCreator = new SegmentDictionaryCreator(fieldSpec, _indexDir,
+        indexCreationInfo.isUseVarLengthDictionary())) {
+      dictionaryCreator.build(indexCreationInfo.getSortedUniqueElementsArray());
+
+      int numDocs = outputValues.length;
+
+      // Create forward index
+      boolean isSingleValue = fieldSpec.isSingleValueField();
+
+      try (ForwardIndexCreator forwardIndexCreator
+          = getForwardIndexCreator(fieldSpec, indexCreationInfo, numDocs, column, true)) {
+        if (isSingleValue) {
+          for (Object outputValue : outputValues) {
+            forwardIndexCreator.putDictId(dictionaryCreator.indexOfSV(outputValue));
+          }
+        } else {
+          for (Object outputValue : outputValues) {
+            forwardIndexCreator.putDictIdMV(dictionaryCreator.indexOfMV(outputValue));
+          }
+        }
+        // Add the column metadata
+        SegmentColumnarIndexCreator.addColumnMetadataInfo(_segmentProperties, column, indexCreationInfo, numDocs,
+            fieldSpec, true, dictionaryCreator.getNumBytesPerEntry());
+      }
+    }
+  }
+
+  /**
+   * Helper method to create a forward index for a raw encoded column with derived values.
+   */
+  private void createDerivedColumnForwardIndexWithoutDictionary(String column, FieldSpec fieldSpec,
+      Object[] outputValues, ColumnIndexCreationInfo indexCreationInfo)
+      throws Exception {
+
+    // Create forward index
+    int numDocs = outputValues.length;
+    boolean isSingleValue = fieldSpec.isSingleValueField();
+
+    try (ForwardIndexCreator forwardIndexCreator
+        = getForwardIndexCreator(fieldSpec, indexCreationInfo, numDocs, column, false)) {
+      if (isSingleValue) {
+        for (Object outputValue : outputValues) {
+          switch (fieldSpec.getDataType().getStoredType()) {
+            // Casts are safe here because we've already done the conversion in createDerivedColumnV1Indices
+            case INT:
+              forwardIndexCreator.putInt((int) outputValue);
+              break;
+            case LONG:
+              forwardIndexCreator.putLong((long) outputValue);
+              break;
+            case FLOAT:
+              forwardIndexCreator.putFloat((float) outputValue);
+              break;
+            case DOUBLE:
+              forwardIndexCreator.putDouble((double) outputValue);
+              break;
+            case BIG_DECIMAL:
+              forwardIndexCreator.putBigDecimal((BigDecimal) outputValue);
+              break;
+            case STRING:
+              forwardIndexCreator.putString((String) outputValue);
+              break;
+            case BYTES:
+              forwardIndexCreator.putBytes((byte[]) outputValue);
+              break;
+            default:
+              throw new IllegalStateException();
+          }
+        }
+      } else {
+        for (Object outputValue : outputValues) {
+          switch (fieldSpec.getDataType().getStoredType()) {
+            // Casts are safe here because we've already done the conversion in createDerivedColumnV1Indices
+            case INT:
+              forwardIndexCreator.putIntMV((int[]) outputValue);
+              break;
+            case LONG:
+              forwardIndexCreator.putLongMV((long[]) outputValue);
+              break;
+            case FLOAT:
+              forwardIndexCreator.putFloatMV((float[]) outputValue);
+              break;
+            case DOUBLE:
+              forwardIndexCreator.putDoubleMV((double[]) outputValue);
+              break;
+            case STRING:
+              forwardIndexCreator.putStringMV((String[]) outputValue);
+              break;
+            case BYTES:
+              forwardIndexCreator.putBytesMV((byte[][]) outputValue);
+              break;
+            default:
+              throw new IllegalStateException();
+          }
+        }
+      }
+    }
+
+    // Add the column metadata
+    SegmentColumnarIndexCreator.addColumnMetadataInfo(_segmentProperties, column, indexCreationInfo, numDocs,
+        fieldSpec, false, 0);
+  }
+
+  private ForwardIndexCreator getForwardIndexCreator(FieldSpec fieldSpec, ColumnIndexCreationInfo indexCreationInfo,
+      int numDocs, String column, boolean hasDictionary)
+      throws Exception {
+
+    IndexCreationContext indexCreationContext = IndexCreationContext.builder()
+        .withIndexDir(_indexDir)
+        .withFieldSpec(fieldSpec)
+        .withColumnIndexCreationInfo(indexCreationInfo)
+        .withTotalDocs(numDocs)
+        .withDictionary(hasDictionary)
+        .build();
+
+    ForwardIndexConfig forwardIndexConfig = null;
+    FieldIndexConfigs fieldIndexConfig = _indexLoadingConfig.getFieldIndexConfig(column);
+    if (fieldIndexConfig != null) {
+      forwardIndexConfig = fieldIndexConfig.getConfig(new ForwardIndexPlugin().getIndexType());
+    }
+    if (forwardIndexConfig == null) {
+      forwardIndexConfig = new ForwardIndexConfig(false, null, null, null, null, null);
+    }
+
+    return ForwardIndexCreatorFactory.createIndexCreator(indexCreationContext, forwardIndexConfig);
   }
 
   @SuppressWarnings("rawtypes")
@@ -812,9 +1218,9 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
 
     ValueReader(ColumnMetadata columnMetadata)
         throws IOException {
-      _forwardIndexReader = LoaderUtils.getForwardIndexReader(_segmentWriter, columnMetadata);
+      _forwardIndexReader = ForwardIndexType.read(_segmentWriter, columnMetadata);
       if (columnMetadata.hasDictionary()) {
-        _dictionary = LoaderUtils.getDictionary(_segmentWriter, columnMetadata);
+        _dictionary = DictionaryIndexType.read(_segmentWriter, columnMetadata);
       } else {
         _dictionary = null;
       }

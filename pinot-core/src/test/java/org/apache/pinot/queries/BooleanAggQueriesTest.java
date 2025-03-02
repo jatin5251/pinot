@@ -42,6 +42,7 @@ import org.apache.pinot.segment.local.segment.creator.impl.SegmentIndexCreationD
 import org.apache.pinot.segment.local.segment.readers.GenericRowRecordReader;
 import org.apache.pinot.segment.spi.ImmutableSegment;
 import org.apache.pinot.segment.spi.IndexSegment;
+import org.apache.pinot.segment.spi.SegmentContext;
 import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
@@ -146,7 +147,7 @@ public class BooleanAggQueriesTest extends BaseQueriesTest {
     segmentGeneratorConfig.setTableName(RAW_TABLE_NAME);
     segmentGeneratorConfig.setSegmentName(segmentName);
     segmentGeneratorConfig.setOutDir(INDEX_DIR.getPath());
-    segmentGeneratorConfig.setNullHandlingEnabled(true);
+    segmentGeneratorConfig.setDefaultNullHandlingEnabled(true);
 
     SegmentIndexCreationDriverImpl driver = new SegmentIndexCreationDriverImpl();
     driver.init(segmentGeneratorConfig, new GenericRowRecordReader(recordSet));
@@ -165,7 +166,7 @@ public class BooleanAggQueriesTest extends BaseQueriesTest {
 
     PinotQuery serverPinotQuery = GapfillUtils.stripGapfill(pinotQuery);
     QueryContext queryContext = QueryContextConverterUtils.getQueryContext(serverPinotQuery);
-    return (T) PLAN_MAKER.makeSegmentPlanNode(getIndexSegment(), queryContext).run();
+    return (T) PLAN_MAKER.makeSegmentPlanNode(new SegmentContext(getIndexSegment()), queryContext).run();
   }
 
   @Test(dataProvider = "nullHandling")

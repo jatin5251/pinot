@@ -18,20 +18,26 @@
  */
 package org.apache.pinot.segment.local.realtime.impl;
 
+import com.google.common.collect.Maps;
+import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import javax.annotation.Nullable;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
 import org.apache.pinot.segment.local.dedup.PartitionDedupMetadataManager;
-import org.apache.pinot.segment.local.indexsegment.mutable.MutableSegmentImpl;
+import org.apache.pinot.segment.local.segment.index.loader.IndexLoadingConfig;
 import org.apache.pinot.segment.local.upsert.PartitionUpsertMetadataManager;
-import org.apache.pinot.segment.spi.index.creator.H3IndexConfig;
+import org.apache.pinot.segment.spi.index.FieldIndexConfigs;
+import org.apache.pinot.segment.spi.index.FieldIndexConfigsUtil;
+import org.apache.pinot.segment.spi.index.IndexType;
+import org.apache.pinot.segment.spi.index.StandardIndexes;
 import org.apache.pinot.segment.spi.memory.PinotDataBufferMemoryManager;
 import org.apache.pinot.segment.spi.partition.PartitionFunction;
 import org.apache.pinot.spi.config.table.FieldConfig;
-import org.apache.pinot.spi.config.table.JsonIndexConfig;
+import org.apache.pinot.spi.config.table.IndexConfig;
+import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.UpsertConfig;
 import org.apache.pinot.spi.config.table.ingestion.AggregationConfig;
 import org.apache.pinot.spi.data.Schema;
@@ -45,13 +51,7 @@ public class RealtimeSegmentConfig {
   private final String _timeColumnName;
   private final int _capacity;
   private final int _avgNumMultiValues;
-  private final Set<String> _noDictionaryColumns;
-  private final Set<String> _varLengthDictionaryColumns;
-  private final Set<String> _invertedIndexColumns;
-  private final Set<String> _textIndexColumns;
-  private final Set<String> _fstIndexColumns;
-  private final Map<String, JsonIndexConfig> _jsonIndexConfigs;
-  private final Map<String, H3IndexConfig> _h3IndexConfigs;
+  private final Map<String, FieldIndexConfigs> _indexConfigByCol;
   private final SegmentZKMetadata _segmentZKMetadata;
   private final boolean _offHeap;
   private final PinotDataBufferMemoryManager _memoryManager;
@@ -62,25 +62,34 @@ public class RealtimeSegmentConfig {
   private final boolean _aggregateMetrics;
   private final boolean _nullHandlingEnabled;
   private final UpsertConfig.Mode _upsertMode;
-  private final String _upsertComparisonColumn;
+  private final UpsertConfig.ConsistencyMode _upsertConsistencyMode;
+  private final List<String> _upsertComparisonColumns;
+  private final String _upsertDeleteRecordColumn;
+  private final String _upsertOutOfOrderRecordColumn;
+  private final boolean _upsertDropOutOfOrderRecord;
   private final PartitionUpsertMetadataManager _partitionUpsertMetadataManager;
+  private final String _dedupTimeColumn;
   private final PartitionDedupMetadataManager _partitionDedupMetadataManager;
   private final String _consumerDir;
   private final List<FieldConfig> _fieldConfigList;
   private final List<AggregationConfig> _ingestionAggregationConfigs;
 
   // TODO: Clean up this constructor. Most of these things can be extracted from tableConfig.
+
+  /**
+   * @param nullHandlingEnabled whether null handling is enabled by default. This value is only used if
+   * {@link Schema#isEnableColumnBasedNullHandling()} is false.
+   */
   private RealtimeSegmentConfig(String tableNameWithType, String segmentName, String streamName, Schema schema,
-      String timeColumnName, int capacity, int avgNumMultiValues, Set<String> noDictionaryColumns,
-      Set<String> varLengthDictionaryColumns, Set<String> invertedIndexColumns, Set<String> textIndexColumns,
-      Set<String> fstIndexColumns, Map<String, JsonIndexConfig> jsonIndexConfigs,
-      Map<String, H3IndexConfig> h3IndexConfigs, SegmentZKMetadata segmentZKMetadata, boolean offHeap,
-      PinotDataBufferMemoryManager memoryManager, RealtimeSegmentStatsHistory statsHistory, String partitionColumn,
-      PartitionFunction partitionFunction, int partitionId, boolean aggregateMetrics, boolean nullHandlingEnabled,
-      String consumerDir, UpsertConfig.Mode upsertMode, String upsertComparisonColumn,
-      PartitionUpsertMetadataManager partitionUpsertMetadataManager,
-      PartitionDedupMetadataManager partitionDedupMetadataManager, List<FieldConfig> fieldConfigList,
-      List<AggregationConfig> ingestionAggregationConfigs) {
+      String timeColumnName, int capacity, int avgNumMultiValues, Map<String, FieldIndexConfigs> indexConfigByCol,
+      SegmentZKMetadata segmentZKMetadata, boolean offHeap, PinotDataBufferMemoryManager memoryManager,
+      RealtimeSegmentStatsHistory statsHistory, String partitionColumn, PartitionFunction partitionFunction,
+      int partitionId, boolean aggregateMetrics, boolean nullHandlingEnabled, String consumerDir,
+      UpsertConfig.Mode upsertMode, UpsertConfig.ConsistencyMode upsertConsistencyMode,
+      List<String> upsertComparisonColumns, String upsertDeleteRecordColumn, String upsertOutOfOrderRecordColumn,
+      boolean upsertDropOutOfOrderRecord, PartitionUpsertMetadataManager partitionUpsertMetadataManager,
+      String dedupTimeColumn, PartitionDedupMetadataManager partitionDedupMetadataManager,
+      List<FieldConfig> fieldConfigList, List<AggregationConfig> ingestionAggregationConfigs) {
     _tableNameWithType = tableNameWithType;
     _segmentName = segmentName;
     _streamName = streamName;
@@ -88,13 +97,7 @@ public class RealtimeSegmentConfig {
     _timeColumnName = timeColumnName;
     _capacity = capacity;
     _avgNumMultiValues = avgNumMultiValues;
-    _noDictionaryColumns = noDictionaryColumns;
-    _varLengthDictionaryColumns = varLengthDictionaryColumns;
-    _invertedIndexColumns = invertedIndexColumns;
-    _textIndexColumns = textIndexColumns;
-    _fstIndexColumns = fstIndexColumns;
-    _jsonIndexConfigs = jsonIndexConfigs;
-    _h3IndexConfigs = h3IndexConfigs;
+    _indexConfigByCol = indexConfigByCol;
     _segmentZKMetadata = segmentZKMetadata;
     _offHeap = offHeap;
     _memoryManager = memoryManager;
@@ -106,8 +109,13 @@ public class RealtimeSegmentConfig {
     _nullHandlingEnabled = nullHandlingEnabled;
     _consumerDir = consumerDir;
     _upsertMode = upsertMode != null ? upsertMode : UpsertConfig.Mode.NONE;
-    _upsertComparisonColumn = upsertComparisonColumn;
+    _upsertConsistencyMode = upsertConsistencyMode != null ? upsertConsistencyMode : UpsertConfig.ConsistencyMode.NONE;
+    _upsertComparisonColumns = upsertComparisonColumns;
+    _upsertDeleteRecordColumn = upsertDeleteRecordColumn;
+    _upsertOutOfOrderRecordColumn = upsertOutOfOrderRecordColumn;
+    _upsertDropOutOfOrderRecord = upsertDropOutOfOrderRecord;
     _partitionUpsertMetadataManager = partitionUpsertMetadataManager;
+    _dedupTimeColumn = dedupTimeColumn;
     _partitionDedupMetadataManager = partitionDedupMetadataManager;
     _fieldConfigList = fieldConfigList;
     _ingestionAggregationConfigs = ingestionAggregationConfigs;
@@ -141,37 +149,8 @@ public class RealtimeSegmentConfig {
     return _avgNumMultiValues;
   }
 
-  public Set<String> getNoDictionaryColumns() {
-    return _noDictionaryColumns;
-  }
-
-  public Set<String> getVarLengthDictionaryColumns() {
-    return _varLengthDictionaryColumns;
-  }
-
-  public Set<String> getInvertedIndexColumns() {
-    return _invertedIndexColumns;
-  }
-
-  /**
-   * Used by {@link MutableSegmentImpl} when
-   * it starts consuming/indexing.
-   * @return
-   */
-  public Set<String> getTextIndexColumns() {
-    return _textIndexColumns;
-  }
-
-  public Set<String> getFSTIndexColumns() {
-    return _fstIndexColumns;
-  }
-
-  public Map<String, JsonIndexConfig> getJsonIndexConfigs() {
-    return _jsonIndexConfigs;
-  }
-
-  public Map<String, H3IndexConfig> getH3IndexConfigs() {
-    return _h3IndexConfigs;
+  public Map<String, FieldIndexConfigs> getIndexConfigByCol() {
+    return _indexConfigByCol;
   }
 
   public SegmentZKMetadata getSegmentZKMetadata() {
@@ -218,16 +197,36 @@ public class RealtimeSegmentConfig {
     return _upsertMode;
   }
 
+  public UpsertConfig.ConsistencyMode getUpsertConsistencyMode() {
+    return _upsertConsistencyMode;
+  }
+
   public boolean isDedupEnabled() {
     return _partitionDedupMetadataManager != null;
   }
 
-  public String getUpsertComparisonColumn() {
-    return _upsertComparisonColumn;
+  public List<String> getUpsertComparisonColumns() {
+    return _upsertComparisonColumns;
+  }
+
+  public String getUpsertDeleteRecordColumn() {
+    return _upsertDeleteRecordColumn;
+  }
+
+  public String getUpsertOutOfOrderRecordColumn() {
+    return _upsertOutOfOrderRecordColumn;
+  }
+
+  public boolean isUpsertDropOutOfOrderRecord() {
+    return _upsertDropOutOfOrderRecord;
   }
 
   public PartitionUpsertMetadataManager getPartitionUpsertMetadataManager() {
     return _partitionUpsertMetadataManager;
+  }
+
+  public String getDedupTimeColumn() {
+    return _dedupTimeColumn;
   }
 
   public PartitionDedupMetadataManager getPartitionDedupMetadataManager() {
@@ -250,13 +249,7 @@ public class RealtimeSegmentConfig {
     private String _timeColumnName;
     private int _capacity;
     private int _avgNumMultiValues;
-    private Set<String> _noDictionaryColumns;
-    private Set<String> _varLengthDictionaryColumns;
-    private Set<String> _invertedIndexColumns;
-    private Set<String> _textIndexColumns = new HashSet<>();
-    private Set<String> _fstIndexColumns = new HashSet<>();
-    private Map<String, JsonIndexConfig> _jsonIndexConfigs = new HashMap<>();
-    private Map<String, H3IndexConfig> _h3IndexConfigs = new HashMap<>();
+    private final Map<String, FieldIndexConfigs.Builder> _indexConfigByCol;
     private SegmentZKMetadata _segmentZKMetadata;
     private boolean _offHeap;
     private PinotDataBufferMemoryManager _memoryManager;
@@ -265,16 +258,52 @@ public class RealtimeSegmentConfig {
     private PartitionFunction _partitionFunction;
     private int _partitionId;
     private boolean _aggregateMetrics = false;
-    private boolean _nullHandlingEnabled = false;
+    /**
+     * Whether null handling is enabled by default. This value is only used if
+     * {@link Schema#isEnableColumnBasedNullHandling()} is false.
+     */
+    private boolean _defaultNullHandlingEnabled = false;
     private String _consumerDir;
     private UpsertConfig.Mode _upsertMode;
-    private String _upsertComparisonColumn;
+    private UpsertConfig.ConsistencyMode _upsertConsistencyMode;
+    private List<String> _upsertComparisonColumns;
+    private String _upsertDeleteRecordColumn;
+    private String _upsertOutOfOrderRecordColumn;
+    private boolean _upsertDropOutOfOrderRecord;
     private PartitionUpsertMetadataManager _partitionUpsertMetadataManager;
+    private String _dedupTimeColumn;
     private PartitionDedupMetadataManager _partitionDedupMetadataManager;
     private List<FieldConfig> _fieldConfigList;
     private List<AggregationConfig> _ingestionAggregationConfigs;
 
     public Builder() {
+      _indexConfigByCol = new HashMap<>();
+    }
+
+    public Builder(IndexLoadingConfig indexLoadingConfig) {
+      this(indexLoadingConfig.getFieldIndexConfigByColName(), indexLoadingConfig.getSortedColumns());
+    }
+
+    public Builder(TableConfig tableConfig, Schema schema) {
+      this(FieldIndexConfigsUtil.createIndexConfigsByColName(tableConfig, schema),
+          tableConfig.getIndexingConfig().getSortedColumn());
+    }
+
+    public Builder(Map<String, FieldIndexConfigs> indexConfigsByColName, @Nullable List<String> sortedColumns) {
+      _indexConfigByCol = Maps.newHashMapWithExpectedSize(indexConfigsByColName.size());
+      for (Map.Entry<String, FieldIndexConfigs> entry : indexConfigsByColName.entrySet()) {
+        _indexConfigByCol.put(entry.getKey(), new FieldIndexConfigs.Builder(entry.getValue()));
+      }
+      // Add inverted index to sorted column for 2 reasons:
+      // 1. Since sorted index doesn't apply to mutable segment, add inverted index to get better performance
+      // 2. When converting mutable segment to immutable segment, we use sorted column's inverted index to accelerate
+      //    the index creation
+      if (CollectionUtils.isNotEmpty(sortedColumns)) {
+        String sortedColumn = sortedColumns.get(0);
+        FieldIndexConfigs.Builder builder =
+            _indexConfigByCol.computeIfAbsent(sortedColumn, k -> new FieldIndexConfigs.Builder());
+        builder.add(StandardIndexes.inverted(), new IndexConfig(false));
+      }
     }
 
     public Builder setTableNameWithType(String tableNameWithType) {
@@ -312,46 +341,19 @@ public class RealtimeSegmentConfig {
       return this;
     }
 
-    public Builder setNoDictionaryColumns(Set<String> noDictionaryColumns) {
-      _noDictionaryColumns = noDictionaryColumns;
+    public <C extends IndexConfig> Builder setIndex(Iterable<String> columns, IndexType<C, ?, ?> indexType, C config) {
+      for (String column : columns) {
+        FieldIndexConfigs.Builder builder =
+            _indexConfigByCol.computeIfAbsent(column, (k) -> new FieldIndexConfigs.Builder());
+        builder.add(indexType, config);
+      }
       return this;
     }
 
-    public Builder setVarLengthDictionaryColumns(Set<String> varLengthDictionaryColumns) {
-      _varLengthDictionaryColumns = varLengthDictionaryColumns;
-      return this;
-    }
-
-    public Builder setInvertedIndexColumns(Set<String> invertedIndexColumns) {
-      _invertedIndexColumns = invertedIndexColumns;
-      return this;
-    }
-
-    /**
-     * Used by LLRealtimeSegmentDataManager
-     * to set the list of text index creation columns. This list is later used by
-     * {@link MutableSegmentImpl} when
-     * it starts consuming/indexing.
-     * @param textIndexColumns set of text index enabled columns
-     * @return builder
-     */
-    public Builder setTextIndexColumns(Set<String> textIndexColumns) {
-      _textIndexColumns = textIndexColumns;
-      return this;
-    }
-
-    public Builder setFSTIndexColumns(Set<String> fstIndexColumns) {
-      _fstIndexColumns = fstIndexColumns;
-      return this;
-    }
-
-    public Builder setJsonIndexConfigs(Map<String, JsonIndexConfig> jsonIndexConfigs) {
-      _jsonIndexConfigs = jsonIndexConfigs;
-      return this;
-    }
-
-    public Builder setH3IndexConfigs(Map<String, H3IndexConfig> h3IndexConfigs) {
-      _h3IndexConfigs = h3IndexConfigs;
+    public <C extends IndexConfig> Builder setIndex(String column, IndexType<C, ?, ?> indexType, C config) {
+      FieldIndexConfigs.Builder builder =
+          _indexConfigByCol.computeIfAbsent(column, (k) -> new FieldIndexConfigs.Builder());
+      builder.add(indexType, config);
       return this;
     }
 
@@ -395,8 +397,21 @@ public class RealtimeSegmentConfig {
       return this;
     }
 
+    /**
+     * Whether null handling is enabled by default. This value is only used if
+     * {@link Schema#isEnableColumnBasedNullHandling()} is false.
+     */
+    @Deprecated
     public Builder setNullHandlingEnabled(boolean nullHandlingEnabled) {
-      _nullHandlingEnabled = nullHandlingEnabled;
+      return setDefaultNullHandlingEnabled(nullHandlingEnabled);
+    }
+
+    /**
+     * Whether null handling is enabled by default. This value is only used if
+     * {@link Schema#isEnableColumnBasedNullHandling()} is false.
+     */
+    public Builder setDefaultNullHandlingEnabled(boolean defaultNullHandlingEnabled) {
+      _defaultNullHandlingEnabled = defaultNullHandlingEnabled;
       return this;
     }
 
@@ -410,13 +425,38 @@ public class RealtimeSegmentConfig {
       return this;
     }
 
-    public Builder setUpsertComparisonColumn(String upsertComparisonColumn) {
-      _upsertComparisonColumn = upsertComparisonColumn;
+    public Builder setUpsertConsistencyMode(UpsertConfig.ConsistencyMode upsertConsistencyMode) {
+      _upsertConsistencyMode = upsertConsistencyMode;
+      return this;
+    }
+
+    public Builder setUpsertComparisonColumns(List<String> upsertComparisonColumns) {
+      _upsertComparisonColumns = upsertComparisonColumns;
+      return this;
+    }
+
+    public Builder setUpsertDeleteRecordColumn(String upsertDeleteRecordColumn) {
+      _upsertDeleteRecordColumn = upsertDeleteRecordColumn;
+      return this;
+    }
+
+    public Builder setUpsertOutOfOrderRecordColumn(String upsertOutOfOrderRecordColumn) {
+      _upsertOutOfOrderRecordColumn = upsertOutOfOrderRecordColumn;
+      return this;
+    }
+
+    public Builder setUpsertDropOutOfOrderRecord(boolean upsertDropOutOfOrderRecord) {
+      _upsertDropOutOfOrderRecord = upsertDropOutOfOrderRecord;
       return this;
     }
 
     public Builder setPartitionUpsertMetadataManager(PartitionUpsertMetadataManager partitionUpsertMetadataManager) {
       _partitionUpsertMetadataManager = partitionUpsertMetadataManager;
+      return this;
+    }
+
+    public Builder setDedupTimeColumn(String dedupTimeColumn) {
+      _dedupTimeColumn = dedupTimeColumn;
       return this;
     }
 
@@ -436,12 +476,18 @@ public class RealtimeSegmentConfig {
     }
 
     public RealtimeSegmentConfig build() {
+      Map<String, FieldIndexConfigs> indexConfigByCol = Maps.newHashMapWithExpectedSize(_indexConfigByCol.size());
+      for (Map.Entry<String, FieldIndexConfigs.Builder> entry : _indexConfigByCol.entrySet()) {
+        indexConfigByCol.put(entry.getKey(), entry.getValue().build());
+      }
+
       return new RealtimeSegmentConfig(_tableNameWithType, _segmentName, _streamName, _schema, _timeColumnName,
-          _capacity, _avgNumMultiValues, _noDictionaryColumns, _varLengthDictionaryColumns, _invertedIndexColumns,
-          _textIndexColumns, _fstIndexColumns, _jsonIndexConfigs, _h3IndexConfigs, _segmentZKMetadata, _offHeap,
+          _capacity, _avgNumMultiValues, Collections.unmodifiableMap(indexConfigByCol), _segmentZKMetadata, _offHeap,
           _memoryManager, _statsHistory, _partitionColumn, _partitionFunction, _partitionId, _aggregateMetrics,
-          _nullHandlingEnabled, _consumerDir, _upsertMode, _upsertComparisonColumn, _partitionUpsertMetadataManager,
-          _partitionDedupMetadataManager, _fieldConfigList, _ingestionAggregationConfigs);
+          _defaultNullHandlingEnabled, _consumerDir, _upsertMode, _upsertConsistencyMode, _upsertComparisonColumns,
+          _upsertDeleteRecordColumn, _upsertOutOfOrderRecordColumn, _upsertDropOutOfOrderRecord,
+          _partitionUpsertMetadataManager, _dedupTimeColumn, _partitionDedupMetadataManager, _fieldConfigList,
+          _ingestionAggregationConfigs);
     }
   }
 }

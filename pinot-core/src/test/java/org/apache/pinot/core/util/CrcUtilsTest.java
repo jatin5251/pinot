@@ -19,71 +19,173 @@
 package org.apache.pinot.core.util;
 
 import java.io.File;
-import java.util.concurrent.TimeUnit;
+import java.io.IOException;
+import java.net.URL;
+import java.util.List;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentLoader;
 import org.apache.pinot.segment.local.segment.creator.SegmentTestUtils;
-import org.apache.pinot.segment.local.segment.creator.impl.SegmentCreationDriverFactory;
+import org.apache.pinot.segment.local.segment.creator.impl.SegmentIndexCreationDriverImpl;
+import org.apache.pinot.segment.local.segment.index.converter.SegmentV1V2ToV3FormatConverter;
 import org.apache.pinot.segment.local.utils.CrcUtils;
-import org.apache.pinot.segment.spi.IndexSegment;
-import org.apache.pinot.segment.spi.SegmentMetadata;
 import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
 import org.apache.pinot.segment.spi.creator.SegmentIndexCreationDriver;
-import org.apache.pinot.spi.utils.ReadMode;
+import org.apache.pinot.segment.spi.creator.SegmentVersion;
+import org.apache.pinot.spi.config.table.FSTType;
+import org.apache.pinot.spi.config.table.FieldConfig;
+import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.data.FieldSpec.DataType;
+import org.apache.pinot.spi.data.Schema;
+import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.apache.pinot.util.TestUtils;
-import org.testng.Assert;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotNull;
 
-/**
- * Dec 4, 2014
- */
 
 public class CrcUtilsTest {
-
+  private static final File INDEX_DIR = new File(FileUtils.getTempDirectory(), "CrcUtilsTest");
   private static final String AVRO_DATA = "data/test_data-mv.avro";
-  private static final File INDEX_DIR = new File("/tmp/testingCrc");
+  private static final String RAW_TABLE_NAME = "testTable";
 
-  @Test
-  public void test1()
-      throws Exception {
-    if (INDEX_DIR.exists()) {
-      FileUtils.deleteQuietly(INDEX_DIR);
-    }
+  //@formatter:off
+  private static final Schema SCHEMA = new Schema.SchemaBuilder().setSchemaName(RAW_TABLE_NAME)
+      .addSingleValueDimension("column1", DataType.INT)
+      .addSingleValueDimension("column5", DataType.STRING)
+      .addMultiValueDimension("column6", DataType.INT)
+      .addMetric("count", DataType.INT)
+      .addDateTime("daysSinceEpoch", DataType.INT, "EPOCH|DAYS", "1:DAYS")
+      .build();
+  //@formatter:on
 
-    final CrcUtils u1 = CrcUtils.forAllFilesInFolder(new File(makeSegmentAndReturnPath()));
-    final long crc1 = u1.computeCrc();
-    final String md51 = u1.computeMD5();
-
-    FileUtils.deleteQuietly(INDEX_DIR);
-
-    final CrcUtils u2 = CrcUtils.forAllFilesInFolder(new File(makeSegmentAndReturnPath()));
-    final long crc2 = u2.computeCrc();
-    final String md52 = u2.computeMD5();
-
-    Assert.assertEquals(crc1, crc2);
-    Assert.assertEquals(md51, md52);
-
-    FileUtils.deleteQuietly(INDEX_DIR);
-
-    final IndexSegment segment = ImmutableSegmentLoader.load(new File(makeSegmentAndReturnPath()), ReadMode.mmap);
-    final SegmentMetadata m = segment.getSegmentMetadata();
-
-    FileUtils.deleteQuietly(INDEX_DIR);
+  @BeforeMethod
+  public void setup()
+      throws IOException {
+    FileUtils.deleteDirectory(INDEX_DIR);
   }
 
-  private String makeSegmentAndReturnPath()
-      throws Exception {
-    final String filePath = TestUtils.getFileFromResourceUrl(CrcUtils.class.getClassLoader().getResource(AVRO_DATA));
+  @BeforeMethod
+  public void tearDown()
+      throws IOException {
+    FileUtils.deleteDirectory(INDEX_DIR);
+  }
 
-    final SegmentGeneratorConfig config = SegmentTestUtils
-        .getSegmentGenSpecWithSchemAndProjectedColumns(new File(filePath), INDEX_DIR, "daysSinceEpoch", TimeUnit.DAYS,
-            "testTable");
-    config.setSegmentNamePostfix("1");
-    final SegmentIndexCreationDriver driver = SegmentCreationDriverFactory.get(null);
+  @Test
+  public void testCrc()
+      throws Exception {
+    URL resource = getClass().getClassLoader().getResource(AVRO_DATA);
+    assertNotNull(resource);
+    File avroFile = new File(TestUtils.getFileFromResourceUrl(resource));
+    TableConfig tableConfig =
+        new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME).setTimeColumnName("daysSinceEpoch")
+            .setInvertedIndexColumns(List.of("column1", "column5", "column6"))
+            .setCreateInvertedIndexDuringSegmentGeneration(true)
+            .setIngestionConfig(SegmentTestUtils.getSkipTimeCheckIngestionConfig()).build();
+    SegmentGeneratorConfig config = new SegmentGeneratorConfig(tableConfig, SCHEMA);
+    config.setInputFilePath(avroFile.getAbsolutePath());
+    config.setSegmentVersion(SegmentVersion.v1);
+    config.setOutDir(INDEX_DIR.getAbsolutePath());
+    SegmentIndexCreationDriver driver = new SegmentIndexCreationDriverImpl();
     driver.init(config);
     driver.build();
 
-    return new File(INDEX_DIR, driver.getSegmentName()).getAbsolutePath();
+    File indexDir = driver.getOutputDirectory();
+    assertEquals(CrcUtils.forAllFilesInFolder(indexDir).computeCrc(), 2102337593L);
+
+    new SegmentV1V2ToV3FormatConverter().convert(indexDir);
+    assertEquals(CrcUtils.forAllFilesInFolder(indexDir).computeCrc(), 3362640853L);
+  }
+
+  @Test
+  public void testCrcWithNativeFstIndex()
+      throws Exception {
+    URL resource = getClass().getClassLoader().getResource(AVRO_DATA);
+    assertNotNull(resource);
+    File avroFile = new File(TestUtils.getFileFromResourceUrl(resource));
+    List<FieldConfig> fieldConfigs = List.of(
+        new FieldConfig("column5", FieldConfig.EncodingType.DICTIONARY, List.of(FieldConfig.IndexType.FST), null,
+            null));
+    TableConfig tableConfig =
+        new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME).setTimeColumnName("daysSinceEpoch")
+            .setInvertedIndexColumns(List.of("column1", "column5", "column6"))
+            .setCreateInvertedIndexDuringSegmentGeneration(true).setFieldConfigList(fieldConfigs)
+            .setIngestionConfig(SegmentTestUtils.getSkipTimeCheckIngestionConfig()).build();
+    tableConfig.getIndexingConfig().setFSTIndexType(FSTType.NATIVE);
+    SegmentGeneratorConfig config = new SegmentGeneratorConfig(tableConfig, SCHEMA);
+    config.setInputFilePath(avroFile.getAbsolutePath());
+    config.setSegmentVersion(SegmentVersion.v1);
+    config.setOutDir(INDEX_DIR.getAbsolutePath());
+    SegmentIndexCreationDriver driver = new SegmentIndexCreationDriverImpl();
+    driver.init(config);
+    driver.build();
+
+    File indexDir = driver.getOutputDirectory();
+    assertEquals(CrcUtils.forAllFilesInFolder(indexDir).computeCrc(), 289171778L);
+
+    new SegmentV1V2ToV3FormatConverter().convert(indexDir);
+    assertEquals(CrcUtils.forAllFilesInFolder(indexDir).computeCrc(), 3409394291L);
+  }
+
+  @Test
+  public void testCrcWithLuceneFstIndex()
+      throws Exception {
+    URL resource = getClass().getClassLoader().getResource(AVRO_DATA);
+    assertNotNull(resource);
+    File avroFile = new File(TestUtils.getFileFromResourceUrl(resource));
+    List<FieldConfig> fieldConfigs = List.of(
+        new FieldConfig("column5", FieldConfig.EncodingType.DICTIONARY, List.of(FieldConfig.IndexType.FST), null,
+            null));
+    TableConfig tableConfig =
+        new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME).setTimeColumnName("daysSinceEpoch")
+            .setInvertedIndexColumns(List.of("column1", "column5", "column6"))
+            .setCreateInvertedIndexDuringSegmentGeneration(true).setFieldConfigList(fieldConfigs)
+            .setIngestionConfig(SegmentTestUtils.getSkipTimeCheckIngestionConfig()).build();
+    SegmentGeneratorConfig config = new SegmentGeneratorConfig(tableConfig, SCHEMA);
+    config.setInputFilePath(avroFile.getAbsolutePath());
+    config.setSegmentVersion(SegmentVersion.v1);
+    config.setOutDir(INDEX_DIR.getAbsolutePath());
+    SegmentIndexCreationDriver driver = new SegmentIndexCreationDriverImpl();
+    driver.init(config);
+    driver.build();
+
+    File indexDir = driver.getOutputDirectory();
+    assertEquals(CrcUtils.forAllFilesInFolder(indexDir).computeCrc(), 2627227852L);
+
+    new SegmentV1V2ToV3FormatConverter().convert(indexDir);
+    assertEquals(CrcUtils.forAllFilesInFolder(indexDir).computeCrc(), 1229791705L);
+  }
+
+  @Test
+  public void testCrcWithLuceneTextIndex()
+      throws Exception {
+    URL resource = getClass().getClassLoader().getResource(AVRO_DATA);
+    assertNotNull(resource);
+    File avroFile = new File(TestUtils.getFileFromResourceUrl(resource));
+    List<FieldConfig> fieldConfigs = List.of(
+        new FieldConfig("column5", FieldConfig.EncodingType.DICTIONARY, List.of(FieldConfig.IndexType.TEXT), null,
+            null));
+    TableConfig tableConfig =
+        new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME).setTimeColumnName("daysSinceEpoch")
+            .setInvertedIndexColumns(List.of("column1", "column5", "column6"))
+            .setCreateInvertedIndexDuringSegmentGeneration(true).setFieldConfigList(fieldConfigs)
+            .setIngestionConfig(SegmentTestUtils.getSkipTimeCheckIngestionConfig()).build();
+    SegmentGeneratorConfig config = new SegmentGeneratorConfig(tableConfig, SCHEMA);
+    config.setInputFilePath(avroFile.getAbsolutePath());
+    config.setSegmentVersion(SegmentVersion.v1);
+    config.setOutDir(INDEX_DIR.getAbsolutePath());
+    SegmentIndexCreationDriver driver = new SegmentIndexCreationDriverImpl();
+    driver.init(config);
+    driver.build();
+
+    // Lucene text index data is not deterministic, thus leading to different segment crc across each test runs.
+    // When using text index in RealTime table, different crc values can cause servers to have to download segments
+    // from deep store to make segment replicas in sync.
+    File indexDir = driver.getOutputDirectory();
+    System.out.println(CrcUtils.forAllFilesInFolder(indexDir).computeCrc());
+
+    new SegmentV1V2ToV3FormatConverter().convert(indexDir);
+    System.out.println(CrcUtils.forAllFilesInFolder(indexDir).computeCrc());
   }
 }

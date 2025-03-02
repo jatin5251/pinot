@@ -20,9 +20,12 @@ package org.apache.pinot.segment.local.segment.creator;
 
 import java.io.File;
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -32,6 +35,7 @@ import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.util.Utf8;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.plugin.inputformat.avro.AvroUtils;
+import org.apache.pinot.segment.local.PinotBuffersAfterMethodCheckRule;
 import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentLoader;
 import org.apache.pinot.segment.local.segment.creator.impl.SegmentCreationDriverFactory;
 import org.apache.pinot.segment.local.segment.creator.impl.SegmentDictionaryCreator;
@@ -54,6 +58,7 @@ import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
 import org.apache.pinot.segment.spi.creator.SegmentIndexCreationDriver;
 import org.apache.pinot.segment.spi.creator.StatsCollectorConfig;
 import org.apache.pinot.segment.spi.index.reader.Dictionary;
+import org.apache.pinot.spi.config.table.FieldConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.data.DimensionFieldSpec;
 import org.apache.pinot.spi.data.FieldSpec;
@@ -69,7 +74,7 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 
-public class DictionariesTest {
+public class DictionariesTest implements PinotBuffersAfterMethodCheckRule {
   private static final String AVRO_DATA = "data/test_sample_data.avro";
   private static final File INDEX_DIR = new File(DictionariesTest.class.toString());
   private static final Map<String, Set<Object>> UNIQUE_ENTRIES = new HashMap<>();
@@ -132,64 +137,71 @@ public class DictionariesTest {
       throws Exception {
     ImmutableSegment heapSegment = ImmutableSegmentLoader.load(_segmentDirectory, ReadMode.heap);
     ImmutableSegment mmapSegment = ImmutableSegmentLoader.load(_segmentDirectory, ReadMode.mmap);
+    try {
 
-    Schema schema = heapSegment.getSegmentMetadata().getSchema();
-    for (FieldSpec fieldSpec : schema.getAllFieldSpecs()) {
-      // Skip virtual columns
-      if (fieldSpec.isVirtualColumn()) {
-        continue;
+      Schema schema = heapSegment.getSegmentMetadata().getSchema();
+      for (FieldSpec fieldSpec : schema.getAllFieldSpecs()) {
+        // Skip virtual columns
+        if (fieldSpec.isVirtualColumn()) {
+          continue;
+        }
+
+        String columnName = fieldSpec.getName();
+        Dictionary heapDictionary = heapSegment.getDictionary(columnName);
+        Dictionary mmapDictionary = mmapSegment.getDictionary(columnName);
+
+        switch (fieldSpec.getDataType()) {
+          case INT:
+            Assert.assertTrue(heapDictionary instanceof IntDictionary);
+            Assert.assertTrue(mmapDictionary instanceof IntDictionary);
+            int firstInt = heapDictionary.getIntValue(0);
+            Assert.assertEquals(heapDictionary.indexOf(firstInt), heapDictionary.indexOf(String.valueOf(firstInt)));
+            Assert.assertEquals(mmapDictionary.indexOf(firstInt), mmapDictionary.indexOf(String.valueOf(firstInt)));
+            break;
+          case LONG:
+            Assert.assertTrue(heapDictionary instanceof LongDictionary);
+            Assert.assertTrue(mmapDictionary instanceof LongDictionary);
+            long firstLong = heapDictionary.getLongValue(0);
+            Assert.assertEquals(heapDictionary.indexOf(firstLong), heapDictionary.indexOf(String.valueOf(firstLong)));
+            Assert.assertEquals(mmapDictionary.indexOf(firstLong), mmapDictionary.indexOf(String.valueOf(firstLong)));
+            break;
+          case FLOAT:
+            Assert.assertTrue(heapDictionary instanceof FloatDictionary);
+            Assert.assertTrue(mmapDictionary instanceof FloatDictionary);
+            float firstFloat = heapDictionary.getFloatValue(0);
+            Assert.assertEquals(heapDictionary.indexOf(firstFloat), heapDictionary.indexOf(String.valueOf(firstFloat)));
+            Assert.assertEquals(mmapDictionary.indexOf(firstFloat), mmapDictionary.indexOf(String.valueOf(firstFloat)));
+            break;
+          case DOUBLE:
+            Assert.assertTrue(heapDictionary instanceof DoubleDictionary);
+            Assert.assertTrue(mmapDictionary instanceof DoubleDictionary);
+            double firstDouble = heapDictionary.getDoubleValue(0);
+            Assert.assertEquals(heapDictionary.indexOf(firstDouble),
+                heapDictionary.indexOf(String.valueOf(firstDouble)));
+            Assert.assertEquals(mmapDictionary.indexOf(firstDouble),
+                mmapDictionary.indexOf(String.valueOf(firstDouble)));
+            break;
+          case BIG_DECIMAL:
+            Assert.assertTrue(heapDictionary instanceof BigDecimalDictionary);
+            Assert.assertTrue(mmapDictionary instanceof BigDecimalDictionary);
+            break;
+          case STRING:
+            Assert.assertTrue(heapDictionary instanceof StringDictionary);
+            Assert.assertTrue(mmapDictionary instanceof StringDictionary);
+            break;
+          default:
+            Assert.fail();
+            break;
+        }
+
+        Assert.assertEquals(mmapDictionary.length(), heapDictionary.length());
+        for (int i = 0; i < heapDictionary.length(); i++) {
+          Assert.assertEquals(mmapDictionary.get(i), heapDictionary.get(i));
+        }
       }
-
-      String columnName = fieldSpec.getName();
-      Dictionary heapDictionary = heapSegment.getDictionary(columnName);
-      Dictionary mmapDictionary = mmapSegment.getDictionary(columnName);
-
-      switch (fieldSpec.getDataType()) {
-        case INT:
-          Assert.assertTrue(heapDictionary instanceof IntDictionary);
-          Assert.assertTrue(mmapDictionary instanceof IntDictionary);
-          int firstInt = heapDictionary.getIntValue(0);
-          Assert.assertEquals(heapDictionary.indexOf(firstInt), heapDictionary.indexOf("" + firstInt));
-          Assert.assertEquals(mmapDictionary.indexOf(firstInt), mmapDictionary.indexOf("" + firstInt));
-          break;
-        case LONG:
-          Assert.assertTrue(heapDictionary instanceof LongDictionary);
-          Assert.assertTrue(mmapDictionary instanceof LongDictionary);
-          long firstLong = heapDictionary.getLongValue(0);
-          Assert.assertEquals(heapDictionary.indexOf(firstLong), heapDictionary.indexOf("" + firstLong));
-          Assert.assertEquals(mmapDictionary.indexOf(firstLong), mmapDictionary.indexOf("" + firstLong));
-          break;
-        case FLOAT:
-          Assert.assertTrue(heapDictionary instanceof FloatDictionary);
-          Assert.assertTrue(mmapDictionary instanceof FloatDictionary);
-          float firstFloat = heapDictionary.getFloatValue(0);
-          Assert.assertEquals(heapDictionary.indexOf(firstFloat), heapDictionary.indexOf("" + firstFloat));
-          Assert.assertEquals(mmapDictionary.indexOf(firstFloat), mmapDictionary.indexOf("" + firstFloat));
-          break;
-        case DOUBLE:
-          Assert.assertTrue(heapDictionary instanceof DoubleDictionary);
-          Assert.assertTrue(mmapDictionary instanceof DoubleDictionary);
-          double firstDouble = heapDictionary.getDoubleValue(0);
-          Assert.assertEquals(heapDictionary.indexOf(firstDouble), heapDictionary.indexOf("" + firstDouble));
-          Assert.assertEquals(mmapDictionary.indexOf(firstDouble), mmapDictionary.indexOf("" + firstDouble));
-          break;
-        case BIG_DECIMAL:
-          Assert.assertTrue(heapDictionary instanceof BigDecimalDictionary);
-          Assert.assertTrue(mmapDictionary instanceof BigDecimalDictionary);
-          break;
-        case STRING:
-          Assert.assertTrue(heapDictionary instanceof StringDictionary);
-          Assert.assertTrue(mmapDictionary instanceof StringDictionary);
-          break;
-        default:
-          Assert.fail();
-          break;
-      }
-
-      Assert.assertEquals(mmapDictionary.length(), heapDictionary.length());
-      for (int i = 0; i < heapDictionary.length(); i++) {
-        Assert.assertEquals(mmapDictionary.get(i), heapDictionary.get(i));
-      }
+    } finally {
+      heapSegment.destroy();
+      mmapSegment.destroy();
     }
   }
 
@@ -198,27 +210,32 @@ public class DictionariesTest {
       throws Exception {
     ImmutableSegment heapSegment = ImmutableSegmentLoader.load(_segmentDirectory, ReadMode.heap);
     ImmutableSegment mmapSegment = ImmutableSegmentLoader.load(_segmentDirectory, ReadMode.mmap);
+    try {
 
-    Schema schema = heapSegment.getSegmentMetadata().getSchema();
-    for (String columnName : schema.getPhysicalColumnNames()) {
-      Dictionary heapDictionary = heapSegment.getDictionary(columnName);
-      Dictionary mmapDictionary = mmapSegment.getDictionary(columnName);
+      Schema schema = heapSegment.getSegmentMetadata().getSchema();
+      for (String columnName : schema.getPhysicalColumnNames()) {
+        Dictionary heapDictionary = heapSegment.getDictionary(columnName);
+        Dictionary mmapDictionary = mmapSegment.getDictionary(columnName);
 
-      for (Object entry : UNIQUE_ENTRIES.get(columnName)) {
-        String stringValue = entry.toString();
-        Assert.assertEquals(mmapDictionary.indexOf(stringValue), heapDictionary.indexOf(stringValue));
-        if (!columnName.equals("pageKey")) {
-          Assert.assertFalse(heapDictionary.indexOf(stringValue) < 0);
-          Assert.assertFalse(mmapDictionary.indexOf(stringValue) < 0);
-        }
-        if (entry instanceof Integer) {
-          Assert.assertEquals(mmapDictionary.indexOf((int) entry), mmapDictionary.indexOf(stringValue));
-          Assert.assertEquals(heapDictionary.indexOf((int) entry), heapDictionary.indexOf(stringValue));
-        } else if (entry instanceof Long) {
-          Assert.assertEquals(mmapDictionary.indexOf((long) entry), mmapDictionary.indexOf(stringValue));
-          Assert.assertEquals(heapDictionary.indexOf((long) entry), heapDictionary.indexOf(stringValue));
+        for (Object entry : UNIQUE_ENTRIES.get(columnName)) {
+          String stringValue = entry.toString();
+          Assert.assertEquals(mmapDictionary.indexOf(stringValue), heapDictionary.indexOf(stringValue));
+          if (!columnName.equals("pageKey")) {
+            Assert.assertFalse(heapDictionary.indexOf(stringValue) < 0);
+            Assert.assertFalse(mmapDictionary.indexOf(stringValue) < 0);
+          }
+          if (entry instanceof Integer) {
+            Assert.assertEquals(mmapDictionary.indexOf((int) entry), mmapDictionary.indexOf(stringValue));
+            Assert.assertEquals(heapDictionary.indexOf((int) entry), heapDictionary.indexOf(stringValue));
+          } else if (entry instanceof Long) {
+            Assert.assertEquals(mmapDictionary.indexOf((long) entry), mmapDictionary.indexOf(stringValue));
+            Assert.assertEquals(heapDictionary.indexOf((long) entry), heapDictionary.indexOf(stringValue));
+          }
         }
       }
+    } finally {
+      heapSegment.destroy();
+      mmapSegment.destroy();
     }
   }
 
@@ -529,5 +546,36 @@ public class DictionariesTest {
       default:
         throw new IllegalArgumentException("Illegal data type for stats builder: " + dataType);
     }
+  }
+
+  @Test
+  public void clpStatsCollectorTest() {
+    Schema schema = new Schema();
+    schema.addField(new DimensionFieldSpec("column1", DataType.STRING, true));
+    List<FieldConfig> fieldConfigList = new ArrayList<>();
+    fieldConfigList.add(new FieldConfig("column1", FieldConfig.EncodingType.RAW, Collections.EMPTY_LIST,
+        FieldConfig.CompressionCodec.CLP, Collections.EMPTY_MAP));
+    _tableConfig.setFieldConfigList(fieldConfigList);
+    StatsCollectorConfig statsCollectorConfig = new StatsCollectorConfig(_tableConfig, schema, null);
+    StringColumnPreIndexStatsCollector statsCollector =
+        new StringColumnPreIndexStatsCollector("column1", statsCollectorConfig);
+
+    List<String> logLines = new ArrayList<>();
+    logLines.add(
+        "2023/10/26 00:03:10.168 INFO [PropertyCache] [HelixController-pipeline-default-pinot-(4a02a32c_DEFAULT)] "
+            + "Event pinot::DEFAULT::4a02a32c_DEFAULT : Refreshed 35 property LiveInstance took 5 ms. Selective: true");
+    logLines.add(
+        "2023/10/26 00:03:10.169 INFO [PropertyCache] [HelixController-pipeline-default-pinot-(4a02a32d_DEFAULT)] "
+            + "Event pinot::DEFAULT::4a02a32d_DEFAULT : Refreshed 81 property LiveInstance took 4 ms. Selective: true");
+
+    for (String logLine : logLines) {
+      statsCollector.collect(logLine);
+    }
+    statsCollector.seal();
+
+    Assert.assertNotNull(statsCollector.getCLPStats());
+
+    // Same log line format
+    Assert.assertEquals(statsCollector.getCLPStats().getSortedLogTypeValues().length, 1);
   }
 }

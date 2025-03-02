@@ -22,10 +22,8 @@ import com.google.common.base.Preconditions;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.IOException;
 import java.io.Serializable;
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -46,7 +44,7 @@ import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
 import org.apache.pinot.common.segment.generation.SegmentGenerationUtils;
-import org.apache.pinot.common.utils.TarGzCompressionUtils;
+import org.apache.pinot.common.utils.TarCompressionUtils;
 import org.apache.pinot.plugin.ingestion.batch.common.SegmentGenerationJobUtils;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.filesystem.PinotFS;
@@ -257,7 +255,7 @@ public class HadoopSegmentGenerationJobRunner extends Configured implements Inge
       }
 
       _spec.setOutputDirURI(stagingSegmentTarUri.toUri().toString());
-      jobConf.set(SEGMENT_GENERATION_JOB_SPEC, new Yaml().dump(_spec));
+      jobConf.set(SEGMENT_GENERATION_JOB_SPEC, new Yaml().dumpAsMap(_spec));
       _spec.setOutputDirURI(outputDirURI.toString());
 
       job.setMapperClass(getMapperClass());
@@ -280,8 +278,8 @@ public class HadoopSegmentGenerationJobRunner extends Configured implements Inge
 
       LOGGER.info("Moving segment tars from staging directory [{}] to output directory [{}]", stagingDirURI,
           outputDirURI);
-      moveFiles(outputDirFS, new Path(stagingDir, SEGMENT_TAR_SUBDIR_NAME).toUri(), outputDirURI,
-          _spec.isOverwriteOutput());
+      SegmentGenerationJobUtils.moveFiles(outputDirFS, new Path(stagingDir, SEGMENT_TAR_SUBDIR_NAME).toUri(),
+          outputDirURI, _spec.isOverwriteOutput());
     } finally {
       LOGGER.info("Trying to clean up staging directory: [{}]", stagingDirURI);
       outputDirFS.delete(stagingDirURI, true);
@@ -297,35 +295,6 @@ public class HadoopSegmentGenerationJobRunner extends Configured implements Inge
       dataOutputStream.write((inputFileURI + " " + seqId).getBytes(UTF_8));
       dataOutputStream.flush();
       outputDirFS.copyFromLocalFile(localFile, new Path(stagingInputDir, Integer.toString(seqId)).toUri());
-    }
-  }
-
-  /**
-   * Move all files from the <sourceDir> to the <destDir>, but don't delete existing contents of destDir.
-   * If <overwrite> is true, and the source file exists in the destination directory, then replace it, otherwise
-   * log a warning and continue. We assume that source and destination directories are on the same filesystem,
-   * so that move() can be used.
-   *
-   * @param fs
-   * @param sourceDir
-   * @param destDir
-   * @param overwrite
-   * @throws IOException
-   * @throws URISyntaxException
-   */
-  private void moveFiles(PinotFS fs, URI sourceDir, URI destDir, boolean overwrite)
-      throws IOException, URISyntaxException {
-    for (String sourcePath : fs.listFiles(sourceDir, true)) {
-      URI sourceFileUri = SegmentGenerationUtils.getFileURI(sourcePath, sourceDir);
-      String sourceFilename = SegmentGenerationUtils.getFileName(sourceFileUri);
-      URI destFileUri =
-          SegmentGenerationUtils.getRelativeOutputPath(sourceDir, sourceFileUri, destDir).resolve(sourceFilename);
-
-      if (!overwrite && fs.exists(destFileUri)) {
-        LOGGER.warn("Can't overwrite existing output segment tar file: {}", destFileUri);
-      } else {
-        fs.move(sourceFileUri, destFileUri, true);
-      }
     }
   }
 
@@ -349,7 +318,11 @@ public class HadoopSegmentGenerationJobRunner extends Configured implements Inge
       throws Exception {
     File ourJar = new File(getClass().getProtectionDomain().getCodeSource().getLocation().toURI());
     Path distributedCacheJar = new Path(stagingDirURI.toString(), ourJar.getName());
-    outputDirFS.copyFromLocalDir(ourJar, distributedCacheJar.toUri());
+    if (ourJar.isDirectory()) {
+      outputDirFS.copyFromLocalDir(ourJar, distributedCacheJar.toUri());
+    } else {
+      outputDirFS.copyFromLocalFile(ourJar, distributedCacheJar.toUri());
+    }
     job.addFileToClassPath(distributedCacheJar);
   }
 
@@ -375,7 +348,7 @@ public class HadoopSegmentGenerationJobRunner extends Configured implements Inge
     File pluginsTarGzFile = new File(PINOT_PLUGINS_TAR_GZ);
     try {
       File[] files = validPluginDirectories.toArray(new File[0]);
-      TarGzCompressionUtils.createTarGzFile(files, pluginsTarGzFile);
+      TarCompressionUtils.createCompressedTarFile(files, pluginsTarGzFile);
 
       // Copy to staging directory
       Path cachedPluginsTarball = new Path(stagingDirURI.toString(), SegmentGenerationUtils.PINOT_PLUGINS_TAR_GZ);

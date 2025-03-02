@@ -38,6 +38,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.AbstractMap;
 import java.util.ArrayList;
@@ -52,8 +53,10 @@ import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.spi.config.table.JsonIndexConfig;
 import org.apache.pinot.spi.config.table.ingestion.ComplexTypeConfig;
@@ -72,12 +75,17 @@ public class JsonUtils {
   // For flattening
   public static final String VALUE_KEY = "";
   public static final String KEY_SEPARATOR = ".";
+  public static final String GLOBAL_WILDCARD = "**"; // represent all the fields in the current or below levels
   public static final String ARRAY_PATH = "[*]";
   public static final String ARRAY_INDEX_KEY = ".$index";
+  public static final String SKIPPED_VALUE_REPLACEMENT = "$SKIPPED$";
   public static final int MAX_COMBINATIONS = 100_000;
+  private static final List<Map<String, String>> SKIPPED_FLATTENED_RECORD =
+      Collections.singletonList(Collections.singletonMap(VALUE_KEY, SKIPPED_VALUE_REPLACEMENT));
 
   // For querying
   public static final String WILDCARD = "*";
+
 
   // NOTE: Do not expose the ObjectMapper to prevent configuration change
   private static final ObjectMapper DEFAULT_MAPPER = new ObjectMapper();
@@ -196,6 +204,11 @@ public class JsonUtils {
     return DEFAULT_READER.forType(valueType).readValue(jsonInputStream);
   }
 
+  public static <T> T inputStreamToObject(InputStream jsonInputStream, TypeReference<T> valueTypeRef)
+      throws IOException {
+    return DEFAULT_READER.forType(valueTypeRef).readValue(jsonInputStream);
+  }
+
   public static JsonNode inputStreamToJsonNode(InputStream jsonInputStream)
       throws IOException {
     return DEFAULT_READER.readTree(jsonInputStream);
@@ -229,6 +242,11 @@ public class JsonUtils {
   public static String objectToString(Object object)
       throws JsonProcessingException {
     return DEFAULT_WRITER.writeValueAsString(object);
+  }
+
+  public static void objectToOutputStream(Object object, OutputStream outputStream)
+      throws IOException {
+    DEFAULT_WRITER.writeValue(outputStream, object);
   }
 
   public static String objectToPrettyString(Object object)
@@ -306,7 +324,7 @@ public class JsonUtils {
           throw new IllegalArgumentException("Failed to extract binary value");
         }
       default:
-        throw new IllegalArgumentException(String.format("Unsupported data type %s", dataType));
+        throw new IllegalArgumentException("Unsupported data type " + dataType);
     }
   }
 
@@ -350,20 +368,33 @@ public class JsonUtils {
    * ]
    * </pre>
    */
-  public static List<Map<String, String>> flatten(JsonNode node, JsonIndexConfig jsonIndexConfig) {
-    return flatten(node, jsonIndexConfig, 0, "$", false);
+  protected static List<Map<String, String>> flatten(JsonNode node, JsonIndexConfig jsonIndexConfig) {
+    try {
+      return flatten(node, jsonIndexConfig, 0, "$", false, createTree(jsonIndexConfig));
+    } catch (OutOfMemoryError oom) {
+      throw new OutOfMemoryError("Flattening JSON node: " + node + " with config: " + jsonIndexConfig + " requires too "
+          + "much memory, please adjust the config");
+    } catch (Exception e) {
+      throw new IllegalArgumentException("Caught exception while flattening JSON node: " + node + " with config: "
+          + jsonIndexConfig, e);
+    }
   }
 
   private static List<Map<String, String>> flatten(JsonNode node, JsonIndexConfig jsonIndexConfig, int level,
-      String path, boolean includePathMatched) {
+      String path, boolean includePathMatched, JsonSchemaTreeNode indexPathNode) {
     // Null
-    if (node.isNull()) {
+    if (node.isNull() || node.isMissingNode() || indexPathNode == null) {
       return Collections.emptyList();
     }
 
     // Value
     if (node.isValueNode()) {
-      return Collections.singletonList(Collections.singletonMap(VALUE_KEY, node.asText()));
+      String valueAsText = node.asText();
+      int maxValueLength = jsonIndexConfig.getMaxValueLength();
+      if (0 < maxValueLength && maxValueLength < valueAsText.length()) {
+        valueAsText = SKIPPED_VALUE_REPLACEMENT;
+      }
+      return Collections.singletonList(Collections.singletonMap(VALUE_KEY, valueAsText));
     }
 
     Preconditions.checkArgument(node.isArray() || node.isObject(), "Unexpected node type: %s", node.getNodeType());
@@ -394,7 +425,8 @@ public class JsonUtils {
         JsonNode childNode = node.get(i);
         String arrayIndexValue = Integer.toString(i);
         List<Map<String, String>> childResults =
-            flatten(childNode, jsonIndexConfig, level + 1, childPath, includeResult._includePathMatched);
+            flatten(childNode, jsonIndexConfig, level + 1, childPath, includeResult._includePathMatched,
+                indexPathNode.getChild(""));
         for (Map<String, String> childResult : childResults) {
           Map<String, String> result = new TreeMap<>();
           for (Map.Entry<String, String> entry : childResult.entrySet()) {
@@ -431,7 +463,8 @@ public class JsonUtils {
       }
       JsonNode childNode = fieldEntry.getValue();
       List<Map<String, String>> childResults =
-          flatten(childNode, jsonIndexConfig, level + 1, childPath, includeResult._includePathMatched);
+          flatten(childNode, jsonIndexConfig, level + 1, childPath, includeResult._includePathMatched,
+              indexPathNode.getChild(field));
       int numChildResults = childResults.size();
 
       // Empty list - skip
@@ -627,7 +660,7 @@ public class JsonUtils {
             fieldTypeMap, timeUnit, fieldsToUnnest, delimiter, collectionNotUnnestedToJson);
       }
     } else {
-      throw new IllegalArgumentException(String.format("Unsupported json node type", jsonNode.getClass()));
+      throw new IllegalArgumentException("Unsupported json node type for class " + jsonNode.getClass());
     }
   }
 
@@ -641,8 +674,7 @@ public class JsonUtils {
       case NON_PRIMITIVE:
         return !childNode.isValueNode();
       default:
-        throw new IllegalArgumentException(
-            String.format("Unsupported collectionNotUnnestedToJson %s", collectionNotUnnestedToJson));
+        throw new IllegalArgumentException("Unsupported collectionNotUnnestedToJson " + collectionNotUnnestedToJson);
     }
   }
 
@@ -698,5 +730,134 @@ public class JsonUtils {
           throw new UnsupportedOperationException("Unsupported field type: " + fieldType + " for field: " + name);
       }
     }
+  }
+
+  public static List<Map<String, String>> flatten(String jsonString, JsonIndexConfig jsonIndexConfig)
+      throws IOException {
+    JsonNode jsonNode;
+    try {
+      jsonNode = JsonUtils.stringToJsonNode(jsonString);
+    } catch (JsonProcessingException e) {
+      if (jsonIndexConfig.getSkipInvalidJson()) {
+        return SKIPPED_FLATTENED_RECORD;
+      } else {
+        throw e;
+      }
+    }
+    return JsonUtils.flatten(jsonNode, jsonIndexConfig);
+  }
+
+  /**
+   * Generates the JsonSchemaTreeNode tree from the given json index config indexPaths to represent which path we
+   * should flatten/index in the json record.
+   * @param jsonIndexConfig
+   * @return the root node of the json index paths tree
+   * @throws IllegalArgumentException
+   */
+  private static JsonSchemaTreeNode createTree(@Nonnull JsonIndexConfig jsonIndexConfig)
+      throws IllegalArgumentException {
+    Set<String> indexPaths = jsonIndexConfig.getIndexPaths();
+    JsonSchemaTreeNode rootNode = new JsonSchemaTreeNode("");
+    // if no index paths are provided, return a global wildcard node
+    if (indexPaths == null || indexPaths.isEmpty()) {
+      rootNode.getAndCreateChild(GLOBAL_WILDCARD);
+      return rootNode;
+    }
+
+    for (String indexPath : indexPaths) {
+      String[] paths = StringUtils.splitPreserveAllTokens(indexPath, KEY_SEPARATOR);
+      JsonSchemaTreeNode currentNode = rootNode;
+      for (String key : paths) {
+        currentNode = currentNode.getAndCreateChild(key);
+        if (GLOBAL_WILDCARD.equals(key)) {
+          break;
+        }
+      }
+    }
+
+    return rootNode;
+  }
+}
+
+/**
+ * JsonSchemaTreeNode represents the tree node when we construct the json schema tree.
+ * This tree is used to represent how we want to flatten/index the json according to the {@link JsonIndexConfig}.
+ * The node could be either leaf node or non-leaf node. Both types of node could hold the volume to indicate whether
+ * we should flatten/index the json at this node.
+ * For example, the config with *.*, a.b.*.*, a.b.x, a.b.c.**, a.b.d.*.*, e.f.g will have the following tree
+ * structure:
+ * root -- * -- *
+ *      -- a -- b -- * -- *
+ *                -- c -- **
+ *                -- d -- * -- *
+ *      -- e -- f -- g
+ * The path structure is defined as:
+ *  each key is separated by '.'
+ *  the key without wildcard represents single value field
+ *  the key "*" represents any types of single node
+ *  the key "**" represents any types of leaf node OR a subtree with all its children
+ * When multiple conditions are matched, e.g. a.b.c, it would match with priority:
+ * 1. **
+ * 2. exact match (either single value or array value)
+ * 3. *
+ */
+class JsonSchemaTreeNode {
+  private Map<String, JsonSchemaTreeNode> _children;
+  private JsonSchemaTreeNode _gloabalWildcardChild;
+  private JsonSchemaTreeNode _wildcardChild;
+  private String _key;
+
+  public JsonSchemaTreeNode(String key) {
+    _key = key;
+    _children = new HashMap<>();
+  }
+
+  /**
+   * If does not have the child node, add a child node to the current node and return the child node.
+   * If the child node already exists, return the existing child node.
+   * @param key
+   * @return child
+   */
+  public JsonSchemaTreeNode getAndCreateChild(String key) {
+    // if .** is already added, no need to add any child
+    if (_gloabalWildcardChild != null) {
+      return _gloabalWildcardChild;
+    }
+    switch (key) {
+      case JsonUtils.GLOBAL_WILDCARD:
+        if (_gloabalWildcardChild == null) {
+          _gloabalWildcardChild = new JsonSchemaTreeNode(key);
+        }
+        return _gloabalWildcardChild;
+      case JsonUtils.WILDCARD:
+        if (_wildcardChild == null) {
+          _wildcardChild = new JsonSchemaTreeNode(key);
+        }
+        return _wildcardChild;
+      default:
+        JsonSchemaTreeNode child = _children.get(key);
+        if (child == null) {
+          child = new JsonSchemaTreeNode(key);
+          _children.put(key, child);
+        }
+        return child;
+    }
+  }
+
+  @Nullable
+  public JsonSchemaTreeNode getChild(String key) {
+    if (JsonUtils.GLOBAL_WILDCARD.equals(_key)) {
+      return this;
+    }
+    if (_gloabalWildcardChild != null) {
+      return _gloabalWildcardChild;
+    }
+    if (_children.containsKey(key)) {
+      return _children.get(key);
+    }
+    if (_wildcardChild != null) {
+      return _wildcardChild;
+    }
+    return null;
   }
 }

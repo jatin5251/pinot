@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.core.query.aggregation.function;
 
+import java.util.List;
 import java.util.Map;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.utils.DataSchema;
@@ -35,19 +36,23 @@ import org.apache.pinot.segment.spi.AggregationFunctionType;
  * Aggregation function which computes Variance and Standard Deviation
  *
  * The algorithm to compute variance is based on "Updating Formulae and a Pairwise Algorithm for Computing
- * Sample Variances" by Chan et al. Please refer to the "Parallel Algorithm" section from the following wiki:
- * - https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
+ * Sample Variances" by Chan et al. Please refer to the "Parallel Algorithm" section from
+ * - <a href="https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm">this wiki</a>
  */
-public class VarianceAggregationFunction extends BaseSingleInputAggregationFunction<VarianceTuple, Double> {
+public class VarianceAggregationFunction extends NullableSingleInputAggregationFunction<VarianceTuple, Double> {
   private static final double DEFAULT_FINAL_RESULT = Double.NEGATIVE_INFINITY;
   protected final boolean _isSample;
-
   protected final boolean _isStdDev;
 
-  public VarianceAggregationFunction(ExpressionContext expression, boolean isSample, boolean isStdDev) {
-    super(expression);
+  public VarianceAggregationFunction(List<ExpressionContext> arguments, boolean isSample, boolean isStdDev,
+      boolean nullHandlingEnabled) {
+    super(verifySingleArgument(arguments, getFunctionName(isSample, isStdDev)), nullHandlingEnabled);
     _isSample = isSample;
     _isStdDev = isStdDev;
+  }
+
+  private static String getFunctionName(boolean isSample, boolean isStdDev) {
+    return isSample ? (isStdDev ? "STD_DEV_SAMP" : "VAR_SAMP") : (isStdDev ? "STD_DEV_POP" : "VAR_POP");
   }
 
   @Override
@@ -73,23 +78,19 @@ public class VarianceAggregationFunction extends BaseSingleInputAggregationFunct
       Map<ExpressionContext, BlockValSet> blockValSetMap) {
     double[] values = StatisticalAggregationFunctionUtils.getValSet(blockValSetMap, _expression);
 
-    long count = 0;
-    double sum = 0.0;
-    double variance = 0.0;
-    for (int i = 0; i < length; i++) {
-      count++;
-      sum += values[i];
-      if (count > 1) {
-        variance = computeIntermediateVariance(count, sum, variance, values[i]);
-      }
-    }
-    setAggregationResult(aggregationResultHolder, length, sum, variance);
-  }
+    VarianceTuple varianceTuple = new VarianceTuple(0L, 0.0, 0.0);
 
-  private double computeIntermediateVariance(long count, double sum, double m2, double value) {
-    double t = count * value - sum;
-    m2 += (t * t) / (count * (count - 1));
-    return m2;
+    forEachNotNull(length, blockValSetMap.get(_expression), (from, to) -> {
+      for (int i = from; i < to; i++) {
+        varianceTuple.apply(values[i]);
+      }
+    });
+
+    if (_nullHandlingEnabled && varianceTuple.getCount() == 0L) {
+      return;
+    }
+    setAggregationResult(aggregationResultHolder, varianceTuple.getCount(), varianceTuple.getSum(),
+        varianceTuple.getM2());
   }
 
   protected void setAggregationResult(AggregationResultHolder aggregationResultHolder, long count, double sum,
@@ -116,27 +117,33 @@ public class VarianceAggregationFunction extends BaseSingleInputAggregationFunct
   public void aggregateGroupBySV(int length, int[] groupKeyArray, GroupByResultHolder groupByResultHolder,
       Map<ExpressionContext, BlockValSet> blockValSetMap) {
     double[] values = StatisticalAggregationFunctionUtils.getValSet(blockValSetMap, _expression);
-    for (int i = 0; i < length; i++) {
-      setGroupByResult(groupKeyArray[i], groupByResultHolder, 1L, values[i], 0.0);
-    }
+
+    forEachNotNull(length, blockValSetMap.get(_expression), (from, to) -> {
+      for (int i = from; i < to; i++) {
+        setGroupByResult(groupKeyArray[i], groupByResultHolder, 1L, values[i], 0.0);
+      }
+    });
   }
 
   @Override
   public void aggregateGroupByMV(int length, int[][] groupKeysArray, GroupByResultHolder groupByResultHolder,
       Map<ExpressionContext, BlockValSet> blockValSetMap) {
     double[] values = StatisticalAggregationFunctionUtils.getValSet(blockValSetMap, _expression);
-    for (int i = 0; i < length; i++) {
-      for (int groupKey : groupKeysArray[i]) {
-        setGroupByResult(groupKey, groupByResultHolder, 1L, values[i], 0.0);
+
+    forEachNotNull(length, blockValSetMap.get(_expression), (from, to) -> {
+      for (int i = from; i < to; i++) {
+        for (int groupKey : groupKeysArray[i]) {
+          setGroupByResult(groupKey, groupByResultHolder, 1L, values[i], 0.0);
+        }
       }
-    }
+    });
   }
 
   @Override
   public VarianceTuple extractAggregationResult(AggregationResultHolder aggregationResultHolder) {
     VarianceTuple varianceTuple = aggregationResultHolder.getResult();
     if (varianceTuple == null) {
-      return new VarianceTuple(0L, 0.0, 0.0);
+      return _nullHandlingEnabled ? null : new VarianceTuple(0L, 0.0, 0.0);
     } else {
       return varianceTuple;
     }
@@ -149,6 +156,13 @@ public class VarianceAggregationFunction extends BaseSingleInputAggregationFunct
 
   @Override
   public VarianceTuple merge(VarianceTuple intermediateResult1, VarianceTuple intermediateResult2) {
+    if (_nullHandlingEnabled) {
+      if (intermediateResult1 == null) {
+        return intermediateResult2;
+      } else if (intermediateResult2 == null) {
+        return intermediateResult1;
+      }
+    }
     intermediateResult1.apply(intermediateResult2);
     return intermediateResult1;
   }

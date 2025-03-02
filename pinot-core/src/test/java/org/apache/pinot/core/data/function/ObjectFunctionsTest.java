@@ -97,7 +97,7 @@ public class ObjectFunctionsTest {
     oneValue.putValue("value2", null);
 
     inputs.add(new Object[]{
-        "coalesce(null0,null1, null2, value1, value2)", Lists.newArrayList("null0", "null1", "null2", "value1",
+        "coalesce(null0, null1, null2, value1, value2)", Lists.newArrayList("null0", "null1", "null2", "value1",
         "value2"), oneValue, 1
     });
 
@@ -113,6 +113,70 @@ public class ObjectFunctionsTest {
         "coalesce(value1,value2,value3,value4,value5)", Lists.newArrayList("value1", "value2", "value3", "value4",
         "value5"), allValues, "1"
     });
+
+    // Adding a test for case when
+    GenericRow caseWhenCaseValueOne = new GenericRow();
+    caseWhenCaseValueOne.putValue("value1", 1);
+    inputs.add(new Object[]{
+        "CASEWHEN(value1 = 1, 'one', value1 = 2, 'two', 'other')", Lists.newArrayList("value1",
+        "value1"), caseWhenCaseValueOne, "one"
+    });
+
+    GenericRow caseWhenCaseValueTwo = new GenericRow();
+    caseWhenCaseValueTwo.putValue("value1", 2);
+    inputs.add(new Object[]{
+        "CASEWHEN(value1 = 1, 'one', value1 = 2, 'two', 'other')", Lists.newArrayList("value1",
+        "value1"), caseWhenCaseValueTwo, "two"
+    });
+
+    GenericRow caseWhenCaseValueThree = new GenericRow();
+    caseWhenCaseValueThree.putValue("value1", 3);
+    inputs.add(new Object[]{
+        "CASEWHEN(value1 = 1, 'one', value1 = 2, 'two', 'other')", Lists.newArrayList("value1",
+        "value1"), caseWhenCaseValueThree, "other"
+    });
+
+    GenericRow caseWhenCaseMultipleExpression = new GenericRow();
+    caseWhenCaseMultipleExpression.putValue("value1", 10);
+    inputs.add(new Object[]{
+        "CASEWHEN(value1 = 1, 'one', value1 = 2, 'two', value1 = 3, 'three', value1 = 4, 'four', value1 = 5, 'five', "
+            + "value1 = 6, 'six', value1 = 7, 'seven', value1 = 8, 'eight', value1 = 9, 'nine', value1 = 10, 'ten', "
+            + "'other')", Lists.newArrayList("value1", "value1", "value1", "value1", "value1", "value1", "value1",
+        "value1", "value1", "value1"), caseWhenCaseMultipleExpression, "ten"
+    });
+
+    GenericRow caseWhenCaseMultipleExpression2 = new GenericRow();
+    caseWhenCaseMultipleExpression2.putValue("value1", 15);
+    inputs.add(new Object[]{
+        "CASEWHEN(value1 = 1, 'one', value1 = 2, 'two', value1 = 3, 'three', value1 = 4, 'four', value1 = 5, 'five', "
+            + "value1 = 6, 'six', value1 = 7, 'seven', value1 = 8, 'eight', value1 = 9, 'nine', value1 = 10, 'ten', "
+            + "value1 = 11, 'eleven', value1 = 12, 'twelve', value1 = 13, 'thirteen', value1 = 14, 'fourteen', value1"
+            + " = 15, 'fifteen'," + "'other')", Lists.newArrayList("value1", "value1", "value1", "value1", "value1",
+        "value1", "value1", "value1", "value1", "value1", "value1", "value1", "value1", "value1",
+        "value1"), caseWhenCaseMultipleExpression2, "fifteen"
+    });
+
+    // NULLIF
+    GenericRow nullIf = new GenericRow();
+    nullIf.putValue("value1", 1);
+    nullIf.putValue("value2", 1);
+    inputs.add(new Object[]{"NULLIF(value1, value2)", Lists.newArrayList("value1", "value2"), nullIf, null});
+
+    GenericRow nullIf2 = new GenericRow();
+    nullIf2.putValue("value1", 1);
+    nullIf2.putValue("value2", 2);
+    inputs.add(new Object[]{"NULLIF(value1, value2)", Lists.newArrayList("value1", "value2"), nullIf2, 1});
+
+    GenericRow nullIf3 = new GenericRow();
+    nullIf3.putValue("value1", null);
+    nullIf3.putValue("value2", 2);
+    inputs.add(new Object[]{"NULLIF(value1, value2)", Lists.newArrayList("value1", "value2"), nullIf3, null});
+
+    GenericRow nullIf4 = new GenericRow();
+    nullIf4.putValue("value1", 1);
+    nullIf4.putValue("value2", null);
+    inputs.add(new Object[]{"NULLIF(value1, value2)", Lists.newArrayList("value1", "value2"), nullIf4, 1});
+
     return inputs.toArray(new Object[0][]);
   }
 }

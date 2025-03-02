@@ -18,8 +18,10 @@
  */
 package org.apache.pinot.segment.local.utils;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import java.io.File;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.Serializable;
 import java.net.URI;
@@ -27,26 +29,36 @@ import java.net.URISyntaxException;
 import java.nio.file.FileSystems;
 import java.nio.file.PathMatcher;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.http.Header;
-import org.apache.http.NameValuePair;
-import org.apache.http.message.BasicHeader;
+import org.apache.hc.core5.http.Header;
+import org.apache.hc.core5.http.NameValuePair;
+import org.apache.hc.core5.http.message.BasicHeader;
 import org.apache.pinot.common.auth.AuthProviderUtils;
 import org.apache.pinot.common.exception.HttpErrorStatusException;
 import org.apache.pinot.common.utils.FileUploadDownloadClient;
 import org.apache.pinot.common.utils.SimpleHttpResponse;
-import org.apache.pinot.common.utils.TarGzCompressionUtils;
+import org.apache.pinot.common.utils.TarCompressionUtils;
+import org.apache.pinot.common.utils.URIUtils;
 import org.apache.pinot.common.utils.http.HttpClient;
+import org.apache.pinot.segment.local.constants.SegmentUploadConstants;
 import org.apache.pinot.segment.spi.V1Constants;
 import org.apache.pinot.segment.spi.creator.name.SegmentNameUtils;
 import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.filesystem.LocalPinotFS;
 import org.apache.pinot.spi.filesystem.PinotFS;
 import org.apache.pinot.spi.filesystem.PinotFSFactory;
 import org.apache.pinot.spi.ingestion.batch.spec.Constants;
@@ -133,7 +145,14 @@ public class SegmentPushUtils implements Serializable {
     AuthProvider authProvider = AuthProviderUtils.makeAuthProvider(spec.getAuthToken());
     List<Header> headers = AuthProviderUtils.toRequestHeaders(authProvider);
     List<NameValuePair> parameters = FileUploadDownloadClient.makeTableParam(tableName);
-    sendSegmentUriAndMetadata(spec, fileSystem, segmentUriToTarPathMap, headers, parameters);
+    PushJobSpec pushJobSpec = spec.getPushJobSpec();
+    parameters.add(FileUploadDownloadClient.makeParallelProtectionParam(pushJobSpec));
+    if (pushJobSpec != null && pushJobSpec.isBatchSegmentUpload()) {
+      // segments are uploaded in batch when batch mode is enabled.
+      sendSegmentsUriAndMetadata(spec, fileSystem, segmentUriToTarPathMap, headers, parameters);
+    } else {
+      sendSegmentUriAndMetadata(spec, fileSystem, segmentUriToTarPathMap, headers, parameters);
+    }
   }
 
   public static void pushSegments(SegmentGenerationJobSpec spec, PinotFS fileSystem, List<String> tarFilePaths,
@@ -283,7 +302,23 @@ public class SegmentPushUtils implements Serializable {
       String segmentName = fileName.endsWith(Constants.TAR_GZ_FILE_EXT)
           ? fileName.substring(0, fileName.length() - Constants.TAR_GZ_FILE_EXT.length()) : fileName;
       SegmentNameUtils.validatePartialOrFullSegmentName(segmentName);
-      File segmentMetadataFile = generateSegmentMetadataFile(fileSystem, URI.create(tarFilePath));
+      File segmentMetadataFile;
+      // Check if there is a segment metadata tar gz file named `segmentName.metadata.tar.gz`, already in the remote
+      // directory. This is to avoid generating a new segment metadata tar gz file every time we push a segment,
+      // which requires downloading the entire segment tar gz file.
+
+      URI metadataTarGzFilePath = generateSegmentMetadataURI(tarFilePath, segmentName);
+      LOGGER.info("Checking if metadata tar gz file {} exists", metadataTarGzFilePath);
+      if (spec.getPushJobSpec().isPreferMetadataTarGz() && fileSystem.exists(metadataTarGzFilePath)) {
+        segmentMetadataFile = new File(FileUtils.getTempDirectory(),
+            "segmentMetadata-" + UUID.randomUUID() + TarCompressionUtils.TAR_GZ_FILE_EXTENSION);
+        if (segmentMetadataFile.exists()) {
+          FileUtils.forceDelete(segmentMetadataFile);
+        }
+        fileSystem.copyToLocalFile(metadataTarGzFilePath, segmentMetadataFile);
+      } else {
+        segmentMetadataFile = generateSegmentMetadataFile(fileSystem, URI.create(tarFilePath));
+      }
       try {
         for (PinotClusterSpec pinotClusterSpec : spec.getPinotClusterSpecs()) {
           URI controllerURI;
@@ -302,18 +337,19 @@ public class SegmentPushUtils implements Serializable {
             retryWaitMs = spec.getPushJobSpec().getPushRetryIntervalMillis();
           }
           RetryPolicies.exponentialBackoffRetryPolicy(attempts, retryWaitMs, 5).attempt(() -> {
+            List<Header> reqHttpHeaders = new ArrayList<>(headers);
             try {
-              headers.add(new BasicHeader(FileUploadDownloadClient.CustomHeaders.DOWNLOAD_URI, segmentUriPath));
-              headers.add(new BasicHeader(FileUploadDownloadClient.CustomHeaders.UPLOAD_TYPE,
+              reqHttpHeaders.add(new BasicHeader(FileUploadDownloadClient.CustomHeaders.DOWNLOAD_URI, segmentUriPath));
+              reqHttpHeaders.add(new BasicHeader(FileUploadDownloadClient.CustomHeaders.UPLOAD_TYPE,
                   FileUploadDownloadClient.FileUploadType.METADATA.toString()));
               if (spec.getPushJobSpec() != null) {
-                headers.add(new BasicHeader(FileUploadDownloadClient.CustomHeaders.COPY_SEGMENT_TO_DEEP_STORE,
+                reqHttpHeaders.add(new BasicHeader(FileUploadDownloadClient.CustomHeaders.COPY_SEGMENT_TO_DEEP_STORE,
                     String.valueOf(spec.getPushJobSpec().getCopyToDeepStoreForMetadataPush())));
               }
 
               SimpleHttpResponse response = FILE_UPLOAD_DOWNLOAD_CLIENT.uploadSegmentMetadata(
                   FileUploadDownloadClient.getUploadSegmentURI(controllerURI), segmentName,
-                  segmentMetadataFile, headers, parameters, HttpClient.DEFAULT_SOCKET_TIMEOUT_MS);
+                  segmentMetadataFile, reqHttpHeaders, parameters, HttpClient.DEFAULT_SOCKET_TIMEOUT_MS);
               LOGGER.info("Response for pushing table {} segment {} to location {} - {}: {}", tableName, segmentName,
                   controllerURI, response.getStatusCode(), response.getResponse());
               return true;
@@ -339,6 +375,188 @@ public class SegmentPushUtils implements Serializable {
     }
   }
 
+  public static void sendSegmentsUriAndMetadata(SegmentGenerationJobSpec spec, PinotFS fileSystem,
+      Map<String, String> segmentUriToTarPathMap, List<Header> headers, List<NameValuePair> parameters)
+      throws Exception {
+    String tableName = spec.getTableSpec().getTableName();
+    ConcurrentHashMap<String, File> segmentMetadataFileMap = new ConcurrentHashMap<>();
+    ConcurrentLinkedQueue<String> segmentURIs = new ConcurrentLinkedQueue<>();
+    Map<String, File> allSegmentsMetadataMap = new HashMap<>();
+    File allSegmentsMetadataTarFile = null;
+    int nThreads = spec.getPushJobSpec().getSegmentMetadataGenerationParallelism();
+    ExecutorService executor = Executors.newFixedThreadPool(nThreads);
+    LOGGER.info("Start pushing segment metadata: {} to locations: {} for table: {} with parallelism: {}",
+        segmentUriToTarPathMap, Arrays.toString(spec.getPinotClusterSpecs()), tableName,
+        spec.getPushJobSpec().getPushParallelism());
+
+    try {
+      generateSegmentMetadataFiles(spec, fileSystem, segmentUriToTarPathMap, segmentMetadataFileMap, segmentURIs,
+          executor);
+      allSegmentsMetadataTarFile = createSegmentsMetadataTarFile(segmentURIs, segmentMetadataFileMap);
+      // the key is unused in batch upload mode and hence 'noopKey'
+      allSegmentsMetadataMap.put("noopKey", allSegmentsMetadataTarFile);
+
+      // perform metadata push in batch mode for every cluster
+      for (PinotClusterSpec pinotClusterSpec : spec.getPinotClusterSpecs()) {
+        URI controllerURI;
+        try {
+          controllerURI = new URI(pinotClusterSpec.getControllerURI());
+        } catch (URISyntaxException e) {
+          throw new RuntimeException("Got invalid controller uri: " + pinotClusterSpec.getControllerURI());
+        }
+        LOGGER.info("Pushing segments: {} to location: {} for table: {}",
+            segmentMetadataFileMap.keySet(), controllerURI, tableName);
+        int attempts = 1;
+        if (spec.getPushJobSpec() != null && spec.getPushJobSpec().getPushAttempts() > 0) {
+          attempts = spec.getPushJobSpec().getPushAttempts();
+        }
+        long retryWaitMs = 1000L;
+        if (spec.getPushJobSpec() != null && spec.getPushJobSpec().getPushRetryIntervalMillis() > 0) {
+          retryWaitMs = spec.getPushJobSpec().getPushRetryIntervalMillis();
+        }
+        RetryPolicies.exponentialBackoffRetryPolicy(attempts, retryWaitMs, 5).attempt(() -> {
+          List<Header> reqHttpHeaders = new ArrayList<>(headers);
+          try {
+            addHeaders(spec, reqHttpHeaders);
+            URI segmentUploadURI = getBatchSegmentUploadURI(controllerURI);
+            SimpleHttpResponse response = FILE_UPLOAD_DOWNLOAD_CLIENT.uploadSegmentMetadataFiles(segmentUploadURI,
+                allSegmentsMetadataMap, reqHttpHeaders, parameters, HttpClient.DEFAULT_SOCKET_TIMEOUT_MS);
+            LOGGER.info("Response for pushing table {} segments {} to location {} - {}: {}", tableName,
+                segmentMetadataFileMap.keySet(), controllerURI, response.getStatusCode(), response.getResponse());
+            return true;
+          } catch (HttpErrorStatusException e) {
+            int statusCode = e.getStatusCode();
+            if (statusCode >= 500) {
+              // Temporary exception
+              LOGGER.warn("Caught temporary exception while pushing table: {} segments: {} to {}, will retry",
+                  tableName, segmentMetadataFileMap.keySet(), controllerURI, e);
+              return false;
+            } else {
+              // Permanent exception
+              LOGGER.error("Caught permanent exception while pushing table: {} segments: {} to {}, won't retry",
+                  tableName, segmentMetadataFileMap.keySet(), controllerURI, e);
+              throw e;
+            }
+          }
+        });
+      }
+    } finally {
+      for (Map.Entry<String, File> metadataFileEntry : segmentMetadataFileMap.entrySet()) {
+        FileUtils.deleteQuietly(metadataFileEntry.getValue());
+      }
+      if (allSegmentsMetadataTarFile != null) {
+        FileUtils.deleteQuietly(allSegmentsMetadataTarFile);
+      }
+      executor.shutdown();
+    }
+  }
+
+  @VisibleForTesting
+  static void generateSegmentMetadataFiles(SegmentGenerationJobSpec spec, PinotFS fileSystem,
+      Map<String, String> segmentUriToTarPathMap, ConcurrentHashMap<String, File> segmentMetadataFileMap,
+      ConcurrentLinkedQueue<String> segmentURIs, ExecutorService executor) {
+
+    List<Future<Void>> futures = new ArrayList<>();
+    // Generate segment metadata files in parallel
+    for (String segmentUriPath : segmentUriToTarPathMap.keySet()) {
+      futures.add(
+          executor.submit(() -> {
+            String tarFilePath = segmentUriToTarPathMap.get(segmentUriPath);
+            String fileName = new File(tarFilePath).getName();
+            // segments stored in Pinot deep store do not have .tar.gz extension
+            String segmentName = fileName.endsWith(Constants.TAR_GZ_FILE_EXT)
+                ? fileName.substring(0, fileName.length() - Constants.TAR_GZ_FILE_EXT.length()) : fileName;
+            SegmentNameUtils.validatePartialOrFullSegmentName(segmentName);
+            File segmentMetadataFile;
+            // Check if there is a segment metadata tar gz file named `segmentName.metadata.tar.gz`, already in the
+            // remote directory. This is to avoid generating a new segment metadata tar gz file every time we push a
+            // segment, which requires downloading the entire segment tar gz file.
+
+            URI metadataTarGzFilePath = generateSegmentMetadataURI(tarFilePath, segmentName);
+            LOGGER.info("Checking if metadata tar gz file {} exists", metadataTarGzFilePath);
+            if (spec.getPushJobSpec().isPreferMetadataTarGz() && fileSystem.exists(metadataTarGzFilePath)) {
+              segmentMetadataFile = new File(FileUtils.getTempDirectory(),
+                  SegmentUploadConstants.SEGMENT_METADATA_DIR_PREFIX + UUID.randomUUID()
+                      + TarCompressionUtils.TAR_GZ_FILE_EXTENSION);
+              if (segmentMetadataFile.exists()) {
+                FileUtils.forceDelete(segmentMetadataFile);
+              }
+              fileSystem.copyToLocalFile(metadataTarGzFilePath, segmentMetadataFile);
+            } else {
+              segmentMetadataFile = generateSegmentMetadataFile(fileSystem, URI.create(tarFilePath));
+            }
+            segmentMetadataFileMap.put(segmentName, segmentMetadataFile);
+            segmentURIs.add(segmentName);
+            segmentURIs.add(segmentUriPath);
+            return null;
+          }));
+    }
+    int errorCount = 0;
+    Exception exception = null;
+    for (Future<Void> future : futures) {
+      try {
+        future.get();
+      } catch (Exception e) {
+        errorCount++;
+        exception = e;
+      }
+    }
+    if (errorCount > 0) {
+      throw new RuntimeException(
+          String.format("%d out of %d segment metadata generation failed", errorCount, segmentUriToTarPathMap.size()),
+          exception);
+    }
+  }
+
+  private static URI getBatchSegmentUploadURI(URI controllerURI)
+      throws URISyntaxException {
+    return FileUploadDownloadClient.getBatchSegmentUploadURI(controllerURI);
+  }
+
+  private static void addHeaders(SegmentGenerationJobSpec jobSpec, List<Header> headers) {
+    headers.add(new BasicHeader(FileUploadDownloadClient.CustomHeaders.UPLOAD_TYPE,
+        FileUploadDownloadClient.FileUploadType.METADATA.toString()));
+    if (jobSpec.getPushJobSpec() != null) {
+      headers.add(new BasicHeader(FileUploadDownloadClient.CustomHeaders.COPY_SEGMENT_TO_DEEP_STORE,
+          String.valueOf(jobSpec.getPushJobSpec().getCopyToDeepStoreForMetadataPush())));
+    }
+  }
+
+  // Method helps create an uber tar file which contains the metadata files for all segments that are to be uploaded.
+  // Additionally, it contains a segmentName to segmentDownloadURI mapping file which allows us to avoid sending the
+  // segmentDownloadURI as a header field as there are limitations on the number of headers allowed in the http request.
+  @VisibleForTesting
+  static File createSegmentsMetadataTarFile(Collection<String> segmentURIs, Map<String, File> segmentMetadataFileMap)
+      throws IOException {
+    String uuid = UUID.randomUUID().toString();
+    File allSegmentsMetadataDir =
+        new File(FileUtils.getTempDirectory(), SegmentUploadConstants.ALL_SEGMENTS_METADATA_DIR_PREFIX + uuid);
+    FileUtils.forceMkdir(allSegmentsMetadataDir);
+    for (Map.Entry<String, File> segmentMetadataTarFileEntry : segmentMetadataFileMap.entrySet()) {
+      String segmentName = segmentMetadataTarFileEntry.getKey();
+      File tarFile = segmentMetadataTarFileEntry.getValue();
+      TarCompressionUtils.untarOneFile(tarFile, V1Constants.MetadataKeys.METADATA_FILE_NAME,
+          new File(allSegmentsMetadataDir, segmentName + "." + V1Constants.MetadataKeys.METADATA_FILE_NAME));
+      TarCompressionUtils.untarOneFile(tarFile, V1Constants.SEGMENT_CREATION_META,
+          new File(allSegmentsMetadataDir, segmentName + "." + V1Constants.SEGMENT_CREATION_META));
+    }
+    File allSegmentsMetadataTarFile = new File(FileUtils.getTempDirectory(),
+        SegmentUploadConstants.ALL_SEGMENTS_METADATA_TAR_FILE_PREFIX + uuid
+            + TarCompressionUtils.TAR_GZ_FILE_EXTENSION);
+    if (allSegmentsMetadataTarFile.exists()) {
+      FileUtils.forceDelete(allSegmentsMetadataTarFile);
+    }
+    // Add a file which contains the download URI of all the segments
+    File segmentsURIFile = new File(allSegmentsMetadataDir, SegmentUploadConstants.ALL_SEGMENTS_METADATA_FILENAME);
+    FileUtils.writeLines(segmentsURIFile, segmentURIs);
+    try {
+      TarCompressionUtils.createCompressedTarFile(allSegmentsMetadataDir, allSegmentsMetadataTarFile);
+    } finally {
+      FileUtils.deleteDirectory(allSegmentsMetadataDir);
+    }
+    return allSegmentsMetadataTarFile;
+  }
+
   public static Map<String, String> getSegmentUriToTarPathMap(URI outputDirURI, PushJobSpec pushSpec,
       String[] files) {
     Map<String, String> segmentUriToTarPathMap = new HashMap<>();
@@ -355,6 +573,10 @@ public class SegmentPushUtils implements Serializable {
       }
 
       URI uri = URI.create(file);
+      if (uri.getPath().endsWith(Constants.METADATA_TAR_GZ_FILE_EXT)) {
+        // Skip segment metadata tar gz files
+        continue;
+      }
       if (uri.getPath().endsWith(Constants.TAR_GZ_FILE_EXT)) {
         URI updatedURI = SegmentPushUtils.generateSegmentTarURI(outputDirURI, uri, pushSpec.getSegmentUriPrefix(),
             pushSpec.getSegmentUriSuffix());
@@ -374,14 +596,20 @@ public class SegmentPushUtils implements Serializable {
    * 3. Tar both files into a segment metadata file.
    *
    */
-  private static File generateSegmentMetadataFile(PinotFS fileSystem, URI tarFileURI)
+  public static File generateSegmentMetadataFile(PinotFS fileSystem, URI tarFileURI)
       throws Exception {
     String uuid = UUID.randomUUID().toString();
     File tarFile =
-        new File(FileUtils.getTempDirectory(), "segmentTar-" + uuid + TarGzCompressionUtils.TAR_GZ_FILE_EXTENSION);
+        new File(FileUtils.getTempDirectory(), "segmentTar-" + uuid + TarCompressionUtils.TAR_GZ_FILE_EXTENSION);
     File segmentMetadataDir = new File(FileUtils.getTempDirectory(), "segmentMetadataDir-" + uuid);
     try {
-      fileSystem.copyToLocalFile(tarFileURI, tarFile);
+      if (fileSystem instanceof LocalPinotFS) {
+        // For local file system, we don't need to copy the tar file.
+        tarFile = new File(URIUtils.decode(tarFileURI.getRawPath()));
+      } else {
+        // For other file systems, we need to download the file to local file system
+        fileSystem.copyToLocalFile(tarFileURI, tarFile);
+      }
       if (segmentMetadataDir.exists()) {
         FileUtils.forceDelete(segmentMetadataDir);
       }
@@ -389,25 +617,43 @@ public class SegmentPushUtils implements Serializable {
 
       // Extract metadata.properties
       LOGGER.info("Trying to untar Metadata file from: [{}] to [{}]", tarFile, segmentMetadataDir);
-      TarGzCompressionUtils.untarOneFile(tarFile, V1Constants.MetadataKeys.METADATA_FILE_NAME,
+      TarCompressionUtils.untarOneFile(tarFile, V1Constants.MetadataKeys.METADATA_FILE_NAME,
           new File(segmentMetadataDir, V1Constants.MetadataKeys.METADATA_FILE_NAME));
 
       // Extract creation.meta
       LOGGER.info("Trying to untar CreationMeta file from: [{}] to [{}]", tarFile, segmentMetadataDir);
-      TarGzCompressionUtils.untarOneFile(tarFile, V1Constants.SEGMENT_CREATION_META,
+      TarCompressionUtils.untarOneFile(tarFile, V1Constants.SEGMENT_CREATION_META,
           new File(segmentMetadataDir, V1Constants.SEGMENT_CREATION_META));
 
       File segmentMetadataTarFile = new File(FileUtils.getTempDirectory(),
-          "segmentMetadata-" + uuid + TarGzCompressionUtils.TAR_GZ_FILE_EXTENSION);
+          "segmentMetadata-" + uuid + TarCompressionUtils.TAR_GZ_FILE_EXTENSION);
       if (segmentMetadataTarFile.exists()) {
         FileUtils.forceDelete(segmentMetadataTarFile);
       }
       LOGGER.info("Trying to tar segment metadata dir [{}] to [{}]", segmentMetadataDir, segmentMetadataTarFile);
-      TarGzCompressionUtils.createTarGzFile(segmentMetadataDir, segmentMetadataTarFile);
+      TarCompressionUtils.createCompressedTarFile(segmentMetadataDir, segmentMetadataTarFile);
       return segmentMetadataTarFile;
     } finally {
-      FileUtils.deleteQuietly(tarFile);
+      if (!(fileSystem instanceof LocalPinotFS)) {
+        // For local file system, we don't need to delete the tar file.
+        FileUtils.deleteQuietly(tarFile);
+      }
       FileUtils.deleteQuietly(segmentMetadataDir);
     }
+  }
+
+  public static URI generateSegmentMetadataURI(String segmentTarPath, String segmentName)
+      throws URISyntaxException {
+    URI segmentTarURI = URI.create(segmentTarPath);
+    URI metadataTarGzFilePath = new URI(
+        segmentTarURI.getScheme(),
+        segmentTarURI.getUserInfo(),
+        segmentTarURI.getHost(),
+        segmentTarURI.getPort(),
+        new File(segmentTarURI.getPath()).getParentFile() + File.separator + segmentName
+            + Constants.METADATA_TAR_GZ_FILE_EXT,
+        segmentTarURI.getQuery(),
+        segmentTarURI.getFragment());
+    return metadataTarGzFilePath;
   }
 }

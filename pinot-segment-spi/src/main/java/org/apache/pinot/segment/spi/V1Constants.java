@@ -26,10 +26,10 @@ public class V1Constants {
   public static final String INDEX_MAP_FILE_NAME = "index_map";
   public static final String INDEX_FILE_NAME = "columns.psf";
   public static final String VALID_DOC_IDS_SNAPSHOT_FILE_NAME = "validdocids.bitmap.snapshot";
+  public static final String TTL_WATERMARK_TABLE_PARTITION = "ttl.watermark.partition.";
 
   public static class Str {
     public static final char DEFAULT_STRING_PAD_CHAR = '\0';
-    public static final char LEGACY_STRING_PAD_CHAR = '%';
   }
 
   public static class Dict {
@@ -42,16 +42,32 @@ public class V1Constants {
     public static final String RAW_SV_FORWARD_INDEX_FILE_EXTENSION = ".sv.raw.fwd";
     public static final String RAW_MV_FORWARD_INDEX_FILE_EXTENSION = ".mv.raw.fwd";
     public static final String UNSORTED_MV_FORWARD_INDEX_FILE_EXTENSION = ".mv.fwd";
+    public static final String MAP_FORWARD_INDEX_FILE_EXTENSION = ".map.fwd";
     public static final String BITMAP_INVERTED_INDEX_FILE_EXTENSION = ".bitmap.inv";
     public static final String BITMAP_RANGE_INDEX_FILE_EXTENSION = ".bitmap.range";
-    public static final String FST_INDEX_FILE_EXTENSION = ".lucene.fst";
     public static final String JSON_INDEX_FILE_EXTENSION = ".json.idx";
+    public static final String MAP_INDEX_FILE_EXTENSION = ".map.idx";
     public static final String NATIVE_TEXT_INDEX_FILE_EXTENSION = ".nativetext.idx";
     public static final String H3_INDEX_FILE_EXTENSION = ".h3.idx";
     public static final String BLOOM_FILTER_FILE_EXTENSION = ".bloom";
     public static final String NULLVALUE_VECTOR_FILE_EXTENSION = ".bitmap.nullvalue";
+    public static final String LUCENE_FST_INDEX_FILE_EXTENSION = ".lucene.fst";
     public static final String LUCENE_TEXT_INDEX_DOCID_MAPPING_FILE_EXTENSION = ".lucene.mapping";
     public static final String LUCENE_TEXT_INDEX_FILE_EXTENSION = ".lucene.index";
+    public static final String LUCENE_V9_FST_INDEX_FILE_EXTENSION = ".lucene.v9.fst";
+    public static final String LUCENE_V9_TEXT_INDEX_FILE_EXTENSION = ".lucene.v9.index";
+    public static final String LUCENE_V99_FST_INDEX_FILE_EXTENSION = ".lucene.v99.fst";
+    public static final String LUCENE_V99_TEXT_INDEX_FILE_EXTENSION = ".lucene.v99.index";
+    public static final String LUCENE_V912_FST_INDEX_FILE_EXTENSION = ".lucene.v912.fst";
+    public static final String LUCENE_V912_TEXT_INDEX_FILE_EXTENSION = ".lucene.v912.index";
+    public static final String LUCENE_TEXT_INDEX_PROPERTIES_FILE = "lucene.properties";
+    public static final String VECTOR_INDEX_FILE_EXTENSION = ".vector.index";
+    public static final String VECTOR_HNSW_INDEX_FILE_EXTENSION = ".vector.hnsw.index";
+    public static final String VECTOR_V99_INDEX_FILE_EXTENSION = ".vector.v99.index";
+    public static final String VECTOR_V99_HNSW_INDEX_FILE_EXTENSION = ".vector.v99.hnsw.index";
+    public static final String VECTOR_V912_INDEX_FILE_EXTENSION = ".vector.v912.index";
+    public static final String VECTOR_V912_HNSW_INDEX_FILE_EXTENSION = ".vector.v912.hnsw.index";
+    public static final String VECTOR_HNSW_INDEX_DOCID_MAPPING_FILE_EXTENSION = ".vector.hnsw.mapping";
   }
 
   public static class MetadataKeys {
@@ -76,6 +92,7 @@ public class V1Constants {
       public static final String DATETIME_COLUMNS = "segment.datetime.column.names";
       public static final String SEGMENT_TOTAL_DOCS = "segment.total.docs";
       public static final String SEGMENT_PADDING_CHARACTER = "segment.padding.character";
+      public static final String COMPLEX_COLUMNS = "segment.complex.column.names";
 
       public static final String CUSTOM_SUBSET = "custom";
 
@@ -91,6 +108,7 @@ public class V1Constants {
       public static final String DATA_TYPE = "dataType";
       public static final String BITS_PER_ELEMENT = "bitsPerElement";
       public static final String DICTIONARY_ELEMENT_SIZE = "lengthOfEachEntry";
+      public static final String COLUMN_NAME = "columnName";
       public static final String COLUMN_TYPE = "columnType";
       public static final String IS_SORTED = "isSorted";
       public static final String HAS_DICTIONARY = "hasDictionary";
@@ -108,8 +126,11 @@ public class V1Constants {
       public static final String PARTITION_VALUES = "partitionValues";
       public static final String DATETIME_FORMAT = "datetimeFormat";
       public static final String DATETIME_GRANULARITY = "datetimeGranularity";
+      public static final String COMPLEX_CHILD_FIELD_NAMES = "complexChildFieldNames";
 
       public static final String COLUMN_PROPS_KEY_PREFIX = "column.";
+      public static final String SCHEMA_MAX_LENGTH = "schemaMaxLength";
+      public static final String SCHEMA_MAX_LENGTH_EXCEED_STRATEGY = "schemaMaxLengthExceedStrategy";
 
       public static String getKeyFor(String column, String key) {
         return COLUMN_PROPS_KEY_PREFIX + column + "." + key;

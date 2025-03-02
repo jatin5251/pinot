@@ -21,14 +21,13 @@ package org.apache.pinot.core.geospatial.transform.function;
 import com.google.common.base.Preconditions;
 import java.util.List;
 import java.util.Map;
-import org.apache.pinot.core.operator.blocks.ProjectionBlock;
+import org.apache.pinot.core.operator.ColumnContext;
+import org.apache.pinot.core.operator.blocks.ValueBlock;
 import org.apache.pinot.core.operator.transform.TransformResultMetadata;
 import org.apache.pinot.core.operator.transform.function.BaseTransformFunction;
 import org.apache.pinot.core.operator.transform.function.LiteralTransformFunction;
 import org.apache.pinot.core.operator.transform.function.TransformFunction;
-import org.apache.pinot.core.plan.DocIdSetPlanNode;
 import org.apache.pinot.segment.local.utils.GeometrySerializer;
-import org.apache.pinot.segment.spi.datasource.DataSource;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.locationtech.jts.geom.Geometry;
 
@@ -43,7 +42,6 @@ public class GeoToH3Function extends BaseTransformFunction {
   private TransformFunction _firstArgument;
   private TransformFunction _secondArgument;
   private TransformFunction _thirdArgument;
-  private long[] _results;
 
   @Override
   public String getName() {
@@ -51,7 +49,8 @@ public class GeoToH3Function extends BaseTransformFunction {
   }
 
   @Override
-  public void init(List<TransformFunction> arguments, Map<String, DataSource> dataSourceMap) {
+  public void init(List<TransformFunction> arguments, Map<String, ColumnContext> columnContextMap) {
+    super.init(arguments, columnContextMap);
     Preconditions.checkArgument(arguments.size() == 3 || arguments.size() == 2,
         "Transform function %s requires 2 or 3 arguments", getName());
     if (arguments.size() == 3) {
@@ -77,8 +76,9 @@ public class GeoToH3Function extends BaseTransformFunction {
       TransformFunction transformFunction = arguments.get(0);
       Preconditions.checkArgument(transformFunction.getResultMetadata().isSingleValue(),
           "First argument must be single-valued for transform function: %s", getName());
-      Preconditions.checkArgument(transformFunction.getResultMetadata().getDataType() == FieldSpec.DataType.BYTES,
-          "The first argument must be bytes");
+      Preconditions.checkArgument(transformFunction.getResultMetadata().getDataType() == FieldSpec.DataType.BYTES
+          || transformFunction.getResultMetadata().getDataType() == FieldSpec.DataType.STRING,
+          "The first argument must be bytes/string");
       _firstArgument = transformFunction;
       transformFunction = arguments.get(1);
       Preconditions.checkArgument(transformFunction.getResultMetadata().isSingleValue(),
@@ -95,27 +95,27 @@ public class GeoToH3Function extends BaseTransformFunction {
   }
 
   @Override
-  public long[] transformToLongValuesSV(ProjectionBlock projectionBlock) {
-    if (_results == null) {
-      _results = new long[DocIdSetPlanNode.MAX_DOC_PER_CALL];
-    }
+  public long[] transformToLongValuesSV(ValueBlock valueBlock) {
+    int numDocs = valueBlock.getNumDocs();
+    initLongValuesSV(numDocs);
 
     if (_thirdArgument == null) {
-      byte[][] geoValues = _firstArgument.transformToBytesValuesSV(projectionBlock);
-      int[] resValues = _secondArgument.transformToIntValuesSV(projectionBlock);
-      for (int i = 0; i < projectionBlock.getNumDocs(); i++) {
+      byte[][] geoValues = _firstArgument.transformToBytesValuesSV(valueBlock);
+      int[] resValues = _secondArgument.transformToIntValuesSV(valueBlock);
+      for (int i = 0; i < numDocs; i++) {
         Geometry geometry = GeometrySerializer.deserialize(geoValues[i]);
-        _results[i] = ScalarFunctions.geoToH3(geometry.getCoordinate().x, geometry.getCoordinate().y, resValues[i]);
+        _longValuesSV[i] =
+            ScalarFunctions.geoToH3(geometry.getCoordinate().x, geometry.getCoordinate().y, resValues[i]);
       }
     } else {
-      double[] lonValues = _firstArgument.transformToDoubleValuesSV(projectionBlock);
-      double[] latValues = _secondArgument.transformToDoubleValuesSV(projectionBlock);
-      int[] resValues = _thirdArgument.transformToIntValuesSV(projectionBlock);
-      for (int i = 0; i < projectionBlock.getNumDocs(); i++) {
-        _results[i] = ScalarFunctions.geoToH3(lonValues[i], latValues[i], resValues[i]);
+      double[] lonValues = _firstArgument.transformToDoubleValuesSV(valueBlock);
+      double[] latValues = _secondArgument.transformToDoubleValuesSV(valueBlock);
+      int[] resValues = _thirdArgument.transformToIntValuesSV(valueBlock);
+      for (int i = 0; i < numDocs; i++) {
+        _longValuesSV[i] = ScalarFunctions.geoToH3(lonValues[i], latValues[i], resValues[i]);
       }
     }
 
-    return _results;
+    return _longValuesSV;
   }
 }

@@ -23,6 +23,7 @@ import com.google.common.base.Preconditions;
 import java.util.Map;
 import java.util.UUID;
 import org.apache.pinot.spi.stream.StreamConfig;
+import org.apache.pinot.spi.stream.StreamConfigProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.kinesis.model.ShardIteratorType;
@@ -64,13 +65,18 @@ public class KinesisConfig {
   public static final String SESSION_DURATION_SECONDS = "sessionDurationSeconds";
   public static final String ASYNC_SESSION_UPDATED_ENABLED = "asyncSessionUpdateEnabled";
 
-  // TODO: this is a starting point, until a better default is figured out
-  public static final String DEFAULT_MAX_RECORDS = "20";
+  public static final String DEFAULT_MAX_RECORDS = "10000";
   public static final String DEFAULT_SHARD_ITERATOR_TYPE = ShardIteratorType.LATEST.toString();
   public static final String DEFAULT_IAM_ROLE_BASED_ACCESS_ENABLED = "false";
   public static final String DEFAULT_SESSION_DURATION_SECONDS = "900";
   public static final String DEFAULT_ASYNC_SESSION_UPDATED_ENABLED = "true";
-  public static final String DEFAULT_RPS_LIMIT = "5";
+
+  // Kinesis has a default limit of 5 getRecord requests per second per shard.
+  // This limit is enforced by Kinesis and is not configurable.
+  // We are setting it to 1 to avoid hitting the limit  in a replicated setup,
+  // where multiple replicas are fetching from the same shard.
+  // see - https://docs.aws.amazon.com/kinesis/latest/APIReference/API_GetRecords.html
+  public static final String DEFAULT_RPS_LIMIT = "1";
 
   private final String _streamTopicName;
   private final String _awsRegion;
@@ -79,6 +85,7 @@ public class KinesisConfig {
   private final String _accessKey;
   private final String _secretKey;
   private final String _endpoint;
+  private boolean _populateMetadata;
 
   // IAM Role values
   private boolean _iamRoleBasedAccess;
@@ -126,6 +133,8 @@ public class KinesisConfig {
           "Must provide 'roleArn' in stream config for table %s if iamRoleBasedAccess is enabled",
           streamConfig.getTableNameWithType());
     }
+    _populateMetadata = Boolean.parseBoolean(streamConfig.getStreamConfigsMap().getOrDefault(
+        StreamConfigProperties.METADATA_POPULATE, "false"));
   }
 
   public String getStreamTopicName() {
@@ -182,5 +191,9 @@ public class KinesisConfig {
 
   public boolean isAsyncSessionUpdateEnabled() {
     return _asyncSessionUpdateEnabled;
+  }
+
+  public boolean isPopulateMetadata() {
+    return _populateMetadata;
   }
 }

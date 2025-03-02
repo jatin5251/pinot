@@ -18,6 +18,7 @@
  */
 package org.apache.pinot.spi.config.table.ingestion;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyDescription;
 import java.util.List;
 import javax.annotation.Nullable;
@@ -39,11 +40,25 @@ public class IngestionConfig extends BaseJsonConfig {
   @JsonPropertyDescription("Config related to filtering records during ingestion")
   private FilterConfig _filterConfig;
 
+  @JsonPropertyDescription("Config related to enriching records during ingestion")
+  private List<EnrichmentConfig> _enrichmentConfigs;
+
   @JsonPropertyDescription("Configs related to record transformation functions applied during ingestion")
   private List<TransformConfig> _transformConfigs;
 
   @JsonPropertyDescription("Config related to handling complex type")
   private ComplexTypeConfig _complexTypeConfig;
+
+  @JsonPropertyDescription("Config related to the SchemaConformingTransformer")
+  @JsonProperty("schemaConformingTransformerConfig")
+  private SchemaConformingTransformerConfig _schemaConformingTransformerConfig;
+
+  @JsonPropertyDescription("Config related to the SchemaConformingTransformerV2 (backward compatibility)")
+  @JsonProperty("schemaConformingTransformerV2Config")
+  public void setSchemaConformingTransformerV2Config(
+      SchemaConformingTransformerConfig schemaConformingTransformerConfig) {
+    _schemaConformingTransformerConfig = schemaConformingTransformerConfig;
+  }
 
   @JsonPropertyDescription("Configs related to record aggregation function applied during ingestion")
   private List<AggregationConfig> _aggregationConfigs;
@@ -60,13 +75,17 @@ public class IngestionConfig extends BaseJsonConfig {
   @Deprecated
   public IngestionConfig(@Nullable BatchIngestionConfig batchIngestionConfig,
       @Nullable StreamIngestionConfig streamIngestionConfig, @Nullable FilterConfig filterConfig,
+      @Nullable List<EnrichmentConfig> enrichmentConfigs,
       @Nullable List<TransformConfig> transformConfigs, @Nullable ComplexTypeConfig complexTypeConfig,
+      @Nullable SchemaConformingTransformerConfig schemaConformingTransformerConfig,
       @Nullable List<AggregationConfig> aggregationConfigs) {
     _batchIngestionConfig = batchIngestionConfig;
     _streamIngestionConfig = streamIngestionConfig;
     _filterConfig = filterConfig;
+    _enrichmentConfigs = enrichmentConfigs;
     _transformConfigs = transformConfigs;
     _complexTypeConfig = complexTypeConfig;
+    _schemaConformingTransformerConfig = schemaConformingTransformerConfig;
     _aggregationConfigs = aggregationConfigs;
   }
 
@@ -89,6 +108,11 @@ public class IngestionConfig extends BaseJsonConfig {
   }
 
   @Nullable
+  public List<EnrichmentConfig> getEnrichmentConfigs() {
+    return _enrichmentConfigs;
+  }
+
+  @Nullable
   public List<TransformConfig> getTransformConfigs() {
     return _transformConfigs;
   }
@@ -96,6 +120,11 @@ public class IngestionConfig extends BaseJsonConfig {
   @Nullable
   public ComplexTypeConfig getComplexTypeConfig() {
     return _complexTypeConfig;
+  }
+
+  @Nullable
+  public SchemaConformingTransformerConfig getSchemaConformingTransformerConfig() {
+    return _schemaConformingTransformerConfig;
   }
 
   @Nullable
@@ -127,12 +156,21 @@ public class IngestionConfig extends BaseJsonConfig {
     _filterConfig = filterConfig;
   }
 
+  public void setEnrichmentConfigs(List<EnrichmentConfig> enrichmentConfigs) {
+    _enrichmentConfigs = enrichmentConfigs;
+  }
+
   public void setTransformConfigs(List<TransformConfig> transformConfigs) {
     _transformConfigs = transformConfigs;
   }
 
   public void setComplexTypeConfig(ComplexTypeConfig complexTypeConfig) {
     _complexTypeConfig = complexTypeConfig;
+  }
+
+  public void setSchemaConformingTransformerConfig(
+      SchemaConformingTransformerConfig schemaConformingTransformerConfig) {
+    _schemaConformingTransformerConfig = schemaConformingTransformerConfig;
   }
 
   public void setAggregationConfigs(List<AggregationConfig> aggregationConfigs) {

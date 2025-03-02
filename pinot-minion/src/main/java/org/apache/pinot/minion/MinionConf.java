@@ -28,6 +28,7 @@ import org.apache.pinot.spi.utils.NetUtils;
 
 public class MinionConf extends PinotConfiguration {
   public static final String END_REPLACE_SEGMENTS_TIMEOUT_MS_KEY = "pinot.minion.endReplaceSegments.timeoutMs";
+  public static final String MINION_TASK_PROGRESS_MANAGER_CLASS = "pinot.minion.taskProgressManager.class";
   public static final int DEFAULT_END_REPLACE_SEGMENTS_SOCKET_TIMEOUT_MS = 10 * 60 * 1000; // 10 mins
 
   public MinionConf() {
@@ -64,6 +65,11 @@ public class MinionConf extends PinotConfiguration {
 
   public int getEndReplaceSegmentsTimeoutMs() {
     return getProperty(END_REPLACE_SEGMENTS_TIMEOUT_MS_KEY, DEFAULT_END_REPLACE_SEGMENTS_SOCKET_TIMEOUT_MS);
+  }
+
+  public boolean isAllowDownloadFromServer() {
+    return Boolean.parseBoolean(getProperty(CommonConstants.Minion.CONFIG_OF_ALLOW_DOWNLOAD_FROM_SERVER,
+        CommonConstants.Minion.DEFAULT_ALLOW_DOWNLOAD_FROM_SERVER));
   }
 
   public PinotConfiguration getMetricsConfig() {

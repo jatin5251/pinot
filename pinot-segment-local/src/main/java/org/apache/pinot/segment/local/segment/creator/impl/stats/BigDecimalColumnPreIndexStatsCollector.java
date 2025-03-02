@@ -51,7 +51,9 @@ public class BigDecimalColumnPreIndexStatsCollector extends AbstractColumnStatis
       int length = BigDecimalUtils.byteSize(value);
       addressSorted(value);
       if (_values.add(value)) {
-        updatePartition(value);
+        if (isPartitionEnabled()) {
+          updatePartition(value.toPlainString());
+        }
         _minLength = Math.min(_minLength, length);
         _maxLength = Math.max(_maxLength, length);
         _maxRowLength = _maxLength;
@@ -91,10 +93,7 @@ public class BigDecimalColumnPreIndexStatsCollector extends AbstractColumnStatis
 
   @Override
   public int getLengthOfLargestElement() {
-    if (_sealed) {
-      return _maxLength;
-    }
-    throw new IllegalStateException("you must seal the collector first before asking for longest value");
+    return _maxLength;
   }
 
   @Override
@@ -104,10 +103,7 @@ public class BigDecimalColumnPreIndexStatsCollector extends AbstractColumnStatis
 
   @Override
   public int getCardinality() {
-    if (_sealed) {
-      return _sortedValues.length;
-    }
-    throw new IllegalStateException("you must seal the collector first before asking for cardinality");
+    return _sealed ? _sortedValues.length : _values.size();
   }
 
   @Override

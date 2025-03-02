@@ -20,30 +20,16 @@ package org.apache.pinot.controller.api.access;
 
 import javax.annotation.Nullable;
 import javax.ws.rs.core.HttpHeaders;
+import org.apache.pinot.core.auth.FineGrainedAccessControl;
 import org.apache.pinot.spi.annotations.InterfaceAudience;
 import org.apache.pinot.spi.annotations.InterfaceStability;
 
 
 @InterfaceAudience.Public
 @InterfaceStability.Stable
-public interface AccessControl {
+public interface AccessControl extends FineGrainedAccessControl {
   String WORKFLOW_NONE = "NONE";
   String WORKFLOW_BASIC = "BASIC";
-
-  /**
-   * Return whether the client has data access to the given table.
-   *
-   * Note: This method is only used fore read access. It's being deprecated and its usage will be replaced by
-   * `hasAccess` method with AccessType.READ.
-   *
-   * @param httpHeaders HTTP headers containing requester identity
-   * @param tableName Name of the table to be accessed
-   * @return Whether the client has data access to the table
-   */
-  @Deprecated
-  default boolean hasDataAccess(HttpHeaders httpHeaders, String tableName) {
-    return hasAccess(tableName, AccessType.READ, httpHeaders, null);
-  }
 
   /**
    * Return whether the client has permission to the given table
@@ -55,7 +41,7 @@ public interface AccessControl {
    * @return whether the client has permission
    */
   default boolean hasAccess(@Nullable String tableName, AccessType accessType, HttpHeaders httpHeaders,
-      @Nullable String endpointUrl) {
+      String endpointUrl) {
     return true;
   }
 
@@ -67,7 +53,7 @@ public interface AccessControl {
    * @param endpointUrl the request url for which this access control is called
    * @return whether the client has permission
    */
-  default boolean hasAccess(AccessType accessType, HttpHeaders httpHeaders, @Nullable String endpointUrl) {
+  default boolean hasAccess(AccessType accessType, HttpHeaders httpHeaders, String endpointUrl) {
     return hasAccess(null, accessType, httpHeaders, endpointUrl);
   }
 

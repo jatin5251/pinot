@@ -22,11 +22,13 @@ import java.util.function.LongToIntFunction;
 import org.apache.pinot.common.function.scalar.DateTimeFunctions;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.request.context.RequestContextUtils;
+import org.roaringbitmap.RoaringBitmap;
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertTrue;
 
 
 public class DateTimeTransformFunctionTest extends BaseTransformFunctionTest {
@@ -37,9 +39,9 @@ public class DateTimeTransformFunctionTest extends BaseTransformFunctionTest {
         {"year", (LongToIntFunction) DateTimeFunctions::year, DateTimeTransformFunction.Year.class},
         {"yearOfWeek", (LongToIntFunction) DateTimeFunctions::yearOfWeek, DateTimeTransformFunction.YearOfWeek.class},
         {"yow", (LongToIntFunction) DateTimeFunctions::yearOfWeek, DateTimeTransformFunction.YearOfWeek.class},
-        {"month", (LongToIntFunction) DateTimeFunctions::monthOfYear, DateTimeTransformFunction.Month.class},
-        {"week", (LongToIntFunction) DateTimeFunctions::weekOfYear, DateTimeTransformFunction.WeekOfYear.class},
-        {"weekOfYear", (LongToIntFunction) DateTimeFunctions::weekOfYear, DateTimeTransformFunction.WeekOfYear.class},
+        {"month", (LongToIntFunction) DateTimeFunctions::month, DateTimeTransformFunction.Month.class},
+        {"week", (LongToIntFunction) DateTimeFunctions::week, DateTimeTransformFunction.WeekOfYear.class},
+        {"weekOfYear", (LongToIntFunction) DateTimeFunctions::week, DateTimeTransformFunction.WeekOfYear.class},
         {"quarter", (LongToIntFunction) DateTimeFunctions::quarter, DateTimeTransformFunction.Quarter.class},
         {"dayOfWeek", (LongToIntFunction) DateTimeFunctions::dayOfWeek, DateTimeTransformFunction.DayOfWeek.class},
         {"dow", (LongToIntFunction) DateTimeFunctions::dayOfWeek, DateTimeTransformFunction.DayOfWeek.class},
@@ -60,9 +62,9 @@ public class DateTimeTransformFunctionTest extends BaseTransformFunctionTest {
         {"year", (ZonedTimeFunction) DateTimeFunctions::year, DateTimeTransformFunction.Year.class},
         {"yearOfWeek", (ZonedTimeFunction) DateTimeFunctions::yearOfWeek, DateTimeTransformFunction.YearOfWeek.class},
         {"yow", (ZonedTimeFunction) DateTimeFunctions::yearOfWeek, DateTimeTransformFunction.YearOfWeek.class},
-        {"month", (ZonedTimeFunction) DateTimeFunctions::monthOfYear, DateTimeTransformFunction.Month.class},
-        {"week", (ZonedTimeFunction) DateTimeFunctions::weekOfYear, DateTimeTransformFunction.WeekOfYear.class},
-        {"weekOfYear", (ZonedTimeFunction) DateTimeFunctions::weekOfYear, DateTimeTransformFunction.WeekOfYear.class},
+        {"month", (ZonedTimeFunction) DateTimeFunctions::month, DateTimeTransformFunction.Month.class},
+        {"week", (ZonedTimeFunction) DateTimeFunctions::week, DateTimeTransformFunction.WeekOfYear.class},
+        {"weekOfYear", (ZonedTimeFunction) DateTimeFunctions::week, DateTimeTransformFunction.WeekOfYear.class},
         {"quarter", (ZonedTimeFunction) DateTimeFunctions::quarter, DateTimeTransformFunction.Quarter.class},
         {"dayOfWeek", (ZonedTimeFunction) DateTimeFunctions::dayOfWeek, DateTimeTransformFunction.DayOfWeek.class},
         {"dow", (ZonedTimeFunction) DateTimeFunctions::dayOfWeek, DateTimeTransformFunction.DayOfWeek.class},
@@ -86,6 +88,25 @@ public class DateTimeTransformFunctionTest extends BaseTransformFunctionTest {
     int[] values = transformFunction.transformToIntValuesSV(_projectionBlock);
     for (int i = 0; i < _projectionBlock.getNumDocs(); i++) {
       assertEquals(values[i], expected.applyAsInt(_timeValues[i]));
+    }
+  }
+
+  @Test(dataProvider = "testCasesUTC")
+  public void testUTCNullColumn(String function, LongToIntFunction expected,
+      Class<? extends TransformFunction> expectedClass) {
+    ExpressionContext expression =
+        RequestContextUtils.getExpression(String.format("%s(%s)", function, TIMESTAMP_COLUMN_NULL));
+    TransformFunction transformFunction = TransformFunctionFactory.get(expression, _dataSourceMap);
+    Assert.assertTrue(expectedClass.isInstance(transformFunction));
+    int[] values = transformFunction.transformToIntValuesSV(_projectionBlock);
+    RoaringBitmap nullBitmap = transformFunction.getNullBitmap(_projectionBlock);
+
+    for (int i = 0; i < _projectionBlock.getNumDocs(); i++) {
+      if (isNullRow(i)) {
+        assertTrue(nullBitmap.contains(i));
+      } else {
+        assertEquals(values[i], expected.applyAsInt(_timeValues[i]));
+      }
     }
   }
 

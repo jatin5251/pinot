@@ -18,9 +18,10 @@
  */
 package org.apache.pinot.server.starter.helix;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.helix.NotificationContext;
 import org.apache.helix.messaging.handling.HelixTaskResult;
@@ -29,13 +30,19 @@ import org.apache.helix.messaging.handling.MessageHandlerFactory;
 import org.apache.helix.model.Message;
 import org.apache.pinot.common.Utils;
 import org.apache.pinot.common.messages.ForceCommitMessage;
+import org.apache.pinot.common.messages.IngestionMetricsRemoveMessage;
 import org.apache.pinot.common.messages.SegmentRefreshMessage;
 import org.apache.pinot.common.messages.SegmentReloadMessage;
 import org.apache.pinot.common.messages.TableDeletionMessage;
+import org.apache.pinot.common.metrics.ServerGauge;
 import org.apache.pinot.common.metrics.ServerMeter;
 import org.apache.pinot.common.metrics.ServerMetrics;
+import org.apache.pinot.common.metrics.ServerQueryPhase;
+import org.apache.pinot.common.metrics.ServerTimer;
 import org.apache.pinot.core.data.manager.InstanceDataManager;
+import org.apache.pinot.core.data.manager.realtime.RealtimeTableDataManager;
 import org.apache.pinot.core.util.SegmentRefreshSemaphore;
+import org.apache.pinot.segment.local.data.manager.TableDataManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -68,6 +75,8 @@ public class SegmentMessageHandlerFactory implements MessageHandlerFactory {
         return new TableDeletionMessageHandler(new TableDeletionMessage(message), _metrics, context);
       case ForceCommitMessage.FORCE_COMMIT_MSG_SUB_TYPE:
         return new ForceCommitMessageHandler(new ForceCommitMessage(message), _metrics, context);
+      case IngestionMetricsRemoveMessage.INGESTION_METRICS_REMOVE_MSG_SUB_TYPE:
+        return new IngestionMetricsRemoveMessageHandler(new IngestionMetricsRemoveMessage(message), _metrics, context);
       default:
         LOGGER.warn("Unsupported user defined message sub type: {} for segment: {}", msgSubType,
             message.getPartitionName());
@@ -97,10 +106,10 @@ public class SegmentMessageHandlerFactory implements MessageHandlerFactory {
         throws InterruptedException {
       HelixTaskResult result = new HelixTaskResult();
       _logger.info("Handling message: {}", _message);
+      _segmentRefreshSemaphore.acquireSema(_segmentName, _logger);
       try {
-        _segmentRefreshSemaphore.acquireSema(_segmentName, _logger);
         // The number of retry times depends on the retry count in Constants.
-        _instanceDataManager.addOrReplaceSegment(_tableNameWithType, _segmentName);
+        _instanceDataManager.replaceSegment(_tableNameWithType, _segmentName);
         result.setSuccess(true);
       } catch (Exception e) {
         _metrics.addMeteredTableValue(_tableNameWithType, ServerMeter.REFRESH_FAILURES, 1);
@@ -169,13 +178,34 @@ public class SegmentMessageHandlerFactory implements MessageHandlerFactory {
     public HelixTaskResult handleMessage()
         throws InterruptedException {
       HelixTaskResult helixTaskResult = new HelixTaskResult();
-      _logger.info("Handling table deletion message");
+      _logger.info("Handling table deletion message: {}", _message);
       try {
-        _instanceDataManager.deleteTable(_tableNameWithType);
+        long deletionTimeMs = _message.getCreateTimeStamp();
+        if (deletionTimeMs <= 0) {
+          _logger.warn("Invalid deletion time: {}, using current time as deletion time", deletionTimeMs);
+          deletionTimeMs = System.currentTimeMillis();
+        }
+        _instanceDataManager.deleteTable(_tableNameWithType, deletionTimeMs);
         helixTaskResult.setSuccess(true);
       } catch (Exception e) {
         _metrics.addMeteredTableValue(_tableNameWithType, ServerMeter.DELETE_TABLE_FAILURES, 1);
         Utils.rethrowException(e);
+      }
+      try {
+        Arrays.stream(ServerMeter.values())
+            .filter(m -> !m.isGlobal())
+            .forEach(m -> _metrics.removeTableMeter(_tableNameWithType, m));
+        Arrays.stream(ServerGauge.values())
+            .filter(g -> !g.isGlobal())
+            .forEach(g -> _metrics.removeTableGauge(_tableNameWithType, g));
+        Arrays.stream(ServerTimer.values())
+            .filter(t -> !t.isGlobal())
+            .forEach(t -> _metrics.removeTableTimer(_tableNameWithType, t));
+        Arrays.stream(ServerQueryPhase.values())
+            .forEach(p -> _metrics.removePhaseTiming(_tableNameWithType, p));
+      } catch (Exception e) {
+        LOGGER.warn("Error while removing metrics of removed table {}. "
+            + "Some metrics may survive until the next restart.", _tableNameWithType);
       }
       return helixTaskResult;
     }
@@ -205,6 +235,27 @@ public class SegmentMessageHandlerFactory implements MessageHandlerFactory {
         _metrics.addMeteredTableValue(_tableNameWithType, ServerMeter.DELETE_TABLE_FAILURES, 1);
         Utils.rethrowException(e);
       }
+      return helixTaskResult;
+    }
+  }
+
+  private class IngestionMetricsRemoveMessageHandler extends DefaultMessageHandler {
+
+    IngestionMetricsRemoveMessageHandler(IngestionMetricsRemoveMessage message, ServerMetrics metrics,
+        NotificationContext context) {
+      super(message, metrics, context);
+    }
+
+    @Override
+    public HelixTaskResult handleMessage() {
+      _logger.info("Handling ingestion metrics remove message for table: {}, segment: {}", _tableNameWithType,
+          _segmentName);
+      TableDataManager tableDataManager = _instanceDataManager.getTableDataManager(_tableNameWithType);
+      if (tableDataManager instanceof RealtimeTableDataManager) {
+        ((RealtimeTableDataManager) tableDataManager).removeIngestionMetrics(_segmentName);
+      }
+      HelixTaskResult helixTaskResult = new HelixTaskResult();
+      helixTaskResult.setSuccess(true);
       return helixTaskResult;
     }
   }

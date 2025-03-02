@@ -28,12 +28,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.common.datatable.DataTableFactory;
 import org.apache.pinot.common.response.broker.BrokerResponseNative;
 import org.apache.pinot.common.response.broker.ResultTable;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
-import org.apache.pinot.core.common.datatable.DataTableBuilderFactory;
 import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentLoader;
 import org.apache.pinot.segment.local.segment.creator.impl.SegmentIndexCreationDriverImpl;
 import org.apache.pinot.segment.local.segment.readers.GenericRowRecordReader;
@@ -103,7 +101,7 @@ public class NullEnabledQueriesTest extends BaseQueriesTest {
     _records = new ArrayList<>(NUM_RECORDS);
     for (int i = 0; i < NUM_RECORDS; i++) {
       GenericRow record = new GenericRow();
-      double value = baseValue.doubleValue() + i;
+      double value = baseValue instanceof Float ? baseValue.floatValue() + i : baseValue.doubleValue() + i;
       if (i % 2 == 0) {
         record.putValue(COLUMN_NAME, value);
         _sumPrecision = _sumPrecision.add(BigDecimal.valueOf(value));
@@ -144,7 +142,7 @@ public class NullEnabledQueriesTest extends BaseQueriesTest {
     SegmentGeneratorConfig segmentGeneratorConfig = new SegmentGeneratorConfig(tableConfig, schema);
     segmentGeneratorConfig.setTableName(RAW_TABLE_NAME);
     segmentGeneratorConfig.setSegmentName(SEGMENT_NAME);
-    segmentGeneratorConfig.setNullHandlingEnabled(true);
+    segmentGeneratorConfig.setDefaultNullHandlingEnabled(true);
     segmentGeneratorConfig.setOutDir(INDEX_DIR.getPath());
 
     SegmentIndexCreationDriverImpl driver = new SegmentIndexCreationDriverImpl();
@@ -281,7 +279,6 @@ public class NullEnabledQueriesTest extends BaseQueriesTest {
   }
 
   public void testQueries(Number baseValue, ColumnDataType dataType, boolean nullValuesExist) {
-    DataTableBuilderFactory.setDataTableVersion(DataTableFactory.VERSION_4);
     Map<String, String> queryOptions = new HashMap<>();
     queryOptions.put("enableNullHandling", "true");
     {
@@ -374,7 +371,7 @@ public class NullEnabledQueriesTest extends BaseQueriesTest {
       }
     }
     {
-      String query = String.format("SELECT * FROM testTable ORDER BY %s DESC LIMIT 4000", COLUMN_NAME);
+      String query = String.format("SELECT * FROM testTable ORDER BY %s DESC NULLS LAST LIMIT 4000", COLUMN_NAME);
       // getBrokerResponseForSqlQuery(query) runs SQL query on multiple index segments. The result should be equivalent
       // to querying 4 identical index segments.
       BrokerResponseNative brokerResponse = getBrokerResponse(query, queryOptions);
@@ -399,9 +396,8 @@ public class NullEnabledQueriesTest extends BaseQueriesTest {
         }
         k++;
       }
-      // Note 1: we inserted 500 nulls in _records, and since we query 4 identical index segments, the number of null
-      //  values is: 500 * 4 = 2000.
-      // Note 2: The default null ordering is 'NULLS LAST', regardless of the ordering direction.
+      // We inserted 500 nulls in _records, and since we query 4 identical index segments, the number of null values is:
+      // 500 * 4 = 2000.
       for (int i = 2000; i < rowsCount; i++) {
         Object[] values = rows.get(i);
         assertEquals(values.length, 2);
@@ -431,13 +427,9 @@ public class NullEnabledQueriesTest extends BaseQueriesTest {
         i++;
         index++;
       }
-      // The default null ordering is 'NULLS LAST'. Therefore, null will appear as the last record.
-      if (nullValuesExist) {
-        assertNull(rows.get(rows.size() - 1)[0]);
-      }
     }
     {
-      int limit = 40;
+      int limit = NUM_RECORDS / 2 + 1;
       String query = String.format("SELECT DISTINCT %s FROM testTable ORDER BY %s LIMIT %d", COLUMN_NAME, COLUMN_NAME,
           limit);
       BrokerResponseNative brokerResponse = getBrokerResponse(query, queryOptions);
@@ -495,7 +487,9 @@ public class NullEnabledQueriesTest extends BaseQueriesTest {
       assertTrue(Math.abs((Double) rows.get(0)[1] - min) < 1e-1);
       double max = baseValue.doubleValue() + 998;
       assertTrue(Math.abs((Double) rows.get(0)[2] - max) < 1e-1);
-      double avg = _sum / (double) _records.size();
+      // Nulls are added for all records where index % 2 is false, so half of the records are null.
+      double numNonNullRecords = nullValuesExist ? (_records.size() / 2.0) : _records.size();
+      double avg = _sum / numNonNullRecords;
       assertTrue(Math.abs((Double) rows.get(0)[3] - avg) < 1e-1);
       assertTrue(Math.abs((Double) rows.get(0)[4] - (4 * _sum)) < 1e-1);
     }
@@ -528,7 +522,7 @@ public class NullEnabledQueriesTest extends BaseQueriesTest {
     }
     {
       String query = String.format(
-          "SELECT COUNT(*) AS count, %s FROM testTable GROUP BY %s ORDER BY %s DESC LIMIT 1000", COLUMN_NAME,
+          "SELECT COUNT(*) AS count, %s FROM testTable GROUP BY %s ORDER BY %s DESC NULLS LAST LIMIT 1000", COLUMN_NAME,
           COLUMN_NAME, COLUMN_NAME);
       BrokerResponseNative brokerResponse = getBrokerResponse(query, queryOptions);
       ResultTable resultTable = brokerResponse.getResultTable();
@@ -603,8 +597,8 @@ public class NullEnabledQueriesTest extends BaseQueriesTest {
       // 9.500
       //(1 row)
       //
-      String query = String.format("SELECT %s FROM testTable WHERE %s > '%s' LIMIT 50", COLUMN_NAME, COLUMN_NAME,
-          baseValue.doubleValue() + 69);
+      String query = String.format("SELECT %s FROM testTable WHERE %s > %s LIMIT 50", COLUMN_NAME, COLUMN_NAME,
+          baseValue instanceof Float ? baseValue.floatValue() + 69 : baseValue.doubleValue() + 69);
       BrokerResponseNative brokerResponse = getBrokerResponse(query, queryOptions);
       ResultTable resultTable = brokerResponse.getResultTable();
       DataSchema dataSchema = resultTable.getDataSchema();
@@ -625,8 +619,8 @@ public class NullEnabledQueriesTest extends BaseQueriesTest {
       }
     }
     {
-      String query = String.format("SELECT %s FROM testTable WHERE %s = '%s'", COLUMN_NAME, COLUMN_NAME,
-          baseValue.doubleValue() + 68);
+      String query = String.format("SELECT %s FROM testTable WHERE %s = %s", COLUMN_NAME, COLUMN_NAME,
+          baseValue instanceof Float ? baseValue.floatValue() + 68 : baseValue.doubleValue() + 68);
       BrokerResponseNative brokerResponse = getBrokerResponse(query, queryOptions);
       ResultTable resultTable = brokerResponse.getResultTable();
       DataSchema dataSchema = resultTable.getDataSchema();
@@ -640,8 +634,8 @@ public class NullEnabledQueriesTest extends BaseQueriesTest {
       }
     }
     {
-      String query = String.format("SELECT %s FROM testTable WHERE %s = '%s'", COLUMN_NAME, COLUMN_NAME,
-          baseValue.doubleValue() + 69);
+      String query = String.format("SELECT %s FROM testTable WHERE %s = %s", COLUMN_NAME, COLUMN_NAME,
+          baseValue instanceof Float ? baseValue.floatValue() + 69 : baseValue.doubleValue() + 69);
       BrokerResponseNative brokerResponse = getBrokerResponse(query, queryOptions);
       ResultTable resultTable = brokerResponse.getResultTable();
       DataSchema dataSchema = resultTable.getDataSchema();
@@ -702,8 +696,10 @@ public class NullEnabledQueriesTest extends BaseQueriesTest {
         }
         Object[] row = rows.get(index);
         assertEquals(row.length, 3);
-        assertTrue(Math.abs((Double) row[0] - (baseValue.doubleValue() + i)) < 1e-1);
-        assertTrue(Math.abs((Double) row[1] - (baseValue.doubleValue() + i)) < 1e-1);
+
+        double expected = baseValue.doubleValue() + i;
+        assertTrue(Math.abs((Double) row[0] - expected) < 1e-1, "Col 0: Expected " + expected + " found " + row[0]);
+        assertTrue(Math.abs((Double) row[1] - expected) < 1e-1, "Col 1: Expected " + expected + " found " + row[1]);
         assertEquals(row[2], 1);
         i++;
       }
@@ -736,7 +732,6 @@ public class NullEnabledQueriesTest extends BaseQueriesTest {
         assertNull(rows.get(rows.size() - 1)[0]);
       }
     }
-    DataTableBuilderFactory.setDataTableVersion(DataTableBuilderFactory.DEFAULT_VERSION);
   }
 
   @AfterClass

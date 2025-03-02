@@ -40,8 +40,7 @@ public class StreamDataDecoderImplTest {
     TestDecoder messageDecoder = new TestDecoder();
     messageDecoder.init(Collections.emptyMap(), ImmutableSet.of(NAME_FIELD), "");
     String value = "Alice";
-    StreamMessage<byte[]> message = new StreamMessage(value.getBytes(StandardCharsets.UTF_8),
-        value.getBytes(StandardCharsets.UTF_8).length);
+    BytesStreamMessage message = new BytesStreamMessage(value.getBytes(StandardCharsets.UTF_8));
     StreamDataDecoderResult result = new StreamDataDecoderImpl(messageDecoder).decode(message);
     Assert.assertNotNull(result);
     Assert.assertNull(result.getException());
@@ -63,9 +62,8 @@ public class StreamDataDecoderImplTest {
     headers.putValue(AGE_HEADER_KEY, 3);
     Map<String, String> recordMetadata = Collections.singletonMap(SEQNO_RECORD_METADATA, "1");
     StreamMessageMetadata metadata = new StreamMessageMetadata(1234L, headers, recordMetadata);
-    byte[] valueBytes = value.getBytes(StandardCharsets.UTF_8);
-    StreamMessage<byte[]> message =
-        new StreamMessage(key.getBytes(StandardCharsets.UTF_8), valueBytes, metadata, value.length());
+    BytesStreamMessage message =
+        new BytesStreamMessage(key.getBytes(StandardCharsets.UTF_8), value.getBytes(StandardCharsets.UTF_8), metadata);
 
     StreamDataDecoderResult result = new StreamDataDecoderImpl(messageDecoder).decode(message);
     Assert.assertNotNull(result);
@@ -73,11 +71,12 @@ public class StreamDataDecoderImplTest {
     Assert.assertNotNull(result.getResult());
 
     GenericRow row = result.getResult();
-    Assert.assertEquals(row.getFieldToValueMap().size(), 4);
+    Assert.assertEquals(row.getFieldToValueMap().size(), 5);
     Assert.assertEquals(row.getValue(NAME_FIELD), value);
     Assert.assertEquals(row.getValue(StreamDataDecoderImpl.KEY), key, "Failed to decode record key");
     Assert.assertEquals(row.getValue(StreamDataDecoderImpl.HEADER_KEY_PREFIX + AGE_HEADER_KEY), 3);
     Assert.assertEquals(row.getValue(StreamDataDecoderImpl.METADATA_KEY_PREFIX + SEQNO_RECORD_METADATA), "1");
+    Assert.assertEquals(row.getValue(StreamDataDecoderImpl.RECORD_SERIALIZED_VALUE_SIZE_KEY), value.length());
   }
 
   @Test
@@ -86,8 +85,7 @@ public class StreamDataDecoderImplTest {
     ThrowingDecoder messageDecoder = new ThrowingDecoder();
     messageDecoder.init(Collections.emptyMap(), ImmutableSet.of(NAME_FIELD), "");
     String value = "Alice";
-    StreamMessage<byte[]> message = new StreamMessage(value.getBytes(StandardCharsets.UTF_8),
-        value.getBytes(StandardCharsets.UTF_8).length);
+    BytesStreamMessage message = new BytesStreamMessage(value.getBytes(StandardCharsets.UTF_8));
     StreamDataDecoderResult result = new StreamDataDecoderImpl(messageDecoder).decode(message);
     Assert.assertNotNull(result);
     Assert.assertNotNull(result.getException());
@@ -98,7 +96,8 @@ public class StreamDataDecoderImplTest {
 
     @Override
     public void init(Map<String, String> props, Set<String> fieldsToRead, String topicName)
-        throws Exception { }
+        throws Exception {
+    }
 
     @Nullable
     @Override
@@ -113,11 +112,11 @@ public class StreamDataDecoderImplTest {
     }
   }
 
-
   class TestDecoder implements StreamMessageDecoder<byte[]> {
     @Override
     public void init(Map<String, String> props, Set<String> fieldsToRead, String topicName)
-        throws Exception { }
+        throws Exception {
+    }
 
     @Nullable
     @Override

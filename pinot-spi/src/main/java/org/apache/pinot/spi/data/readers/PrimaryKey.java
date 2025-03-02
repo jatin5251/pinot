@@ -29,7 +29,7 @@ import org.apache.pinot.spi.utils.ByteArray;
 /**
  * The primary key of a record. Note that the value used in the primary key must be single-value.
  */
-public class PrimaryKey {
+public final class PrimaryKey {
   private final Object[] _values;
 
   public PrimaryKey(Object[] values) {
@@ -68,8 +68,8 @@ public class PrimaryKey {
         cache[i] = BigDecimalUtils.serialize((BigDecimal) value);
         sizeInBytes += cache[i].length + Integer.BYTES;
       } else {
-        throw new IllegalStateException(
-            String.format("Unsupported value: %s of type: %s", value, value != null ? value.getClass() : null));
+        throw new IllegalStateException("Unsupported value: " + value + " of type: " + (value != null ? value.getClass()
+            : null));
       }
     }
 
@@ -117,8 +117,8 @@ public class PrimaryKey {
     } else if (value instanceof BigDecimal) {
       return BigDecimalUtils.serialize((BigDecimal) value);
     } else {
-      throw new IllegalStateException(
-          String.format("Unsupported value: %s of type: %s", value, value != null ? value.getClass() : null));
+      throw new IllegalStateException("Unsupported value: " + value + " of type: " + (value != null ? value.getClass()
+          : null));
     }
   }
 

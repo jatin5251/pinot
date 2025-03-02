@@ -18,8 +18,8 @@
  */
 package org.apache.pinot.segment.local.startree;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
@@ -28,17 +28,22 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import javax.annotation.Nullable;
-import org.apache.commons.configuration.PropertiesConfiguration;
+import org.apache.commons.configuration2.PropertiesConfiguration;
 import org.apache.commons.io.FileUtils;
+import org.apache.pinot.common.request.Literal;
+import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.segment.local.startree.v2.builder.StarTreeV2BuilderConfig;
+import org.apache.pinot.segment.spi.AggregationFunctionType;
+import org.apache.pinot.segment.spi.Constants;
 import org.apache.pinot.segment.spi.SegmentMetadata;
-import org.apache.pinot.segment.spi.V1Constants;
 import org.apache.pinot.segment.spi.index.startree.StarTreeV2Constants;
 import org.apache.pinot.segment.spi.index.startree.StarTreeV2Metadata;
 import org.apache.pinot.segment.spi.memory.PinotDataBuffer;
 import org.apache.pinot.segment.spi.store.SegmentDirectoryPaths;
+import org.apache.pinot.segment.spi.utils.SegmentMetadataUtils;
 import org.apache.pinot.spi.config.table.StarTreeIndexConfig;
-import org.apache.pinot.spi.env.CommonsConfigurationUtils;
+import org.apache.pinot.spi.data.Schema;
+import org.apache.pinot.spi.utils.CommonConstants;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
@@ -78,6 +83,27 @@ public class StarTreeBuilderUtils {
     }
     if (enableDefaultStarTree) {
       StarTreeV2BuilderConfig defaultConfig = StarTreeV2BuilderConfig.generateDefaultConfig(segmentMetadata);
+      if (!builderConfigs.contains(defaultConfig)) {
+        builderConfigs.add(defaultConfig);
+      }
+    }
+    return builderConfigs;
+  }
+
+  public static List<StarTreeV2BuilderConfig> generateBuilderConfigs(@Nullable List<StarTreeIndexConfig> indexConfigs,
+      boolean enableDefaultStarTree, Schema schema, JsonNode segmentMetadata) {
+    List<StarTreeV2BuilderConfig> builderConfigs = new ArrayList<>();
+    if (indexConfigs != null) {
+      for (StarTreeIndexConfig indexConfig : indexConfigs) {
+        StarTreeV2BuilderConfig builderConfig = StarTreeV2BuilderConfig.fromIndexConfig(indexConfig);
+        if (!builderConfigs.contains(builderConfig)) {
+          builderConfigs.add(builderConfig);
+        }
+      }
+    }
+    if (enableDefaultStarTree) {
+      StarTreeV2BuilderConfig defaultConfig =
+          StarTreeV2BuilderConfig.generateDefaultConfig(schema, segmentMetadata.get("columns"));
       if (!builderConfigs.contains(defaultConfig)) {
         builderConfigs.add(defaultConfig);
       }
@@ -228,9 +254,9 @@ public class StarTreeBuilderUtils {
 
   /**
    * Returns {@code true} if the given star-tree builder configs do not match the star-tree metadata, in which case the
-   * existing star-trees need to be removed, {@code false} otherwise.
+   * relevant star-trees need to be added/removed, {@code false} otherwise.
    */
-  public static boolean shouldRemoveExistingStarTrees(List<StarTreeV2BuilderConfig> builderConfigs,
+  public static boolean shouldModifyExistingStarTrees(List<StarTreeV2BuilderConfig> builderConfigs,
       List<StarTreeV2Metadata> metadataList) {
     int numStarTrees = builderConfigs.size();
     if (metadataList.size() != numStarTrees) {
@@ -246,7 +272,7 @@ public class StarTreeBuilderUtils {
           .equals(metadata.getSkipStarNodeCreationForDimensions())) {
         return true;
       }
-      if (!builderConfig.getFunctionColumnPairs().equals(metadata.getFunctionColumnPairs())) {
+      if (!builderConfig.getAggregationSpecs().equals(metadata.getAggregationSpecs())) {
         return true;
       }
       if (builderConfig.getMaxLeafRecords() != metadata.getMaxLeafRecords()) {
@@ -257,24 +283,124 @@ public class StarTreeBuilderUtils {
   }
 
   /**
+   * Returns {@code true} if the given star-tree builder configs are equal, {@code false} otherwise.
+   */
+  public static boolean areStarTreeBuilderConfigListsEqual(List<StarTreeV2BuilderConfig> builderConfig1,
+      List<StarTreeV2BuilderConfig> builderConfig2) {
+    int numStarTrees = builderConfig1.size();
+    if (builderConfig2.size() != numStarTrees) {
+      return false;
+    }
+    for (int i = 0; i < numStarTrees; i++) {
+      StarTreeV2BuilderConfig builderConfigToCompare1 = builderConfig1.get(i);
+      StarTreeV2BuilderConfig builderConfigToCompare2 = builderConfig2.get(i);
+      if (!builderConfigToCompare1.equals(builderConfigToCompare2)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
    * Removes all the star-trees from the given segment.
    */
   public static void removeStarTrees(File indexDir)
       throws Exception {
-    File segmentDirectory = SegmentDirectoryPaths.findSegmentDirectory(indexDir);
-
     // Remove the star-tree metadata
-    PropertiesConfiguration metadataProperties =
-        CommonsConfigurationUtils.fromFile(new File(segmentDirectory, V1Constants.MetadataKeys.METADATA_FILE_NAME));
+    PropertiesConfiguration metadataProperties = SegmentMetadataUtils.getPropertiesConfiguration(indexDir);
     metadataProperties.subset(StarTreeV2Constants.MetadataKey.STAR_TREE_SUBSET).clear();
-    // Commons Configuration 1.10 does not support file path containing '%'.
-    // Explicitly providing the output stream for the file bypasses the problem.
-    try (FileOutputStream fileOutputStream = new FileOutputStream(metadataProperties.getFile())) {
-      metadataProperties.save(fileOutputStream);
-    }
+    SegmentMetadataUtils.savePropertiesConfiguration(metadataProperties, indexDir);
 
     // Remove the index file and index map file
+    File segmentDirectory = SegmentDirectoryPaths.findSegmentDirectory(indexDir);
     FileUtils.forceDelete(new File(segmentDirectory, StarTreeV2Constants.INDEX_FILE_NAME));
     FileUtils.forceDelete(new File(segmentDirectory, StarTreeV2Constants.INDEX_MAP_FILE_NAME));
+  }
+
+  public static List<ExpressionContext> expressionContextFromFunctionParameters(
+      AggregationFunctionType aggregationFunctionType, Map<String, Object> functionParameters) {
+    List<ExpressionContext> expressionContexts = new ArrayList<>();
+
+    switch (aggregationFunctionType) {
+      case DISTINCTCOUNTHLL:
+      case DISTINCTCOUNTRAWHLL: {
+        if (functionParameters.containsKey(Constants.HLL_LOG2M_KEY)) {
+          expressionContexts.add(ExpressionContext.forLiteral(
+              Literal.intValue(Integer.parseInt(String.valueOf(functionParameters.get(Constants.HLL_LOG2M_KEY))))));
+        }
+        break;
+      }
+      case DISTINCTCOUNTHLLPLUS:
+      case DISTINCTCOUNTRAWHLLPLUS: {
+        if (functionParameters.containsKey(Constants.HLLPLUS_ULL_P_KEY) && functionParameters.containsKey(
+            Constants.HLLPLUS_SP_KEY)) {
+          expressionContexts.add(ExpressionContext.forLiteral(
+              Literal.intValue(Integer.parseInt(String.valueOf(functionParameters.get(Constants.HLLPLUS_ULL_P_KEY))))));
+          expressionContexts.add(ExpressionContext.forLiteral(
+              Literal.intValue(Integer.parseInt(String.valueOf(functionParameters.get(Constants.HLLPLUS_SP_KEY))))));
+        } else if (functionParameters.containsKey(Constants.HLLPLUS_ULL_P_KEY)) {
+          expressionContexts.add(ExpressionContext.forLiteral(
+              Literal.intValue(Integer.parseInt(String.valueOf(functionParameters.get(Constants.HLLPLUS_ULL_P_KEY))))));
+        } else if (functionParameters.containsKey(Constants.HLLPLUS_SP_KEY)) {
+          expressionContexts.add(ExpressionContext.forLiteral(
+              Literal.intValue(Integer.parseInt(String.valueOf(CommonConstants.Helix.DEFAULT_HYPERLOGLOG_PLUS_P)))));
+          expressionContexts.add(ExpressionContext.forLiteral(
+              Literal.intValue(Integer.parseInt(String.valueOf(functionParameters.get(Constants.HLLPLUS_SP_KEY))))));
+        }
+        break;
+      }
+      case DISTINCTCOUNTULL:
+      case DISTINCTCOUNTRAWULL: {
+        if (functionParameters.containsKey(Constants.HLLPLUS_ULL_P_KEY)) {
+          expressionContexts.add(ExpressionContext.forLiteral(
+              Literal.intValue(Integer.parseInt(String.valueOf(functionParameters.get(Constants.HLLPLUS_ULL_P_KEY))))));
+        }
+        break;
+      }
+      case DISTINCTCOUNTCPCSKETCH:
+      case DISTINCTCOUNTRAWCPCSKETCH: {
+        if (functionParameters.containsKey(Constants.CPCSKETCH_LGK_KEY)) {
+          expressionContexts.add(ExpressionContext.forLiteral(
+              Literal.intValue(Integer.parseInt(String.valueOf(functionParameters.get(Constants.CPCSKETCH_LGK_KEY))))));
+        }
+        break;
+      }
+      case SUMPRECISION: {
+        if (functionParameters.containsKey(Constants.SUMPRECISION_PRECISION_KEY)) {
+          expressionContexts.add(ExpressionContext.forLiteral(Literal.intValue(
+              Integer.parseInt(String.valueOf(functionParameters.get(Constants.SUMPRECISION_PRECISION_KEY))))));
+        }
+        break;
+      }
+      case PERCENTILETDIGEST:
+      case PERCENTILERAWTDIGEST: {
+        if (functionParameters.containsKey(Constants.PERCENTILETDIGEST_COMPRESSION_FACTOR_KEY)) {
+          expressionContexts.add(ExpressionContext.forLiteral(
+              Literal.intValue(Integer.parseInt(String.valueOf(
+                  functionParameters.get(Constants.PERCENTILETDIGEST_COMPRESSION_FACTOR_KEY))))));
+        }
+        break;
+      }
+      case DISTINCTCOUNTTHETASKETCH:
+      case DISTINCTCOUNTRAWTHETASKETCH: {
+        if (functionParameters.containsKey(Constants.THETA_TUPLE_SKETCH_NOMINAL_ENTRIES)) {
+          expressionContexts.add(ExpressionContext.forLiteral(Literal.intValue(
+              Integer.parseInt(String.valueOf(functionParameters.get(Constants.THETA_TUPLE_SKETCH_NOMINAL_ENTRIES))))));
+        }
+        break;
+      }
+      case DISTINCTCOUNTTUPLESKETCH:
+      case DISTINCTCOUNTRAWINTEGERSUMTUPLESKETCH: {
+        if (functionParameters.containsKey(Constants.THETA_TUPLE_SKETCH_NOMINAL_ENTRIES)) {
+          expressionContexts.add(ExpressionContext.forLiteral(Literal.intValue(
+              Integer.parseInt(String.valueOf(functionParameters.get(Constants.THETA_TUPLE_SKETCH_NOMINAL_ENTRIES))))));
+        }
+        break;
+      }
+      default:
+        break;
+    }
+
+    return expressionContexts;
   }
 }

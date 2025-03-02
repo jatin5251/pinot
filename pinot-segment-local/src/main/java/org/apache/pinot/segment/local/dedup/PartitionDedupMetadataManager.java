@@ -18,108 +18,76 @@
  */
 package org.apache.pinot.segment.local.dedup;
 
-import com.google.common.annotations.VisibleForTesting;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import org.apache.pinot.common.metrics.ServerGauge;
-import org.apache.pinot.common.metrics.ServerMetrics;
-import org.apache.pinot.segment.local.segment.readers.PinotSegmentColumnReader;
-import org.apache.pinot.segment.local.utils.HashUtils;
+import java.io.Closeable;
+import org.apache.pinot.segment.local.segment.index.loader.IndexLoadingConfig;
+import org.apache.pinot.segment.spi.ImmutableSegment;
 import org.apache.pinot.segment.spi.IndexSegment;
-import org.apache.pinot.spi.config.table.HashFunction;
 import org.apache.pinot.spi.data.readers.PrimaryKey;
-import org.apache.pinot.spi.utils.ByteArray;
 
 
-public class PartitionDedupMetadataManager {
-  private final String _tableNameWithType;
-  private final List<String> _primaryKeyColumns;
-  private final int _partitionId;
-  private final ServerMetrics _serverMetrics;
-  private final HashFunction _hashFunction;
+public interface PartitionDedupMetadataManager extends Closeable {
+  /**
+   * Initializes the dedup metadata for the given immutable segment.
+   */
+  void addSegment(IndexSegment segment);
 
-  @VisibleForTesting
-  final ConcurrentHashMap<Object, IndexSegment> _primaryKeyToSegmentMap = new ConcurrentHashMap<>();
-
-  public PartitionDedupMetadataManager(String tableNameWithType, List<String> primaryKeyColumns, int partitionId,
-      ServerMetrics serverMetrics, HashFunction hashFunction) {
-    _tableNameWithType = tableNameWithType;
-    _primaryKeyColumns = primaryKeyColumns;
-    _partitionId = partitionId;
-    _serverMetrics = serverMetrics;
-    _hashFunction = hashFunction;
+  /**
+   * Replaces the dedup metadata for the given old segment with the new segment.
+   */
+  default void replaceSegment(IndexSegment oldSegment, IndexSegment newSegment) {
+    // since this is a newly added method, by default, add the new segment to keep backward compatibility
+    addSegment(newSegment);
   }
 
-  public void addSegment(IndexSegment segment) {
-    // Add all PKs to _primaryKeyToSegmentMap
-    Iterator<PrimaryKey> primaryKeyIterator = getPrimaryKeyIterator(segment);
-    while (primaryKeyIterator.hasNext()) {
-      PrimaryKey pk = primaryKeyIterator.next();
-      _primaryKeyToSegmentMap.put(HashUtils.hashPrimaryKey(pk, _hashFunction), segment);
-    }
-    _serverMetrics.setValueOfPartitionGauge(_tableNameWithType, _partitionId, ServerGauge.DEDUP_PRIMARY_KEYS_COUNT,
-        _primaryKeyToSegmentMap.size());
+  /**
+   * Preload segments for the table partition. Segments can be added differently during preloading.
+   * TODO: As commented in PartitionUpsertMetadataManager, revisit this method and see if we can use the same
+   *       IndexLoadingConfig for all segments. Tier info might be different for different segments.
+   */
+  void preloadSegments(IndexLoadingConfig indexLoadingConfig);
+
+  boolean isPreloading();
+
+  /**
+   * Different from adding a segment, when preloading a segment, the dedup metadata may be updated more efficiently.
+   * Basically the dedup metadata can be directly updated for each primary key, without doing the more costly
+   * read-compare-update.
+   */
+  void preloadSegment(ImmutableSegment immutableSegment);
+
+  /**
+   * Removes the dedup metadata for the given segment.
+   */
+  void removeSegment(IndexSegment segment);
+
+  /**
+   * Remove the expired primary keys from the metadata when TTL is enabled.
+   */
+  void removeExpiredPrimaryKeys();
+
+  /**
+   * Add the primary key to the given segment to the dedup matadata if it is absent.
+   * Returns true if the key was already present, i.e., the new record associated with the given {@link PrimaryKey}
+   * is a duplicate and should be skipped/dropped.
+   */
+  @Deprecated
+  boolean checkRecordPresentOrUpdate(PrimaryKey pk, IndexSegment indexSegment);
+
+  /**
+   * Add the primary key to the given segment to the dedup matadata if it is absent and with in the retention time.
+   * Returns true if the key was already present, i.e., the new record associated with the given {@link DedupRecordInfo}
+   * is a duplicate and should be skipped/dropped.
+   * @param dedupRecordInfo  The primary key and the dedup time.
+   * @param indexSegment  The segment to which the record belongs.
+   * @return true if the key was already present, i.e., the new record associated with the given {@link DedupRecordInfo}
+   * is a duplicate and should be skipped/dropped.
+   */
+  default boolean checkRecordPresentOrUpdate(DedupRecordInfo dedupRecordInfo, IndexSegment indexSegment) {
+    return checkRecordPresentOrUpdate(dedupRecordInfo.getPrimaryKey(), indexSegment);
   }
 
-  public void removeSegment(IndexSegment segment) {
-    // TODO(saurabh): Explain reload scenario here
-    Iterator<PrimaryKey> primaryKeyIterator = getPrimaryKeyIterator(segment);
-    while (primaryKeyIterator.hasNext()) {
-      PrimaryKey pk = primaryKeyIterator.next();
-      _primaryKeyToSegmentMap.compute(HashUtils.hashPrimaryKey(pk, _hashFunction), (primaryKey, currentSegment) -> {
-        if (currentSegment == segment) {
-          return null;
-        } else {
-          return currentSegment;
-        }
-      });
-    }
-    _serverMetrics.setValueOfPartitionGauge(_tableNameWithType, _partitionId, ServerGauge.DEDUP_PRIMARY_KEYS_COUNT,
-        _primaryKeyToSegmentMap.size());
-  }
-
-  @VisibleForTesting
-  Iterator<PrimaryKey> getPrimaryKeyIterator(IndexSegment segment) {
-    Map<String, PinotSegmentColumnReader> columnToReaderMap = new HashMap<>();
-    for (String primaryKeyColumn : _primaryKeyColumns) {
-      columnToReaderMap.put(primaryKeyColumn, new PinotSegmentColumnReader(segment, primaryKeyColumn));
-    }
-    int numTotalDocs = segment.getSegmentMetadata().getTotalDocs();
-    int numPrimaryKeyColumns = _primaryKeyColumns.size();
-    return new Iterator<PrimaryKey>() {
-      private int _docId = 0;
-
-      @Override
-      public boolean hasNext() {
-        return _docId < numTotalDocs;
-      }
-
-      @Override
-      public PrimaryKey next() {
-        Object[] values = new Object[numPrimaryKeyColumns];
-        for (int i = 0; i < numPrimaryKeyColumns; i++) {
-          Object value = columnToReaderMap.get(_primaryKeyColumns.get(i)).getValue(_docId);
-          if (value instanceof byte[]) {
-            value = new ByteArray((byte[]) value);
-          }
-          values[i] = value;
-        }
-        _docId++;
-        return new PrimaryKey(values);
-      }
-    };
-  }
-
-  public boolean checkRecordPresentOrUpdate(PrimaryKey pk, IndexSegment indexSegment) {
-    boolean present =
-        _primaryKeyToSegmentMap.putIfAbsent(HashUtils.hashPrimaryKey(pk, _hashFunction), indexSegment) != null;
-    if (!present) {
-      _serverMetrics.setValueOfPartitionGauge(_tableNameWithType, _partitionId, ServerGauge.DEDUP_PRIMARY_KEYS_COUNT,
-          _primaryKeyToSegmentMap.size());
-    }
-    return present;
-  }
+  /**
+   * Stops the metadata manager. After invoking this method, no access to the metadata will be accepted.
+   */
+  void stop();
 }

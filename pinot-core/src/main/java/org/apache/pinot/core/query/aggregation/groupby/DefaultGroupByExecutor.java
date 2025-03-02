@@ -19,14 +19,22 @@
 package org.apache.pinot.core.query.aggregation.groupby;
 
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+import javax.annotation.Nullable;
 import org.apache.pinot.common.request.context.ExpressionContext;
+import org.apache.pinot.common.request.context.FilterContext;
+import org.apache.pinot.common.request.context.predicate.InPredicate;
+import org.apache.pinot.common.request.context.predicate.Predicate;
+import org.apache.pinot.common.utils.config.QueryOptionsUtils;
 import org.apache.pinot.core.common.BlockValSet;
 import org.apache.pinot.core.data.table.IntermediateRecord;
 import org.apache.pinot.core.data.table.TableResizer;
-import org.apache.pinot.core.operator.blocks.TransformBlock;
-import org.apache.pinot.core.operator.transform.TransformOperator;
-import org.apache.pinot.core.operator.transform.TransformResultMetadata;
+import org.apache.pinot.core.operator.BaseProjectOperator;
+import org.apache.pinot.core.operator.ColumnContext;
+import org.apache.pinot.core.operator.blocks.ValueBlock;
 import org.apache.pinot.core.plan.DocIdSetPlanNode;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunctionUtils;
@@ -58,44 +66,58 @@ public class DefaultGroupByExecutor implements GroupByExecutor {
   protected final int[] _svGroupKeys;
   protected final int[][] _mvGroupKeys;
 
-  /**
-   * Constructor for the class.
-   *
-   * @param queryContext Query context
-   * @param groupByExpressions Array of group-by expressions
-   * @param transformOperator Transform operator
-   */
   public DefaultGroupByExecutor(QueryContext queryContext, ExpressionContext[] groupByExpressions,
-      TransformOperator transformOperator) {
-    _aggregationFunctions = queryContext.getAggregationFunctions();
+      BaseProjectOperator<?> projectOperator) {
+    this(queryContext, queryContext.getAggregationFunctions(), groupByExpressions, projectOperator, null);
+  }
+
+  public DefaultGroupByExecutor(QueryContext queryContext, AggregationFunction[] aggregationFunctions,
+      ExpressionContext[] groupByExpressions, BaseProjectOperator<?> projectOperator) {
+    this(queryContext, aggregationFunctions, groupByExpressions, projectOperator, null);
+  }
+
+  public DefaultGroupByExecutor(QueryContext queryContext, AggregationFunction[] aggregationFunctions,
+      ExpressionContext[] groupByExpressions, BaseProjectOperator<?> projectOperator,
+      @Nullable GroupKeyGenerator groupKeyGenerator) {
+    _aggregationFunctions = aggregationFunctions;
     assert _aggregationFunctions != null;
     _nullHandlingEnabled = queryContext.isNullHandlingEnabled();
 
     boolean hasMVGroupByExpression = false;
     boolean hasNoDictionaryGroupByExpression = false;
     for (ExpressionContext groupByExpression : groupByExpressions) {
-      TransformResultMetadata transformResultMetadata = transformOperator.getResultMetadata(groupByExpression);
-      hasMVGroupByExpression |= !transformResultMetadata.isSingleValue();
-      hasNoDictionaryGroupByExpression |= !transformResultMetadata.hasDictionary();
+      ColumnContext columnContext = projectOperator.getResultColumnContext(groupByExpression);
+      hasMVGroupByExpression |= !columnContext.isSingleValue();
+      hasNoDictionaryGroupByExpression |= columnContext.getDictionary() == null;
     }
     _hasMVGroupByExpression = hasMVGroupByExpression;
 
     // Initialize group key generator
     int numGroupsLimit = queryContext.getNumGroupsLimit();
     int maxInitialResultHolderCapacity = queryContext.getMaxInitialResultHolderCapacity();
-    if (hasNoDictionaryGroupByExpression || _nullHandlingEnabled) {
-      if (groupByExpressions.length == 1) {
-        // TODO(nhejazi): support MV and dictionary based when null handling is enabled.
-        _groupKeyGenerator =
-            new NoDictionarySingleColumnGroupKeyGenerator(transformOperator, groupByExpressions[0], numGroupsLimit,
-                _nullHandlingEnabled);
-      } else {
-        _groupKeyGenerator =
-            new NoDictionaryMultiColumnGroupKeyGenerator(transformOperator, groupByExpressions, numGroupsLimit);
-      }
+    Map<ExpressionContext, Integer> groupByExpressionSizesFromPredicates = null;
+    if (queryContext.getQueryOptions() != null
+        && QueryOptionsUtils.optimizeMaxInitialResultHolderCapacityEnabled(queryContext.getQueryOptions())) {
+      groupByExpressionSizesFromPredicates = getGroupByExpressionSizesFromPredicates(queryContext);
+    }
+    if (groupKeyGenerator != null) {
+      _groupKeyGenerator = groupKeyGenerator;
     } else {
-      _groupKeyGenerator = new DictionaryBasedGroupKeyGenerator(transformOperator, groupByExpressions, numGroupsLimit,
-          maxInitialResultHolderCapacity);
+      if (hasNoDictionaryGroupByExpression || _nullHandlingEnabled) {
+        if (groupByExpressions.length == 1) {
+          // TODO(nhejazi): support MV and dictionary based when null handling is enabled.
+          _groupKeyGenerator =
+              new NoDictionarySingleColumnGroupKeyGenerator(projectOperator, groupByExpressions[0], numGroupsLimit,
+                  _nullHandlingEnabled, groupByExpressionSizesFromPredicates);
+        } else {
+          _groupKeyGenerator =
+              new NoDictionaryMultiColumnGroupKeyGenerator(projectOperator, groupByExpressions, numGroupsLimit,
+                  _nullHandlingEnabled, groupByExpressionSizesFromPredicates);
+        }
+      } else {
+        _groupKeyGenerator = new DictionaryBasedGroupKeyGenerator(projectOperator, groupByExpressions, numGroupsLimit,
+            maxInitialResultHolderCapacity, groupByExpressionSizesFromPredicates);
+      }
     }
 
     // Initialize result holders
@@ -117,31 +139,78 @@ public class DefaultGroupByExecutor implements GroupByExecutor {
     }
   }
 
+  /**
+   * Retrieve the sizes of GroupBy expressions from IN an EQ predicates found in the filter context, if available.
+   * 1. If the filter context is null or lacks GroupBy expressions, return null.
+   * 2. Ensure the top-level filter context consists solely of AND-type filters; other types for example OR we cannot
+   *    guarantee deterministic sizes for GroupBy expressions.
+   */
+  private Map<ExpressionContext, Integer> getGroupByExpressionSizesFromPredicates(QueryContext queryContext) {
+    FilterContext filterContext = queryContext.getFilter();
+    if (filterContext == null || queryContext.getGroupByExpressions() == null) {
+      return null;
+    }
+
+    Set<Predicate> predicateColumns = new HashSet<>();
+    if (filterContext.getType() == FilterContext.Type.AND) {
+      for (FilterContext child : filterContext.getChildren()) {
+        FilterContext.Type type = child.getType();
+        if (type != FilterContext.Type.PREDICATE && type != FilterContext.Type.AND) {
+          return null;
+        } else if (child.getPredicate() != null) {
+          predicateColumns.add(child.getPredicate());
+        }
+      }
+    } else if (filterContext.getPredicate() != null) {
+      predicateColumns.add(filterContext.getPredicate());
+    } else {
+      return null;
+    }
+
+    // Collect IN and EQ predicates and store their sizes
+    Map<ExpressionContext, Integer> predicateSizeMap = predicateColumns.stream()
+        .filter(predicate -> predicate.getType() == Predicate.Type.IN || predicate.getType() == Predicate.Type.EQ)
+        .collect(Collectors.toMap(
+            Predicate::getLhs,
+            predicate -> (predicate.getType() == Predicate.Type.IN)
+                ? ((InPredicate) predicate).getValues().size()
+                : 1,
+            Integer::min
+        ));
+
+    // Populate the group-by expressions with sizes from the predicate map
+    return queryContext.getGroupByExpressions().stream()
+        .filter(predicateSizeMap::containsKey)
+        .collect(Collectors.toMap(
+            expression -> expression,
+            expression -> predicateSizeMap.getOrDefault(expression, null)
+        ));
+  }
+
   @Override
-  public void process(TransformBlock transformBlock) {
+  public void process(ValueBlock valueBlock) {
     // Generate group keys
     // NOTE: groupKeyGenerator will limit the number of groups. Once reaching limit, no new group will be generated
     if (_hasMVGroupByExpression) {
-      _groupKeyGenerator.generateKeysForBlock(transformBlock, _mvGroupKeys);
+      _groupKeyGenerator.generateKeysForBlock(valueBlock, _mvGroupKeys);
     } else {
-      _groupKeyGenerator.generateKeysForBlock(transformBlock, _svGroupKeys);
+      _groupKeyGenerator.generateKeysForBlock(valueBlock, _svGroupKeys);
     }
 
     int capacityNeeded = _groupKeyGenerator.getCurrentGroupKeyUpperBound();
-    int length = transformBlock.getNumDocs();
+    int length = valueBlock.getNumDocs();
     int numAggregationFunctions = _aggregationFunctions.length;
     for (int i = 0; i < numAggregationFunctions; i++) {
       GroupByResultHolder groupByResultHolder = _groupByResultHolders[i];
       groupByResultHolder.ensureCapacity(capacityNeeded);
-      aggregate(transformBlock, length, i);
+      aggregate(valueBlock, length, i);
     }
   }
 
-  protected void aggregate(TransformBlock transformBlock, int length, int functionIndex) {
+  protected void aggregate(ValueBlock valueBlock, int length, int functionIndex) {
     AggregationFunction aggregationFunction = _aggregationFunctions[functionIndex];
     Map<ExpressionContext, BlockValSet> blockValSetMap =
-        AggregationFunctionUtils.getBlockValSetMap(aggregationFunction, transformBlock);
-
+        AggregationFunctionUtils.getBlockValSetMap(aggregationFunction, valueBlock);
     GroupByResultHolder groupByResultHolder = _groupByResultHolders[functionIndex];
     if (_hasMVGroupByExpression) {
       aggregationFunction.aggregateGroupByMV(length, _mvGroupKeys, groupByResultHolder, blockValSetMap);
@@ -163,5 +232,15 @@ public class DefaultGroupByExecutor implements GroupByExecutor {
   @Override
   public Collection<IntermediateRecord> trimGroupByResult(int trimSize, TableResizer tableResizer) {
     return tableResizer.trimInSegmentResults(_groupKeyGenerator, _groupByResultHolders, trimSize);
+  }
+
+  @Override
+  public GroupKeyGenerator getGroupKeyGenerator() {
+    return _groupKeyGenerator;
+  }
+
+  @Override
+  public GroupByResultHolder[] getGroupByResultHolders() {
+    return _groupByResultHolders;
   }
 }

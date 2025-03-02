@@ -22,6 +22,8 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Arrays;
 
 
@@ -113,5 +115,36 @@ public class FileUtils {
   public static void close(Closeable... closeables)
       throws IOException {
     close(Arrays.asList(closeables));
+  }
+
+  /**
+   * Concatenates the folderDir and filename and validates that the resulting file path is still within the folderDir.
+   * @param folderDir the parent directory
+   * @param filename the filename to concatenate to the parent directory
+   * @param msg the error message if the resulting file path is not within the parent directory
+   * @param args the error message arguments
+   * @return File object representing the concatenated file path
+   * @throws IllegalArgumentException if the resulting file path is not within the parent directory
+   * @throws IOException if the resulting file path is invalid
+   */
+  public static File concatAndValidateFile(File folderDir, String filename, String msg, Object... args)
+      throws IllegalArgumentException, IOException {
+    File filePath = new File(folderDir, filename);
+    if (!filePath.getCanonicalPath().startsWith(folderDir.getCanonicalPath() + File.separator)) {
+      throw new IllegalArgumentException(String.format(msg, args));
+    }
+
+    return filePath;
+  }
+
+  public static void ensureDirectoryExists(Path path)
+      throws IllegalArgumentException {
+    if (!Files.exists(path)) {
+      try {
+        Files.createDirectories(path);
+      } catch (IOException e) {
+        throw new RuntimeException(e);
+      }
+    }
   }
 }

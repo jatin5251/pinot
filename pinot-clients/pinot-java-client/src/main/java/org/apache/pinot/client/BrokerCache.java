@@ -22,18 +22,21 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.netty.handler.ssl.ClientAuth;
 import io.netty.handler.ssl.JdkSslContext;
-import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
-import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 import javax.net.ssl.SSLContext;
+import org.apache.pinot.client.utils.BrokerSelectorUtils;
 import org.apache.pinot.client.utils.ConnectionUtils;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.JsonUtils;
@@ -83,7 +86,6 @@ public class BrokerCache {
   private static final String DEFAULT_CONTROLLER_TLS_V10_ENABLED = "false";
   private static final String SCHEME = "scheme";
 
-  private final Random _random = new Random();
   private final AsyncHttpClient _client;
   private final String _address;
   private final Map<String, String> _headers;
@@ -111,8 +113,8 @@ public class BrokerCache {
         DEFAULT_CONTROLLER_TLS_V10_ENABLED));
 
     TlsProtocols tlsProtocols = TlsProtocols.defaultProtocols(tlsV10Enabled);
-    builder.setReadTimeout(readTimeoutMs)
-        .setConnectTimeout(connectTimeoutMs)
+    builder.setReadTimeout(Duration.ofMillis(readTimeoutMs))
+        .setConnectTimeout(Duration.ofMillis(connectTimeoutMs))
         .setHandshakeTimeout(handshakeTimeoutMs)
         .setUserAgent(ConnectionUtils.getUserAgentVersionFromClassPath("ua_broker_cache", appId))
         .setEnabledProtocols(tlsProtocols.getEnabledProtocols().toArray(new String[0]));
@@ -134,8 +136,7 @@ public class BrokerCache {
 
     Future<Response> responseFuture = getRequest.addHeader("accept", "application/json").execute();
     Response response = responseFuture.get();
-    String responseBody = response.getResponseBody(StandardCharsets.UTF_8);
-    return JsonUtils.stringToObject(responseBody, RESPONSE_TYPE_REF);
+    return JsonUtils.inputStreamToObject(response.getResponseBodyAsStream(), RESPONSE_TYPE_REF);
   }
 
   private BrokerData getBrokerData(Map<String, List<BrokerInstance>> responses) {
@@ -188,10 +189,15 @@ public class BrokerCache {
     _brokerData = getBrokerData(responses);
   }
 
-  public String getBroker(String tableName) {
-    List<String> brokers =
-        (tableName == null) ? _brokerData.getBrokers() : _brokerData.getTableToBrokerMap().get(tableName);
-    return brokers.get(_random.nextInt(brokers.size()));
+  public String getBroker(String... tableNames) {
+    // If tableNames is not-null, filter out nulls
+    tableNames = tableNames == null ? tableNames
+        : Arrays.stream(tableNames).filter(Objects::nonNull).toArray(String[]::new);
+    if (tableNames == null || tableNames.length == 0) {
+      List<String> brokers = _brokerData.getBrokers();
+      return brokers.get(ThreadLocalRandom.current().nextInt(brokers.size()));
+    }
+    return BrokerSelectorUtils.getRandomBroker(Arrays.asList(tableNames), _brokerData.getTableToBrokerMap());
   }
 
   public List<String> getBrokers() {

@@ -19,8 +19,10 @@
 package org.apache.pinot.segment.local.realtime.converter;
 
 import com.google.common.annotations.VisibleForTesting;
+import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.pinot.common.metrics.ServerGauge;
 import org.apache.pinot.common.metrics.ServerMetrics;
 import org.apache.pinot.segment.local.indexsegment.mutable.MutableSegmentImpl;
@@ -45,44 +47,39 @@ public class RealtimeSegmentConverter {
   private final String _tableName;
   private final TableConfig _tableConfig;
   private final String _segmentName;
-  private final ColumnIndicesForRealtimeTable _columnIndicesForRealtimeTable;
   private final boolean _nullHandlingEnabled;
+  private final boolean _enableColumnMajor;
 
   public RealtimeSegmentConverter(MutableSegmentImpl realtimeSegment, SegmentZKPropsConfig segmentZKPropsConfig,
       String outputPath, Schema schema, String tableName, TableConfig tableConfig, String segmentName,
-      ColumnIndicesForRealtimeTable cdc, boolean nullHandlingEnabled) {
+      boolean nullHandlingEnabled) {
     _realtimeSegmentImpl = realtimeSegment;
     _segmentZKPropsConfig = segmentZKPropsConfig;
     _outputPath = outputPath;
-    _columnIndicesForRealtimeTable = cdc;
-    if (cdc.getSortedColumn() != null) {
-      _columnIndicesForRealtimeTable.getInvertedIndexColumns().remove(cdc.getSortedColumn());
-    }
     _dataSchema = getUpdatedSchema(schema);
     _tableName = tableName;
     _tableConfig = tableConfig;
     _segmentName = segmentName;
     _nullHandlingEnabled = nullHandlingEnabled;
+    if (_tableConfig.getIngestionConfig() != null
+        && _tableConfig.getIngestionConfig().getStreamIngestionConfig() != null) {
+      _enableColumnMajor =
+          _tableConfig.getIngestionConfig().getStreamIngestionConfig().getColumnMajorSegmentBuilderEnabled();
+    } else {
+      _enableColumnMajor = _tableConfig.getIndexingConfig().isColumnMajorSegmentBuilderEnabled();
+    }
   }
 
-  public void build(@Nullable SegmentVersion segmentVersion, ServerMetrics serverMetrics)
+  public void build(@Nullable SegmentVersion segmentVersion, @Nullable ServerMetrics serverMetrics)
       throws Exception {
-    SegmentGeneratorConfig genConfig = new SegmentGeneratorConfig(_tableConfig, _dataSchema);
+    SegmentGeneratorConfig genConfig = new SegmentGeneratorConfig(_tableConfig, _dataSchema, true);
+
     // The segment generation code in SegmentColumnarIndexCreator will throw
     // exception if start and end time in time column are not in acceptable
     // range. We don't want the realtime consumption to stop (if an exception
     // is thrown) and thus the time validity check is explicitly disabled for
     // realtime segment generation
     genConfig.setSegmentTimeValueCheck(false);
-    if (_columnIndicesForRealtimeTable.getInvertedIndexColumns() != null) {
-      for (String column : _columnIndicesForRealtimeTable.getInvertedIndexColumns()) {
-        genConfig.createInvertedIndexForColumn(column);
-      }
-    }
-
-    if (_columnIndicesForRealtimeTable.getVarLengthDictionaryColumns() != null) {
-      genConfig.setVarLengthDictionaryColumns(_columnIndicesForRealtimeTable.getVarLengthDictionaryColumns());
-    }
 
     if (segmentVersion != null) {
       genConfig.setSegmentVersion(segmentVersion);
@@ -90,27 +87,36 @@ public class RealtimeSegmentConverter {
     genConfig.setTableName(_tableName);
     genConfig.setOutDir(_outputPath);
     genConfig.setSegmentName(_segmentName);
-    genConfig.setTextIndexCreationColumns(_columnIndicesForRealtimeTable.getTextIndexColumns());
-    genConfig.setFSTIndexCreationColumns(_columnIndicesForRealtimeTable.getFstIndexColumns());
     SegmentPartitionConfig segmentPartitionConfig = _realtimeSegmentImpl.getSegmentPartitionConfig();
     genConfig.setSegmentPartitionConfig(segmentPartitionConfig);
-    genConfig.setNullHandlingEnabled(_nullHandlingEnabled);
+    genConfig.setDefaultNullHandlingEnabled(_nullHandlingEnabled);
     genConfig.setSegmentZKPropsConfig(_segmentZKPropsConfig);
+
+    // flush any artifacts to disk to improve mutable to immutable segment conversion
+    _realtimeSegmentImpl.commit();
 
     SegmentIndexCreationDriverImpl driver = new SegmentIndexCreationDriverImpl();
     try (PinotSegmentRecordReader recordReader = new PinotSegmentRecordReader()) {
+      String sortedColumn = null;
+      List<String> columnSortOrder = genConfig.getColumnSortOrder();
+      if (CollectionUtils.isNotEmpty(columnSortOrder)) {
+        sortedColumn = columnSortOrder.get(0);
+      }
       int[] sortedDocIds =
-          _columnIndicesForRealtimeTable.getSortedColumn() != null
-              ? _realtimeSegmentImpl.getSortedDocIdIterationOrderWithSortedColumn(
-                  _columnIndicesForRealtimeTable.getSortedColumn()) : null;
+          sortedColumn != null ? _realtimeSegmentImpl.getSortedDocIdIterationOrderWithSortedColumn(sortedColumn) : null;
       recordReader.init(_realtimeSegmentImpl, sortedDocIds);
       RealtimeSegmentSegmentCreationDataSource dataSource =
           new RealtimeSegmentSegmentCreationDataSource(_realtimeSegmentImpl, recordReader);
       driver.init(genConfig, dataSource, TransformPipeline.getPassThroughPipeline());
-      driver.build();
+
+      if (!_enableColumnMajor) {
+        driver.build();
+      } else {
+        driver.buildByColumn(_realtimeSegmentImpl);
+      }
     }
 
-    if (segmentPartitionConfig != null) {
+    if (segmentPartitionConfig != null && serverMetrics != null) {
       Map<String, ColumnPartitionConfig> columnPartitionMap = segmentPartitionConfig.getColumnPartitionMap();
       for (String columnName : columnPartitionMap.keySet()) {
         int numPartitions = driver.getSegmentStats().getColumnProfileFor(columnName).getPartitions().size();
@@ -124,10 +130,10 @@ public class RealtimeSegmentConverter {
    */
   @VisibleForTesting
   public static Schema getUpdatedSchema(Schema original) {
-    Schema newSchema = new Schema();
-    for (String col : original.getPhysicalColumnNames()) {
-      newSchema.addField(original.getFieldSpecFor(col));
-    }
-    return newSchema;
+    return original.withoutVirtualColumns();
+  }
+
+  public boolean isColumnMajorEnabled() {
+    return _enableColumnMajor;
   }
 }

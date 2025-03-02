@@ -19,10 +19,10 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { makeStyles } from '@material-ui/core/styles';
-import { Box, Button, FormControlLabel, Grid, Switch, Tooltip, Typography } from '@material-ui/core';
+import { Box, Button, Checkbox, FormControlLabel, Grid, Switch, Tooltip, Typography } from '@material-ui/core';
 import { RouteComponentProps, useHistory, useLocation } from 'react-router-dom';
 import { UnControlled as CodeMirror } from 'react-codemirror2';
-import { DISPLAY_SEGMENT_STATUS, TableData, TableSegmentJobs } from 'Models';
+import { DISPLAY_SEGMENT_STATUS, InstanceState, TableData, TableSegmentJobs, TableType } from 'Models';
 import AppLoader from '../components/AppLoader';
 import CustomizedTables from '../components/Table';
 import TableToolbar from '../components/TableToolbar';
@@ -40,8 +40,10 @@ import Confirm from '../components/Confirm';
 import { NotificationContext } from '../components/Notification/NotificationContext';
 import Utils from '../utils/Utils';
 import InfoOutlinedIcon from '@material-ui/icons/InfoOutlined';
-import { get } from "lodash";
+import { get, isEmpty } from "lodash";
 import { SegmentStatusRenderer } from '../components/SegmentStatusRenderer';
+import Skeleton from '@material-ui/lab/Skeleton';
+import NotFound from '../components/NotFound';
 
 const useStyles = makeStyles((theme) => ({
   root: {
@@ -98,8 +100,8 @@ type Props = {
 
 type Summary = {
   tableName: string;
-  reportedSize: string | number;
-  estimatedSize: string | number;
+  reportedSize: number;
+  estimatedSize: number;
 };
 
 const TenantPageDetails = ({ match }: RouteComponentProps<Props>) => {
@@ -108,13 +110,16 @@ const TenantPageDetails = ({ match }: RouteComponentProps<Props>) => {
   const history = useHistory();
   const location = useLocation();
   const [fetching, setFetching] = useState(true);
-  const [tableSummary, setTableSummary] = useState<Summary>({
-    tableName: match.params.tableName,
-    reportedSize: '',
-    estimatedSize: '',
-  });
+  const [tableNotFound, setTableNotFound] = useState(false);
 
-  const [state, setState] = React.useState({
+  const initialTableSummary: Summary = {
+    tableName: match.params.tableName,
+    reportedSize: null,
+    estimatedSize: null,
+  };
+  const [tableSummary, setTableSummary] = useState<Summary>(initialTableSummary);
+
+  const [tableState, setTableState] = React.useState({
     enabled: true,
   });
 
@@ -124,15 +129,14 @@ const TenantPageDetails = ({ match }: RouteComponentProps<Props>) => {
 
   const [showEditConfig, setShowEditConfig] = useState(false);
   const [config, setConfig] = useState('{}');
-  const [instanceCountData, setInstanceCountData] = useState<TableData>({
-    columns: [],
-    records: [],
-  });
 
-  const [segmentList, setSegmentList] = useState<TableData>({
-    columns: [],
-    records: [],
-  });
+  const instanceColumns = ["Instance Name", "# of segments", "Status"];
+  const loadingInstanceData = Utils.getLoadingTableData(instanceColumns);
+  const [instanceCountData, setInstanceCountData] = useState<TableData>(loadingInstanceData);
+
+  const segmentListColumns = ['Segment Name', 'Status'];
+  const loadingSegmentList = Utils.getLoadingTableData(segmentListColumns);
+  const [segmentList, setSegmentList] = useState<TableData>(loadingSegmentList);
 
   const [tableSchema, setTableSchema] = useState<TableData>({
     columns: [],
@@ -148,33 +152,60 @@ const TenantPageDetails = ({ match }: RouteComponentProps<Props>) => {
   const [showRebalanceServerModal, setShowRebalanceServerModal] = useState(false);
   const [schemaJSONFormat, setSchemaJSONFormat] = useState(false);
 
+  // This is quite hacky, but it's the only way to get this to work with the dialog.
+  // The useState variables are simply for the dialog box to know what to render in
+  // the checkbox fields. The actual state of the checkboxes is stored in the refs.
+  // The refs are then used to determine how we delete the table. If you try to use
+  // the state variables in this class, you will not be able to get their latest values.
+  const [dialogCheckboxes, setDialogCheckboxes] = useState({
+    deleteImmediately: false,
+    deleteSchema: false
+  });
+  const deleteImmediatelyRef = useRef(false);
+  const deleteSchemaRef = useRef(false);
+
   const fetchTableData = async () => {
+    // We keep all the fetching inside this component since we need to be able
+    // to handle users making changes to the table and then reloading the json.
     setFetching(true);
-    const result = await PinotMethodUtils.getTableSummaryData(tableName);
-    setTableSummary(result);
-    fetchSegmentData();
+    fetchSyncTableData().then(()=> {
+      setFetching(false);
+      if (!tableNotFound) {
+        fetchAsyncTableData();
+      }
+    });
   };
+
+  const fetchSyncTableData = async () => {
+    return Promise.all([
+      fetchTableSchema(),
+      fetchTableJSON(),
+    ]);
+  }
+
+  const fetchAsyncTableData = async () => {
+    // set async data back to loading
+    setTableSummary(initialTableSummary);
+    setInstanceCountData(loadingInstanceData);
+    setSegmentList(loadingSegmentList);
+
+    // load async data
+    PinotMethodUtils.getTableSummaryData(tableName).then((result) => {
+      setTableSummary(result);
+    });
+    fetchSegmentData()
+  }
 
   const fetchSegmentData = async () => {
     const result = await PinotMethodUtils.getSegmentList(tableName);
-    const {columns, records, externalViewObj} = result;
-    const instanceObj = {};
-    externalViewObj && Object.keys(externalViewObj).map((segmentName)=>{
-      const instanceKeys = Object.keys(externalViewObj[segmentName]);
-      instanceKeys.map((instanceName)=>{
-        if(!instanceObj[instanceName]){
-          instanceObj[instanceName] = 0;
-        }
-        instanceObj[instanceName] += 1;
-      })
-    });
-    const instanceRecords = [];
-    Object.keys(instanceObj).map((instanceName)=>{
-      instanceRecords.push([instanceName, instanceObj[instanceName]]);
-    })
+    const data = await PinotMethodUtils.fetchServerToSegmentsCountData(tableName, tableType);
+    const liveInstanceNames = await PinotMethodUtils.getLiveInstances();
+    const {columns, records} = result;
     setInstanceCountData({
-      columns: ["Instance Name", "# of segments"],
-      records: instanceRecords
+      columns: instanceColumns,
+      records: data.records.map((record) => {
+        return [...record, liveInstanceNames.data.includes(record[0]) ? 'Alive' : 'Dead'];
+      })
     });
 
     const segmentTableRows = [];
@@ -192,17 +223,16 @@ const TenantPageDetails = ({ match }: RouteComponentProps<Props>) => {
         },
       ])
     );
-
     setSegmentList({columns, records: segmentTableRows});
-    fetchTableSchema();
   };
+
 
   const fetchTableSchema = async () => {
     const result = await PinotMethodUtils.getTableSchemaData(tableName);
     if(result.error){
       setSchemaJSON(null);
       setTableSchema({
-        columns: ['Column', 'Type', 'Field Type'],
+        columns: ['Column', 'Type', 'Field Type', 'Multi Value'],
         records: []
       });
     } else {
@@ -210,26 +240,30 @@ const TenantPageDetails = ({ match }: RouteComponentProps<Props>) => {
       const tableSchema = Utils.syncTableSchemaData(result, true);
       setTableSchema(tableSchema);
     }
-    fetchTableJSON();
   };
 
   const fetchTableJSON = async () => {
-    const result = await PinotMethodUtils.getTableDetails(tableName);
-    if(result.error){
-      setFetching(false);
-      dispatch({type: 'error', message: result.error, show: true});
-    } else {
-      const tableObj:any = result.OFFLINE || result.REALTIME;
-      setTableType(tableObj.tableType);
-      setTableConfig(JSON.stringify(result, null, 2));
-      fetchTableState(tableObj.tableType);
-    }
+    return PinotMethodUtils.getTableDetails(tableName).then((result) => {
+      if(result.error){
+        dispatch({type: 'error', message: result.error, show: true});
+      } else {
+        if (isEmpty(result)) {
+          setTableNotFound(true);
+          return;
+        }
+        const tableObj:any = result.OFFLINE || result.REALTIME;
+        setTableType(tableObj.tableType);
+        setTableConfig(JSON.stringify(result, null, 2));
+        return fetchTableState(tableObj.tableType);
+      }
+    });
   };
 
   const fetchTableState = async (type) => {
-    const stateResponse = await PinotMethodUtils.getTableState(tableName, type);
-    setState({enabled: stateResponse.state === 'enabled'});
-    setFetching(false);
+    return PinotMethodUtils.getTableState(tableName, type)
+      .then((stateResponse) => {
+        return setTableState({enabled: stateResponse.state === 'enabled'});
+      });
   };
 
   useEffect(() => {
@@ -238,27 +272,16 @@ const TenantPageDetails = ({ match }: RouteComponentProps<Props>) => {
 
   const handleSwitchChange = (event) => {
     setDialogDetails({
-      title: state.enabled ? 'Disable Table' : 'Enable Table',
-      content: `Are you sure want to ${state.enabled ? 'disable' : 'enable'} this table?`,
+      title: tableState.enabled ? 'Disable Table' : 'Enable Table',
+      content: `Are you sure want to ${tableState.enabled ? 'disable' : 'enable'} this table?`,
       successCb: () => toggleTableState()
     });
     setConfirmDialog(true);
   };
 
   const toggleTableState = async () => {
-    const result = await PinotMethodUtils.toggleTableState(tableName, state.enabled ? 'disable' : 'enable', tableType.toLowerCase());
-    if(!result.error && result[0].state){
-      if(result[0].state.successful){
-        dispatch({type: 'success', message: result[0].state.message, show: true});
-        setState({ enabled: !state.enabled });
-        fetchTableData();
-      } else {
-        dispatch({type: 'error', message: result[0].state.message, show: true});
-      }
-      closeDialog();
-    } else {
-      syncResponse(result);
-    }
+    const result = await PinotMethodUtils.toggleTableState(tableName, tableState.enabled ? InstanceState.DISABLE : InstanceState.ENABLE, tableType.toLowerCase() as TableType);
+    syncResponse(result);
   };
 
   const handleConfigChange = (value: string) => {
@@ -291,45 +314,66 @@ const TenantPageDetails = ({ match }: RouteComponentProps<Props>) => {
   };
 
   const handleDeleteTableAction = () => {
+    // Set checkboxes to the last state when opening dialog
+    setDialogCheckboxes({
+      deleteImmediately: deleteImmediatelyRef.current,
+      deleteSchema: deleteSchemaRef.current
+    });
+
     setDialogDetails({
       title: 'Delete Table',
-      content: 'Are you sure want to delete this table? All data and configs will be deleted.',
-      successCb: () => deleteTable()
+      content:
+        'Are you sure want to delete this table? All data and configs will be deleted.',
+      successCb: () => {
+        deleteTable();
+      },
+      renderChildren: true,
     });
     setConfirmDialog(true);
   };
 
   const deleteTable = async () => {
-    const result = await PinotMethodUtils.deleteTableOp(tableName);
-    if(result.status){
-      dispatch({type: 'success', message: result.status, show: true});
-    } else {
-      dispatch({type: 'error', message: result.error, show: true});
-    }
-    closeDialog();
-    if(result.status){
-      setTimeout(()=>{
-        if(tenantName){
-          history.push(Utils.navigateToPreviousPage(location, true));  
-        } else {
-          history.push('/tables');
+    let message = '';
+    let tableDeleted = false;
+    let schemaDeleted = false;
+
+    try {
+      const tableRes = await PinotMethodUtils.deleteTableOp(tableName, deleteImmediatelyRef.current ? '0d' : undefined);
+
+      if (tableRes.status) {
+        message = tableRes.status;
+        tableDeleted = true;
+
+        if (deleteSchemaRef.current) {
+          const schemaRes = await PinotMethodUtils.deleteSchemaOp(schemaJSON.schemaName);
+          if (schemaRes.status) {
+            message += ". " + schemaRes.status;
+            schemaDeleted = true;
+          } else {
+            message += ". " + schemaRes.error || "Unknown error deleting schema";
+          }
         }
-      }, 1000);
+      } else {
+        message = tableRes.error || "Unknown error deleting table";
+      }
+
+      const isSuccess = tableDeleted && (!deleteSchemaRef.current || schemaDeleted);
+      dispatch({ type: isSuccess ? 'success' : 'error', message, show: true });
+      closeDialog();
+
+      if (tableDeleted) {
+        setTimeout(() => {
+          if (tenantName) {
+            history.push(Utils.navigateToPreviousPage(location, true));
+          } else {
+            history.push('/tables');
+          }
+        }, 1000);
+      }
+    } catch (error) {
+      dispatch({ type: 'error', message: error.toString(), show: true });
+      closeDialog();
     }
-  };
-
-  const handleDeleteSchemaAction = () => {
-    setDialogDetails({
-      title: 'Delete Schema',
-      content: 'Are you sure want to delete this schema? Any tables using this schema might not function correctly.',
-      successCb: () => deleteSchema()
-    });
-    setConfirmDialog(true);
-  };
-
-  const deleteSchema = async () => {
-    const result = await PinotMethodUtils.deleteSchemaOp(schemaJSON.schemaName);
-    syncResponse(result);
   };
 
   const handleReloadSegments = () => {
@@ -348,7 +392,7 @@ const TenantPageDetails = ({ match }: RouteComponentProps<Props>) => {
 
     try {
       // extract reloadJobId from response
-      const statusResponseObj = JSON.parse(result.status.replace("Segment reload details: ", ""))
+      const statusResponseObj = JSON.parse(result.status)
       reloadJobId = get(statusResponseObj, `${tableName}.reloadJobId`, null)
     } catch {
       reloadJobId = null;
@@ -384,7 +428,7 @@ const TenantPageDetails = ({ match }: RouteComponentProps<Props>) => {
       setShowReloadStatusModal(true);
       const [reloadStatusData, tableJobsData] = await Promise.all([
         PinotMethodUtils.reloadStatusOp(tableName, tableType),
-        PinotMethodUtils.fetchTableJobs(tableName),
+        PinotMethodUtils.fetchTableJobs(tableName, "RELOAD_SEGMENT"),
       ]);
 
       if(reloadStatusData.error || tableJobsData.error) {
@@ -420,236 +464,299 @@ const TenantPageDetails = ({ match }: RouteComponentProps<Props>) => {
     setDialogDetails(null);
   };
 
-  return fetching ? (
-    <AppLoader />
-  ) : (
-    <Grid
-      item
-      xs
-      style={{
-        padding: 20,
-        backgroundColor: 'white',
-        maxHeight: 'calc(100vh - 70px)',
-        overflowY: 'auto',
-      }}
-    >
-      <div className={classes.operationDiv}>
-        <SimpleAccordion
-          headerTitle="Operations"
-          showSearchBox={false}
-        >
-          <div>
-            <CustomButton
-              onClick={()=>{
-                setActionType('editTable');
-                setConfig(tableConfig);
-                setShowEditConfig(true);
-              }}
-              tooltipTitle="Edit Table"
-              enableTooltip={true}
-            >
-              Edit Table
-            </CustomButton>
-            <CustomButton
-              onClick={handleDeleteTableAction}
-              tooltipTitle="Delete Table"
-              enableTooltip={true}
-            >
-              Delete Table
-            </CustomButton>
-            <CustomButton
-              onClick={()=>{
-                setActionType('editSchema');
-                setConfig(JSON.stringify(schemaJSON, null, 2));
-                setShowEditConfig(true);
-              }}
-              tooltipTitle="Edit Schema"
-              enableTooltip={true}
-            >
-              Edit Schema
-            </CustomButton>
-            <CustomButton
-              isDisabled={!schemaJSON} onClick={handleDeleteSchemaAction}
-              tooltipTitle="Delete Schema"
-              enableTooltip={true}
-            >
-              Delete Schema
-            </CustomButton>
-            <CustomButton
-              isDisabled={true} onClick={()=>{console.log('truncate table');}}
-              // tooltipTitle="Truncate Table"
-              // enableTooltip={true}
-            >
-              Truncate Table
-            </CustomButton>
-            <CustomButton
-              onClick={handleReloadSegments}
-              tooltipTitle="Reloads all segments of the table to apply changes such as indexing, column default values, etc"
-              enableTooltip={true}
-            >
-              Reload All Segments
-            </CustomButton>
-            <CustomButton
-              onClick={handleReloadStatus}
-              tooltipTitle="The status of all indexes for each column"
-              enableTooltip={true}
-            >
-              Reload Status
-            </CustomButton>
-            <CustomButton
-              onClick={()=>{setShowRebalanceServerModal(true);}}
-              tooltipTitle="Recalculates the segment to server mapping for this table"
-              enableTooltip={true}
-            >
-              Rebalance Servers
-            </CustomButton>
-            <CustomButton
-              onClick={handleRebalanceBrokers}
-              tooltipTitle="Rebuilds brokerResource mapping for this table"
-              enableTooltip={true}
-            >
-              Rebalance Brokers
-            </CustomButton>
-            <Tooltip title="Disabling will disable the table for queries, consumption and data push" arrow placement="top">
-            <FormControlLabel
-              control={
-                <Switch
-                  checked={state.enabled}
-                  onChange={handleSwitchChange}
-                  name="enabled"
-                  color="primary"
-                />
-              }
-              label="Enable"
-            />
-            </Tooltip>
-          </div>
-        </SimpleAccordion>
-      </div>
-      <div className={classes.highlightBackground}>
-        <TableToolbar name="Summary" showSearchBox={false} />
-        <Grid container className={classes.body}>
-          <Grid item xs={4}>
-            <strong>Table Name:</strong> {tableSummary.tableName}
-          </Grid>
-          <Tooltip title="Uncompressed size of all data segments"  arrow placement="top-start">
-          <Grid item xs={2}>
-            <strong>Reported Size:</strong> {Utils.formatBytes(tableSummary.reportedSize)}
-          </Grid>
-          </Tooltip>
-          <Grid item xs={2}></Grid>
-          <Tooltip title="Estimated size of all data segments, in case any servers are not reachable for actual size" arrow placement="top-start">
-            <Grid item xs={2}>
-              <strong>Estimated Size: </strong>
-              {Utils.formatBytes(tableSummary.estimatedSize)}
-            </Grid>
-          </Tooltip>
-          <Grid item xs={2}></Grid>
-        </Grid>
-      </div>
-
-      <Grid container spacing={2}>
-        <Grid item xs={6}>
-          <div className={classes.sqlDiv}>
-            <SimpleAccordion
-              headerTitle="Table Config"
-              showSearchBox={false}
-            >
-              <CodeMirror
-                options={jsonoptions}
-                value={tableConfig}
-                className={classes.queryOutput}
-                autoCursor={false}
+  if (fetching) {
+    return <AppLoader />;
+  } else if (tableNotFound) {
+    return <NotFound message={`Table ${tableName} not found`} />;
+  } else {
+    return (
+      <Grid
+        item
+        xs
+        style={{
+          padding: 20,
+          backgroundColor: 'white',
+          maxHeight: 'calc(100vh - 70px)',
+          overflowY: 'auto',
+        }}
+      >
+        <div className={classes.operationDiv}>
+          <SimpleAccordion
+            headerTitle="Operations"
+            showSearchBox={false}
+          >
+            <div>
+              <CustomButton
+                onClick={()=>{
+                  setActionType('editTable');
+                  setConfig(tableConfig);
+                  setShowEditConfig(true);
+                }}
+                tooltipTitle="Edit Table"
+                enableTooltip={true}
+              >
+                Edit Table
+              </CustomButton>
+              <CustomButton
+                onClick={handleDeleteTableAction}
+                tooltipTitle="Delete Table"
+                enableTooltip={true}
+              >
+                Delete Table
+              </CustomButton>
+              <CustomButton
+                onClick={()=>{
+                  setActionType('editSchema');
+                  setConfig(JSON.stringify(schemaJSON, null, 2));
+                  setShowEditConfig(true);
+                }}
+                tooltipTitle="Edit Schema"
+                enableTooltip={true}
+              >
+                Edit Schema
+              </CustomButton>
+              <CustomButton
+                onClick={handleReloadSegments}
+                tooltipTitle="Reloads all segments of the table to apply changes such as indexing, column default values, etc"
+                enableTooltip={true}
+              >
+                Reload All Segments
+              </CustomButton>
+              <CustomButton
+                onClick={handleReloadStatus}
+                tooltipTitle="The status of all indexes for each column"
+                enableTooltip={true}
+              >
+                Reload Status
+              </CustomButton>
+              <CustomButton
+                onClick={()=>{setShowRebalanceServerModal(true);}}
+                tooltipTitle="Recalculates the segment to server mapping for this table"
+                enableTooltip={true}
+              >
+                Rebalance Servers
+              </CustomButton>
+              <CustomButton
+                onClick={handleRebalanceBrokers}
+                tooltipTitle="Rebuilds brokerResource mapping for this table"
+                enableTooltip={true}
+              >
+                Rebalance Brokers
+              </CustomButton>
+              <Tooltip title="Disabling will disable the table for queries, consumption and data push" arrow placement="top">
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={tableState.enabled}
+                    onChange={handleSwitchChange}
+                    name="enabled"
+                    color="primary"
+                  />
+                }
+                label="Enable"
               />
-            </SimpleAccordion>
-          </div>
-          <CustomizedTables
-            title={"Segments - " + segmentList.records.length}
-            data={segmentList}
-            baseURL={
-              tenantName && `/tenants/${tenantName}/table/${tableName}/` ||
-              instanceName && `/instance/${instanceName}/table/${tableName}/` ||
-              `/tenants/table/${tableName}/`
-            }
-            addLinks
-            showSearchBox={true}
-            inAccordionFormat={true}
-          />
-        </Grid>
-        <Grid item xs={6}>
-          {!schemaJSONFormat ?
+              </Tooltip>
+            </div>
+          </SimpleAccordion>
+        </div>
+        <div className={classes.highlightBackground}>
+          <TableToolbar name="Summary" showSearchBox={false} />
+          <Grid container spacing={2} alignItems="center" className={classes.body}>
+            <Grid item xs={4}>
+              <strong>Table Name:</strong> {tableSummary.tableName}
+            </Grid>
+            <Grid item container xs={4} wrap="nowrap" spacing={1}>
+              <Grid item>
+                <Tooltip title="Uncompressed size of all data segments with replication" arrow placement="top">
+                  <strong>Reported Size:</strong>
+                </Tooltip>
+              </Grid>
+              <Grid item>
+                {/* Now Skeleton can be a block element because it's the only thing inside this grid item */}
+                {tableSummary.reportedSize ?
+                  Utils.formatBytes(tableSummary.reportedSize) :
+                  <Skeleton variant="text" animation="wave" width={100} />
+                }
+              </Grid>
+            </Grid>
+            <Grid item container xs={4} wrap="nowrap" spacing={1}>
+              <Grid item>
+                <Tooltip title="Estimated size of all data segments with replication, in case any servers are not reachable for actual size" arrow placement="top-start">
+                  <strong>Estimated Size: </strong>
+                </Tooltip>
+              </Grid>
+              <Grid item>
+                {/* Now Skeleton can be a block element because it's the only thing inside this grid item */}
+                {tableSummary.estimatedSize ?
+                  Utils.formatBytes(tableSummary.estimatedSize) :
+                  <Skeleton variant="text" animation="wave" width={100} />
+                }
+              </Grid>
+            </Grid>
+          </Grid>
+        </div>
+
+        <Grid container spacing={2}>
+          <Grid item xs={6}>
+            <div className={classes.sqlDiv}>
+              <SimpleAccordion
+                headerTitle="Table Config"
+                showSearchBox={false}
+              >
+                <CodeMirror
+                  options={jsonoptions}
+                  value={tableConfig}
+                  className={classes.queryOutput}
+                  autoCursor={false}
+                />
+              </SimpleAccordion>
+            </div>
             <CustomizedTables
-              title="Table Schema"
-              data={tableSchema}
+              title={"Segments - " + segmentList.records.length}
+              data={segmentList}
+              baseURL={
+                tenantName && `/tenants/${tenantName}/table/${tableName}/` ||
+                instanceName && `/instance/${instanceName}/table/${tableName}/` ||
+                `/tenants/table/${tableName}/`
+              }
+              addLinks
               showSearchBox={true}
               inAccordionFormat={true}
-              accordionToggleObject={{
-                toggleName: "JSON Format",
-                toggleValue: schemaJSONFormat,
-                toggleChangeHandler: ()=>{setSchemaJSONFormat(!schemaJSONFormat);}
-              }}
             />
-          :
-          <div className={classes.sqlDiv}>
-            <SimpleAccordion
-              headerTitle="Table Schema"
-              showSearchBox={false}
-              accordionToggleObject={{
-                toggleName: "JSON Format",
-                toggleValue: schemaJSONFormat,
-                toggleChangeHandler: ()=>{setSchemaJSONFormat(!schemaJSONFormat);}
-              }}
-            >
-              <CodeMirror
-                options={jsonoptions}
-                value={JSON.stringify(schemaJSON, null, 2)}
-                className={classes.queryOutput}
-                autoCursor={false}
+          </Grid>
+          <Grid item xs={6}>
+            {!schemaJSONFormat ?
+              <CustomizedTables
+                title="Table Schema"
+                data={tableSchema}
+                showSearchBox={true}
+                inAccordionFormat={true}
+                accordionToggleObject={{
+                  toggleName: "JSON Format",
+                  toggleValue: schemaJSONFormat,
+                  toggleChangeHandler: ()=>{setSchemaJSONFormat(!schemaJSONFormat);}
+                }}
               />
-            </SimpleAccordion>
-          </div>
-          }
-          <CustomizedTables
-            title={"Instance Count - " + instanceCountData.records.length}
-            data={instanceCountData}
-            showSearchBox={true}
-            inAccordionFormat={true}
-          />
+            :
+            <div className={classes.sqlDiv}>
+              <SimpleAccordion
+                headerTitle="Table Schema"
+                showSearchBox={false}
+                accordionToggleObject={{
+                  toggleName: "JSON Format",
+                  toggleValue: schemaJSONFormat,
+                  toggleChangeHandler: ()=>{setSchemaJSONFormat(!schemaJSONFormat);}
+                }}
+              >
+                <CodeMirror
+                  options={jsonoptions}
+                  value={JSON.stringify(schemaJSON, null, 2)}
+                  className={classes.queryOutput}
+                  autoCursor={false}
+                />
+              </SimpleAccordion>
+            </div>
+            }
+            <CustomizedTables
+              title={"Instance Count - " + instanceCountData.records.length}
+              data={instanceCountData}
+              addLinks
+              baseURL="/instance/"
+              showSearchBox={true}
+              inAccordionFormat={true}
+            />
+          </Grid>
         </Grid>
+        <EditConfigOp
+          showModal={showEditConfig}
+          hideModal={() => {
+            setShowEditConfig(false);
+          }}
+          saveConfig={saveConfigAction}
+          config={config}
+          handleConfigChange={handleConfigChange}
+        />
+        {showReloadStatusModal && (
+          <ReloadStatusOp
+            hideModal={() => {
+              setShowReloadStatusModal(false);
+              setReloadStatusData(null);
+            }}
+            reloadStatusData={reloadStatusData}
+            tableJobsData={tableJobsData}
+          />
+        )}
+        {showRebalanceServerModal && (
+          <RebalanceServerTableOp
+            hideModal={() => {
+              setShowRebalanceServerModal(false);
+            }}
+            tableType={tableType.toUpperCase()}
+            tableName={tableName}
+          />
+        )}
+        {confirmDialog && dialogDetails && (
+          <Confirm
+            openDialog={confirmDialog}
+            dialogTitle={dialogDetails.title}
+            dialogContent={dialogDetails.content}
+            successCallback={dialogDetails.successCb}
+            children={
+              dialogDetails.renderChildren && <>
+                <Tooltip
+                  title="Delete table and all segments immediately.
+                         If not checked, all segments will be copied over to a separate path
+                         and kept until the cluster default retention period is met."
+                  arrow
+                  placement="right"
+                >
+                  <FormControlLabel
+                    control={
+                      <Checkbox
+                        checked={dialogCheckboxes.deleteImmediately}
+                        onChange={(e) => {
+                          const { checked } = e.target;
+                          setDialogCheckboxes(prev => ({
+                            ...prev,
+                            deleteImmediately: checked
+                          }));
+                          deleteImmediatelyRef.current = checked
+                        }}
+                        color="primary"
+                      />
+                    }
+                    label="Delete Immediately"
+                  />
+                </Tooltip>
+                <Tooltip title="If the table is successfully deleted, also delete the schema associated with this table." arrow placement="right">
+                  <FormControlLabel
+                    control={
+                      <Checkbox
+                        checked={dialogCheckboxes.deleteSchema}
+                        onChange={(e) => {
+                          const { checked } = e.target;
+                          setDialogCheckboxes(prev => ({
+                            ...prev,
+                            deleteSchema: checked
+                          }));
+                          deleteSchemaRef.current = checked;
+                        }}
+                        color="primary"
+                      />
+                    }
+                    label="Delete Schema"
+                  />
+                </Tooltip>
+              </>
+            }
+            closeDialog={closeDialog}
+            dialogYesLabel="Yes"
+            dialogNoLabel="No"
+          />
+        )}
       </Grid>
-      <EditConfigOp
-        showModal={showEditConfig}
-        hideModal={()=>{setShowEditConfig(false);}}
-        saveConfig={saveConfigAction}
-        config={config}
-        handleConfigChange={handleConfigChange}
-      />
-      {
-        showReloadStatusModal &&
-        <ReloadStatusOp
-          hideModal={()=>{setShowReloadStatusModal(false); setReloadStatusData(null)}}
-          reloadStatusData={reloadStatusData}
-          tableJobsData={tableJobsData}
-        />
-      }
-      {showRebalanceServerModal &&
-        <RebalanceServerTableOp
-          hideModal={()=>{setShowRebalanceServerModal(false)}}
-          tableType={tableType.toUpperCase()}
-          tableName={tableName}
-        />
-      }
-      {confirmDialog && dialogDetails && <Confirm
-        openDialog={confirmDialog}
-        dialogTitle={dialogDetails.title}
-        dialogContent={dialogDetails.content}
-        successCallback={dialogDetails.successCb}
-        closeDialog={closeDialog}
-        dialogYesLabel='Yes'
-        dialogNoLabel='No'
-      />}
-    </Grid>
-  );
+    );
+  }
 };
 
 export default TenantPageDetails;

@@ -25,7 +25,7 @@ import java.util.List;
 import java.util.PriorityQueue;
 import java.util.Set;
 import javax.annotation.Nullable;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.pinot.spi.data.readers.GenericRow;
 import org.apache.pinot.spi.data.readers.RecordReader;
 import org.apache.pinot.spi.data.readers.RecordReaderConfig;
@@ -109,11 +109,6 @@ public class MultiplePinotSegmentRecordReader implements RecordReader {
   }
 
   @Override
-  public GenericRow next() {
-    return next(new GenericRow());
-  }
-
-  @Override
   public GenericRow next(GenericRow reuse) {
     if (_sortOrder != null) {
       GenericRowWithReader genericRowComparable = _priorityQueue.poll();
@@ -144,7 +139,8 @@ public class MultiplePinotSegmentRecordReader implements RecordReader {
   }
 
   @Override
-  public void rewind() {
+  public void rewind()
+      throws IOException {
     for (PinotSegmentRecordReader recordReader : _recordReaders) {
       recordReader.rewind();
     }

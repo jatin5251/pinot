@@ -32,6 +32,9 @@ import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import org.apache.pinot.broker.broker.BrokerAdminApiApplication;
 import org.apache.pinot.common.utils.PinotAppConfigs;
+import org.apache.pinot.core.auth.Actions;
+import org.apache.pinot.core.auth.Authorize;
+import org.apache.pinot.core.auth.TargetType;
 import org.apache.pinot.spi.env.PinotConfiguration;
 
 import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_KEY;
@@ -43,7 +46,8 @@ import static org.apache.pinot.spi.utils.CommonConstants.SWAGGER_AUTHORIZATION_K
  */
 @Api(tags = "AppConfig", authorizations = {@Authorization(value = SWAGGER_AUTHORIZATION_KEY)})
 @SwaggerDefinition(securityDefinition = @SecurityDefinition(apiKeyAuthDefinitions = @ApiKeyAuthDefinition(name =
-    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY)))
+    HttpHeaders.AUTHORIZATION, in = ApiKeyAuthDefinition.ApiKeyLocation.HEADER, key = SWAGGER_AUTHORIZATION_KEY,
+    description = "The format of the key is  ```\"Basic <token>\" or \"Bearer <token>\"```")))
 @Path("/")
 public class PinotBrokerAppConfigs {
 
@@ -52,6 +56,7 @@ public class PinotBrokerAppConfigs {
 
   @GET
   @Path("/appconfigs")
+  @Authorize(targetType = TargetType.CLUSTER, action = Actions.Cluster.GET_APP_CONFIG)
   @Produces(MediaType.APPLICATION_JSON)
   public String getAppConfigs() {
     PinotConfiguration pinotConfiguration =

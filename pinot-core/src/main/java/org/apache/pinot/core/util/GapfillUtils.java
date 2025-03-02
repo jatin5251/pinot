@@ -107,7 +107,7 @@ public class GapfillUtils {
       case BYTES_ARRAY:
         return new byte[0][0];
       default:
-        throw new IllegalStateException(String.format("Cannot provide the default value for the type: %s", dataType));
+        throw new IllegalStateException("Cannot provide the default value for the type: " + dataType);
     }
   }
 
@@ -277,9 +277,8 @@ public class GapfillUtils {
       return pinotQuery;
     }
 
-    // Carry over the query and debug options from the original query
+    // Carry over the query options from the original query
     Map<String, String> queryOptions = pinotQuery.getQueryOptions();
-    Map<String, String> debugOptions = pinotQuery.getDebugOptions();
 
     while (pinotQuery.getDataSource().getSubquery() != null) {
       pinotQuery = pinotQuery.getDataSource().getSubquery();
@@ -321,7 +320,6 @@ public class GapfillUtils {
     }
 
     strippedPinotQuery.setQueryOptions(queryOptions);
-    strippedPinotQuery.setDebugOptions(debugOptions);
     return strippedPinotQuery;
   }
 

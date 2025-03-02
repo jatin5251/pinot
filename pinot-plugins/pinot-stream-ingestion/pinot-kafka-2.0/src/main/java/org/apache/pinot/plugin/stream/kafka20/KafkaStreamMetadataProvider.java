@@ -19,14 +19,24 @@
 package org.apache.pinot.plugin.stream.kafka20;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Sets;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.stream.Collectors;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.ListTopicsResult;
 import org.apache.kafka.clients.consumer.OffsetAndTimestamp;
+import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.errors.TimeoutException;
+import org.apache.pinot.plugin.stream.kafka.KafkaConsumerPartitionLag;
 import org.apache.pinot.spi.stream.ConsumerPartitionState;
 import org.apache.pinot.spi.stream.LongMsgOffset;
 import org.apache.pinot.spi.stream.OffsetCriteria;
@@ -57,7 +67,28 @@ public class KafkaStreamMetadataProvider extends KafkaPartitionLevelConnectionHa
   @Override
   public int fetchPartitionCount(long timeoutMillis) {
     try {
-      return _consumer.partitionsFor(_topic, Duration.ofMillis(timeoutMillis)).size();
+      List<PartitionInfo> partitionInfos = _consumer.partitionsFor(_topic, Duration.ofMillis(timeoutMillis));
+      if (CollectionUtils.isNotEmpty(partitionInfos)) {
+        return partitionInfos.size();
+      }
+      throw new RuntimeException(String.format("Failed to fetch partition information for topic: %s", _topic));
+    } catch (TimeoutException e) {
+      throw new TransientConsumerException(e);
+    }
+  }
+
+  @Override
+  public Set<Integer> fetchPartitionIds(long timeoutMillis) {
+    try {
+      List<PartitionInfo> partitionInfos = _consumer.partitionsFor(_topic, Duration.ofMillis(timeoutMillis));
+      if (CollectionUtils.isEmpty(partitionInfos)) {
+        throw new RuntimeException(String.format("Failed to fetch partition information for topic: %s", _topic));
+      }
+      Set<Integer> partitionIds = Sets.newHashSetWithExpectedSize(partitionInfos.size());
+      for (PartitionInfo partitionInfo : partitionInfos) {
+        partitionIds.add(partitionInfo.partition());
+      }
+      return partitionIds;
     } catch (TimeoutException e) {
       throw new TransientConsumerException(e);
     }
@@ -82,9 +113,9 @@ public class KafkaStreamMetadataProvider extends KafkaPartitionLevelConnectionHa
         if (offsetAndTimestamp == null) {
           offset = _consumer.endOffsets(Collections.singletonList(_topicPartition), Duration.ofMillis(timeoutMillis))
               .get(_topicPartition);
-          LOGGER.warn("initial offset type is period and its value evaluates "
-              + "to null hence proceeding with offset " + offset + "for topic " + _topicPartition.topic()
-              + " partition " + _topicPartition.partition());
+          LOGGER.warn(
+              "initial offset type is period and its value evaluates to null hence proceeding with offset {} for "
+                  + "topic {} partition {}", offset, _topicPartition.topic(), _topicPartition.partition());
         } else {
           offset = offsetAndTimestamp.offset();
         }
@@ -94,9 +125,9 @@ public class KafkaStreamMetadataProvider extends KafkaPartitionLevelConnectionHa
         if (offsetAndTimestamp == null) {
           offset = _consumer.endOffsets(Collections.singletonList(_topicPartition), Duration.ofMillis(timeoutMillis))
               .get(_topicPartition);
-          LOGGER.warn("initial offset type is timestamp and its value evaluates "
-              + "to null hence proceeding with offset " + offset + "for topic " + _topicPartition.topic()
-              + " partition " + _topicPartition.partition());
+          LOGGER.warn(
+              "initial offset type is timestamp and its value evaluates to null hence proceeding with offset {} for "
+                  + "topic {} partition {}", offset, _topicPartition.topic(), _topicPartition.partition());
         } else {
           offset = offsetAndTimestamp.offset();
         }
@@ -137,6 +168,36 @@ public class KafkaStreamMetadataProvider extends KafkaPartitionLevelConnectionHa
       perPartitionLag.put(entry.getKey(), new KafkaConsumerPartitionLag(offsetLagString, availabilityLagMs));
     }
     return perPartitionLag;
+  }
+
+  @Override
+  public List<TopicMetadata> getTopics() {
+    try (AdminClient adminClient = createAdminClient()) {
+      ListTopicsResult result = adminClient.listTopics();
+      if (result == null) {
+        return Collections.emptyList();
+      }
+      return result.names()
+          .get()
+          .stream()
+          .map(topic -> new KafkaTopicMetadata().setName(topic))
+          .collect(Collectors.toList());
+    } catch (ExecutionException | InterruptedException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public static class KafkaTopicMetadata implements TopicMetadata {
+    private String _name;
+
+    public String getName() {
+      return _name;
+    }
+
+    public KafkaTopicMetadata setName(String name) {
+      _name = name;
+      return this;
+    }
   }
 
   @Override

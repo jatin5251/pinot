@@ -30,9 +30,9 @@ import java.util.HashMap;
 import java.util.Map;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
-import org.apache.commons.lang.RandomStringUtils;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.pinot.common.utils.TarGzCompressionUtils;
+import org.apache.pinot.common.utils.TarCompressionUtils;
 import org.apache.pinot.controller.api.resources.SuccessResponse;
 import org.apache.pinot.segment.local.utils.IngestionUtils;
 import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
@@ -92,9 +92,9 @@ public class FileIngestionHelper {
     String tableNameWithType = _tableConfig.getTableName();
     // 1. append a timestamp for easy debugging
     // 2. append a random string to avoid using the same working directory when multiple tasks are running in parallel
-    File workingDir = new File(_ingestionDir,
+    File workingDir = org.apache.pinot.common.utils.FileUtils.concatAndValidateFile(_ingestionDir,
         String.format("%s_%s_%d_%s", WORKING_DIR_PREFIX, tableNameWithType, System.currentTimeMillis(),
-            RandomStringUtils.random(10, true, false)));
+            RandomStringUtils.random(10, true, false)), "Invalid table name: %S", tableNameWithType);
     LOGGER.info("Starting ingestion of {} payload to table: {} using working dir: {}", payload._payloadType,
         tableNameWithType, workingDir.getAbsolutePath());
 
@@ -148,7 +148,7 @@ public class FileIngestionHelper {
       // Tar segment dir
       File segmentTarFile =
           new File(segmentTarDir, segmentName + org.apache.pinot.spi.ingestion.batch.spec.Constants.TAR_GZ_FILE_EXT);
-      TarGzCompressionUtils.createTarGzFile(new File(outputDir, segmentName), segmentTarFile);
+      TarCompressionUtils.createCompressedTarFile(new File(outputDir, segmentName), segmentTarFile);
 
       // Upload segment
       IngestionConfig ingestionConfigOverride = new IngestionConfig();
@@ -179,8 +179,7 @@ public class FileIngestionHelper {
     String sourceFileURIScheme = sourceFileURI.getScheme();
     if (!PinotFSFactory.isSchemeSupported(sourceFileURIScheme)) {
       PinotFSFactory.register(sourceFileURIScheme, batchConfigMap.get(BatchConfigProperties.INPUT_FS_CLASS),
-          IngestionConfigUtils.getInputFsProps(IngestionConfigUtils.getConfigMapWithPrefix(
-              batchConfigMap, BatchConfigProperties.INPUT_FS_PROP_PREFIX)));
+          IngestionConfigUtils.getInputFsProps(batchConfigMap));
     }
     PinotFSFactory.create(sourceFileURIScheme).copyToLocalFile(sourceFileURI, destFile);
   }

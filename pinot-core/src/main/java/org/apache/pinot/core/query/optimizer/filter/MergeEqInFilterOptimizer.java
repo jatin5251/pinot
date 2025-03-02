@@ -18,17 +18,17 @@
  */
 package org.apache.pinot.core.query.optimizer.filter;
 
+import com.google.common.collect.Maps;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import javax.annotation.Nullable;
 import org.apache.pinot.common.request.Expression;
 import org.apache.pinot.common.request.ExpressionType;
 import org.apache.pinot.common.request.Function;
+import org.apache.pinot.common.request.context.RequestContextUtils;
 import org.apache.pinot.common.utils.request.RequestUtils;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.sql.FilterKind;
@@ -56,70 +56,88 @@ public class MergeEqInFilterOptimizer implements FilterOptimizer {
 
   private Expression optimize(Expression filterExpression) {
     Function function = filterExpression.getFunctionCall();
+    if (function == null) {
+      return filterExpression;
+    }
     String operator = function.getOperator();
     if (operator.equals(FilterKind.OR.name())) {
       List<Expression> children = function.getOperands();
-      Map<Expression, Set<Expression>> valuesMap = new HashMap<>();
-      List<Expression> newChildren = new ArrayList<>();
-      boolean recreateFilter = false;
+      // Key is the lhs of the EQ/IN predicate, value is the map from string representation of the value to the value
+      Map<Expression, Map<String, Expression>> valuesMap = new HashMap<>();
+      List<Expression> newChildren = new ArrayList<>(children.size());
+      boolean[] recreateFilter = new boolean[1];
 
       // Iterate over all the child filters to merge EQ and IN predicates
       for (Expression child : children) {
         Function childFunction = child.getFunctionCall();
-        String childOperator = childFunction.getOperator();
-        assert !childOperator.equals(FilterKind.OR.name());
-        if (childOperator.equals(FilterKind.AND.name()) || childOperator.equals(FilterKind.NOT.name())) {
-          childFunction.getOperands().replaceAll(this::optimize);
+        if (childFunction == null) {
           newChildren.add(child);
-        } else if (childOperator.equals(FilterKind.EQUALS.name())) {
-          List<Expression> operands = childFunction.getOperands();
-          Expression lhs = operands.get(0);
-          Expression value = operands.get(1);
-          Set<Expression> values = valuesMap.get(lhs);
-          if (values == null) {
-            values = new HashSet<>();
-            values.add(value);
-            valuesMap.put(lhs, values);
-          } else {
-            values.add(value);
-            // Recreate filter when multiple predicates can be merged
-            recreateFilter = true;
-          }
-        } else if (childOperator.equals(FilterKind.IN.name())) {
-          List<Expression> operands = childFunction.getOperands();
-          Expression lhs = operands.get(0);
-          Set<Expression> inPredicateValuesSet = new HashSet<>();
-          int numOperands = operands.size();
-          for (int i = 1; i < numOperands; i++) {
-            inPredicateValuesSet.add(operands.get(i));
-          }
-          int numUniqueValues = inPredicateValuesSet.size();
-          if (numUniqueValues == 1 || numUniqueValues != numOperands - 1) {
-            // Recreate filter when the IN predicate contains only 1 value (can be rewritten to EQ predicate), or values
-            // can be de-duplicated
-            recreateFilter = true;
-          }
-          Set<Expression> values = valuesMap.get(lhs);
-          if (values == null) {
-            valuesMap.put(lhs, inPredicateValuesSet);
-          } else {
-            values.addAll(inPredicateValuesSet);
-            // Recreate filter when multiple predicates can be merged
-            recreateFilter = true;
-          }
         } else {
-          newChildren.add(child);
+          String childOperator = childFunction.getOperator();
+          assert !childOperator.equals(FilterKind.OR.name());
+          if (childOperator.equals(FilterKind.AND.name()) || childOperator.equals(FilterKind.NOT.name())) {
+            childFunction.getOperands().replaceAll(this::optimize);
+            newChildren.add(child);
+          } else if (childOperator.equals(FilterKind.EQUALS.name())) {
+            List<Expression> operands = childFunction.getOperands();
+            Expression lhs = operands.get(0);
+            Expression value = operands.get(1);
+            // Use string value to de-duplicate the values to prevent the overhead of Expression.hashCode(). This is
+            // consistent with how server handles predicates.
+            String stringValue = RequestContextUtils.getStringValue(value);
+            valuesMap.compute(lhs, (k, v) -> {
+              if (v == null) {
+                Map<String, Expression> values = new HashMap<>();
+                values.put(stringValue, value);
+                return values;
+              } else {
+                v.put(stringValue, value);
+                // Recreate filter when multiple predicates can be merged
+                recreateFilter[0] = true;
+                return v;
+              }
+            });
+          } else if (childOperator.equals(FilterKind.IN.name())) {
+            List<Expression> operands = childFunction.getOperands();
+            Expression lhs = operands.get(0);
+            valuesMap.compute(lhs, (k, v) -> {
+              if (v == null) {
+                Map<String, Expression> values = getInValues(operands);
+                int numUniqueValues = values.size();
+                if (numUniqueValues == 1 || numUniqueValues != operands.size() - 1) {
+                  // Recreate filter when the IN predicate contains only 1 value (can be rewritten to EQ predicate), or
+                  // values can be de-duplicated
+                  recreateFilter[0] = true;
+                }
+                return values;
+              } else {
+                int numOperands = operands.size();
+                for (int i = 1; i < numOperands; i++) {
+                  Expression value = operands.get(i);
+                  // Use string value to de-duplicate the values to prevent the overhead of Expression.hashCode(). This
+                  // is consistent with how server handles predicates.
+                  String stringValue = RequestContextUtils.getStringValue(value);
+                  v.put(stringValue, value);
+                }
+                // Recreate filter when multiple predicates can be merged
+                recreateFilter[0] = true;
+                return v;
+              }
+            });
+          } else {
+            newChildren.add(child);
+          }
         }
       }
 
-      if (recreateFilter) {
+      if (recreateFilter[0]) {
         if (newChildren.isEmpty() && valuesMap.size() == 1) {
           // Single range without other filters
-          Map.Entry<Expression, Set<Expression>> entry = valuesMap.entrySet().iterator().next();
-          return getFilterExpression(entry.getKey(), entry.getValue());
+          Map.Entry<Expression, Map<String, Expression>> entry = valuesMap.entrySet().iterator().next();
+          return getFilterExpression(entry.getKey(), entry.getValue().values());
         } else {
-          for (Map.Entry<Expression, Set<Expression>> entry : valuesMap.entrySet()) {
-            newChildren.add(getFilterExpression(entry.getKey(), entry.getValue()));
+          for (Map.Entry<Expression, Map<String, Expression>> entry : valuesMap.entrySet()) {
+            newChildren.add(getFilterExpression(entry.getKey(), entry.getValue().values()));
           }
           function.setOperands(newChildren);
           return filterExpression;
@@ -132,17 +150,12 @@ public class MergeEqInFilterOptimizer implements FilterOptimizer {
       return filterExpression;
     } else if (operator.equals(FilterKind.IN.name())) {
       List<Expression> operands = function.getOperands();
-      Expression lhs = operands.get(0);
-      Set<Expression> values = new HashSet<>();
-      int numOperands = operands.size();
-      for (int i = 1; i < numOperands; i++) {
-        values.add(operands.get(i));
-      }
+      Map<String, Expression> values = getInValues(operands);
       int numUniqueValues = values.size();
-      if (numUniqueValues == 1 || numUniqueValues != numOperands - 1) {
-        // Recreate filter when the IN predicate contains only 1 value (can be rewritten to EQ predicate), or values
-        // can be de-duplicated
-        return getFilterExpression(lhs, values);
+      if (numUniqueValues == 1 || numUniqueValues != operands.size() - 1) {
+        // Recreate filter when the IN predicate contains only 1 value (can be rewritten to EQ predicate), or values can
+        // be de-duplicated
+        return getFilterExpression(operands.get(0), values.values());
       } else {
         return filterExpression;
       }
@@ -152,21 +165,34 @@ public class MergeEqInFilterOptimizer implements FilterOptimizer {
   }
 
   /**
+   * Helper method to get the values from the IN predicate. Returns a map from string representation of the value to the
+   * value.
+   */
+  private Map<String, Expression> getInValues(List<Expression> operands) {
+    int numOperands = operands.size();
+    Map<String, Expression> values = Maps.newHashMapWithExpectedSize(numOperands - 1);
+    for (int i = 1; i < numOperands; i++) {
+      Expression value = operands.get(i);
+      // Use string value to de-duplicate the values to prevent the overhead of Expression.hashCode(). This is
+      // consistent with how server handles predicates.
+      String stringValue = RequestContextUtils.getStringValue(value);
+      values.put(stringValue, value);
+    }
+    return values;
+  }
+
+  /**
    * Helper method to construct a EQ or IN predicate filter Expression from the given lhs and values.
    */
-  private static Expression getFilterExpression(Expression lhs, Set<Expression> values) {
+  private static Expression getFilterExpression(Expression lhs, Collection<Expression> values) {
     int numValues = values.size();
     if (numValues == 1) {
-      Expression eqFilter = RequestUtils.getFunctionExpression(FilterKind.EQUALS.name());
-      eqFilter.getFunctionCall().setOperands(Arrays.asList(lhs, values.iterator().next()));
-      return eqFilter;
+      return RequestUtils.getFunctionExpression(FilterKind.EQUALS.name(), lhs, values.iterator().next());
     } else {
-      Expression inFilter = RequestUtils.getFunctionExpression(FilterKind.IN.name());
       List<Expression> operands = new ArrayList<>(numValues + 1);
       operands.add(lhs);
       operands.addAll(values);
-      inFilter.getFunctionCall().setOperands(operands);
-      return inFilter;
+      return RequestUtils.getFunctionExpression(FilterKind.IN.name(), operands);
     }
   }
 }
